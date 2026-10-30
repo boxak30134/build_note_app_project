@@ -133,5 +133,7 @@ export async function seedIfEmpty() {
     },
   });
   for (const n of [n1, n2, n3]) n.plainText = plainTextOf(n.content);
+  n1.updatedAt += 2; // 첫 실행 시 가장 먼저 열릴 샘플
+  n2.updatedAt += 1;
   await db.notes.bulkAdd([n1, n2, n3]);
 }

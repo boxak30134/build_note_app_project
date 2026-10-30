@@ -9,6 +9,7 @@ import { NoteWorkspace } from './components/NoteWorkspace';
 import { WikiSuggestPopup } from './components/WikiSuggestPopup';
 import { ContextMenu } from './components/ContextMenu';
 import { Toasts, ConfirmDialog, PromptDialog, CameraModal } from './components/Dialogs';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { useSettings } from './store/settingsStore';
 import { useTabs } from './store/tabsStore';
 import { useSessions } from './store/sessionStore';
@@ -52,8 +53,9 @@ export default function App() {
       const valid = tabs.filter((_, i) => existing[i] && !existing[i]!.deletedAt);
       if (valid.length !== tabs.length) useTabs.setState({ openDocTabs: valid, activeTabId: valid.includes(useTabs.getState().activeTabId ?? '') ? useTabs.getState().activeTabId : valid[0] ?? null });
       if (valid.length === 0) {
-        const first = await db.notes.filter((n) => !n.deletedAt).first();
-        if (first) useTabs.getState().openTab(first.id);
+        // 최근 수정한 노트를 연다 (첫 실행 시 샘플 '인지부하 이론')
+        const recent = (await db.notes.orderBy('updatedAt').reverse().toArray()).find((n) => !n.deletedAt);
+        if (recent) useTabs.getState().openTab(recent.id);
       }
       setReady(true);
       void indexAllNotes();
@@ -131,7 +133,25 @@ export default function App() {
         )}
         <main className="flex min-w-0 flex-1 flex-col bg-slate-100">
           <TabBar />
-          {ready && openDocTabs.map((id) => <NoteWorkspace key={id} noteId={id} active={id === activeTabId} />)}
+          {ready &&
+            openDocTabs.map((id) => (
+              <ErrorBoundary
+                key={id}
+                fallback={(error, reset) =>
+                  id === activeTabId ? (
+                    <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center text-sm text-slate-500">
+                      <p>이 노트를 표시하는 중 오류가 발생했습니다. 다른 탭과 데이터는 안전합니다.</p>
+                      <p className="max-w-md break-words font-mono text-xs text-red-500">{error.message}</p>
+                      <button className="btn-primary" onClick={reset}>
+                        다시 시도
+                      </button>
+                    </div>
+                  ) : null
+                }
+              >
+                <NoteWorkspace noteId={id} active={id === activeTabId} />
+              </ErrorBoundary>
+            ))}
           {ready && openDocTabs.length === 0 && (
             <div className="flex flex-1 flex-col items-center justify-center gap-3 text-slate-400">
               <p className="text-sm">열린 노트가 없습니다.</p>

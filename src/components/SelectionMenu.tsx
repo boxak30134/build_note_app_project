@@ -14,8 +14,21 @@ export function SelectionMenu({ session }: { session: NoteSession }) {
 
   useEffect(() => {
     const ed = session.editor;
+    if (ed.isDestroyed) return;
+    // 마운트 시점의 DOM 을 캡처: 정리(cleanup) 시점에는 에디터가 이미 destroy 되었을 수 있다
+    const dom = ed.view.dom;
     let pointerDown = false;
+    let disposed = false;
+    const timers = new Set<ReturnType<typeof setTimeout>>();
+    const later = (ms: number) => {
+      const t = setTimeout(() => {
+        timers.delete(t);
+        compute();
+      }, ms);
+      timers.add(t);
+    };
     const compute = () => {
+      if (disposed || ed.isDestroyed) return;
       const { selection } = ed.state;
       if (selection.empty || !ed.isFocused || pointerDown || !ed.isEditable) {
         setRect(null);
@@ -37,21 +50,23 @@ export function SelectionMenu({ session }: { session: NoteSession }) {
     };
     const up = () => {
       pointerDown = false;
-      setTimeout(compute, 0);
+      later(0);
     };
-    const blur = () => setTimeout(compute, 120);
+    const blur = () => later(120);
     ed.on('selectionUpdate', compute);
     ed.on('focus', compute);
     ed.on('blur', blur);
-    ed.view.dom.addEventListener('pointerdown', down);
+    dom.addEventListener('pointerdown', down);
     window.addEventListener('pointerup', up);
     const scroller = session.scrollEl;
     scroller?.addEventListener('scroll', compute, { passive: true });
     return () => {
+      disposed = true;
+      timers.forEach(clearTimeout);
       ed.off('selectionUpdate', compute);
       ed.off('focus', compute);
       ed.off('blur', blur);
-      ed.view.dom.removeEventListener('pointerdown', down);
+      dom.removeEventListener('pointerdown', down);
       window.removeEventListener('pointerup', up);
       scroller?.removeEventListener('scroll', compute);
     };

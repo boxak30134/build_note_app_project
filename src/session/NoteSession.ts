@@ -41,9 +41,13 @@ export async function openSession(id: string): Promise<NoteSession | null> {
 export function closeSession(id: string) {
   const s = sessions.get(id);
   if (!s) return;
-  s.destroy();
   sessions.delete(id);
-  useSessions.getState().remove(id);
+  // 에디터 destroy 는 React 가 해당 탭의 컴포넌트를 모두 언마운트(cleanup)한 뒤로 미룬다.
+  // 즉시 destroy 하면 언마운트 중인 컴포넌트가 editor.view 에 접근하다 예외가 발생한다.
+  setTimeout(() => {
+    s.destroy();
+    if (!sessions.has(id)) useSessions.getState().remove(id);
+  }, 0);
 }
 
 /**
@@ -460,6 +464,7 @@ export class NoteSession {
   }
 
   destroy() {
+    if (this.editor.isDestroyed) return;
     this.unsubs.forEach((u) => u());
     if (this.dirtyTimer) clearTimeout(this.dirtyTimer);
     if (this.draftTimer) clearTimeout(this.draftTimer);
