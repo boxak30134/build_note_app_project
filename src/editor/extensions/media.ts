@@ -44,6 +44,70 @@ export const NoteImage = Image.extend<NoteImageOptions & Record<string, unknown>
   },
 });
 
+/**
+ * 손글씨 페이지 캔버스 템플릿: 가져온 PDF 페이지의 손글씨 벡터만 렌더링한 배경.
+ * 문서 흐름 안에 페이지 비율만큼 공간을 차지하고, 그 위로 Layer 2 잉크 캔버스에서 이어서 필기할 수 있다.
+ */
+export const InkTemplate = Node.create<NoteImageOptions>({
+  name: 'inkTemplate',
+  group: 'block',
+  atom: true,
+  selectable: true,
+
+  addOptions() {
+    return { noteId: '' };
+  },
+
+  addAttributes() {
+    return { src: { default: '' }, width: { default: 595 }, height: { default: 842 }, page: { default: 1 } };
+  },
+
+  parseHTML() {
+    return [
+      {
+        tag: 'div[data-ink-template]',
+        getAttrs: (el) => {
+          const e = el as HTMLElement;
+          return { src: e.getAttribute('data-src'), width: Number(e.getAttribute('data-width')), height: Number(e.getAttribute('data-height')), page: Number(e.getAttribute('data-page')) };
+        },
+      },
+    ];
+  },
+
+  renderHTML({ node, HTMLAttributes }) {
+    return [
+      'div',
+      mergeAttributes(HTMLAttributes, { 'data-ink-template': '', 'data-src': node.attrs.src, 'data-width': node.attrs.width, 'data-height': node.attrs.height, 'data-page': node.attrs.page }),
+      `손글씨 페이지 ${node.attrs.page}`,
+    ];
+  },
+
+  addNodeView() {
+    const noteId = this.options.noteId;
+    return ({ node }) => {
+      const dom = document.createElement('div');
+      dom.className = 'ink-template';
+      dom.contentEditable = 'false';
+      dom.style.aspectRatio = `${node.attrs.width} / ${node.attrs.height}`;
+      dom.dataset.inkTemplate = '';
+      const label = document.createElement('span');
+      label.className = 'ink-template-label';
+      label.textContent = `✍️ 손글씨 페이지 ${node.attrs.page} · 캔버스 템플릿`;
+      const img = document.createElement('img');
+      img.alt = `손글씨 페이지 ${node.attrs.page}`;
+      img.draggable = false;
+      dom.append(img, label);
+      void attachmentUrl(noteId, node.attrs.src).then((url) => {
+        if (url) img.src = url;
+        else label.textContent = `손글씨 페이지 ${node.attrs.page} (파일을 찾을 수 없음)`;
+      });
+      return { dom };
+    };
+  },
+
+  renderMarkdown: (node) => `![손글씨 페이지 ${node.attrs?.page ?? ''}](${node.attrs?.src ?? ''})`,
+});
+
 /** OPFS 에 저장된 PDF 임베디드 뷰어 노드 */
 export const PdfEmbed = Node.create<NoteImageOptions>({
   name: 'pdfEmbed',

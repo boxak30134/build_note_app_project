@@ -7,7 +7,7 @@ import { InlineMath, BlockMath } from './math';
 import { WikiLink } from './wikiLink';
 import { AnnotationMark } from './annotationMark';
 import { BlockId } from './blockId';
-import { NoteImage, PdfEmbed } from './media';
+import { NoteImage, PdfEmbed, InkTemplate } from './media';
 import { HistoryBridge } from './historyBridge';
 import type { CompositeHistoryManager } from '../../core/history/CompositeHistoryManager';
 
@@ -29,6 +29,7 @@ export function schemaExtensions(noteId: string): AnyExtension[] {
     TableCell,
     NoteImage.configure({ noteId }),
     PdfEmbed.configure({ noteId }),
+    InkTemplate.configure({ noteId }),
     InlineMath,
     BlockMath,
     AnnotationMark,
