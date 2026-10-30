@@ -1,0 +1,11 @@
+node_modules/
+dist/
+out/
+*.log
+.superpowers/
+.obsidian/
+coverage/
+.vite/
+*.tsbuildinfo
+CLAUDE.md
+image-*.png
