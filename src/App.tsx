@@ -126,7 +126,9 @@ export default function App() {
         {leftOpen && (
           <>
             <div style={{ width: paneWidths.left }} className="shrink-0 border-r border-slate-200">
-              <LeftSidebar />
+              <ErrorBoundary>
+                <LeftSidebar />
+              </ErrorBoundary>
             </div>
             <Resizer side="left" />
           </>
@@ -165,7 +167,9 @@ export default function App() {
           <>
             <Resizer side="right" />
             <div style={{ width: paneWidths.right }} className="shrink-0 border-l border-slate-200">
-              <RightSidebar />
+              <ErrorBoundary>
+                <RightSidebar />
+              </ErrorBoundary>
             </div>
           </>
         )}

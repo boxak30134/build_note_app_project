@@ -71,7 +71,9 @@ export function ConfirmDialog() {
 export function PromptDialog() {
   const req = useUi((s) => s.prompt);
   const [value, setValue] = useState('');
-  useEffect(() => setValue(req?.initial ?? ''), [req]);
+  useEffect(() => {
+    setValue(req?.initial ?? '');
+  }, [req]);
   if (!req) return null;
   const err = req.validate?.(value) ?? null;
   const submit = () => !err && req.resolve(value);

@@ -208,7 +208,11 @@ function Chat({ connected }: { connected: AiProviderId[] }) {
   const abortRef = useRef<AbortController | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => endRef.current?.scrollIntoView({ block: 'end' }), [msgs]);
+  // 주의: 최신 Chrome 에서 scrollIntoView() 는 Promise 를 반환한다.
+  // 화살표 함수 축약형으로 쓰면 effect 가 Promise 를 반환해 React 가 cleanup 으로 호출하다 오류가 나므로 블록으로 감싼다.
+  useEffect(() => {
+    void endRef.current?.scrollIntoView({ block: 'end' });
+  }, [msgs]);
 
   const send = async (text: string) => {
     const q = text.trim();

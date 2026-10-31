@@ -102,7 +102,9 @@ function ColorPickerPopover({ index, reference, onClose }: { index: number; refe
   const { colorSlots, setSlotColor, selectSlot } = useSettings();
   const current = colorSlots[index];
   const [hex, setHex] = useState(current);
-  useEffect(() => setHex(current), [current]);
+  useEffect(() => {
+    setHex(current);
+  }, [current]);
   const { refs, floatingStyles, context } = useFloating({
     open: true,
     onOpenChange: (o) => !o && onClose(),
