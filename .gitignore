@@ -4,8 +4,10 @@ out/
 *.log
 .superpowers/
 .obsidian/
+.env*
 coverage/
 .vite/
 *.tsbuildinfo
 CLAUDE.md
 image-*.png
+report/
