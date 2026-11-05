@@ -13,9 +13,19 @@ import { drafts } from '../storage/drafts';
 import { readHandle, writeHandle } from '../storage/localFiles';
 import { extOfMime, saveAttachmentExclusive, saveImageExclusive } from '../storage/opfs';
 import { indexNote, searchRelated } from '../search/searchClient';
+import { offlineLinker, type LinkRecommendation } from '../services/offlineDocumentLinker';
 import { getSessionUI, useSessions, type PendingCitation } from '../store/sessionStore';
+import { useSettings } from '../store/settingsStore';
 import { toast, confirmDialog } from '../store/uiStore';
 import type { Annotation, AnnotationAnchor } from '../features/annotations/types';
+import {
+  clampNoteZoom,
+  createPage,
+  DEFAULT_NOTE_ZOOM,
+  insertPageBelow,
+  NOTE_ZOOM_STEP,
+  type NotePage,
+} from '../core/page/pageTypes';
 
 const sessions = new Map<string, NoteSession>();
 
@@ -68,8 +78,10 @@ export class NoteSession {
   private cleanDoc: PMNode | null = null;
   private cleanStrokes = '[]';
   private cleanAnnotations = '[]';
+  private cleanPages = '[]';
   private dirtyTimer: ReturnType<typeof setTimeout> | null = null;
   private draftTimer: ReturnType<typeof setTimeout> | null = null;
+  private relatedTimer: ReturnType<typeof setTimeout> | null = null;
   private unsubs: Array<() => void> = [];
   private saving = false;
 
@@ -77,7 +89,25 @@ export class NoteSession {
     this.id = record.id;
     this.record = record;
     this.strokes = new StrokeStore(this.history, record.strokes ?? []);
-    this.patch({ annotations: record.annotations ?? [], loaded: true, readOnly: false, external: null });
+    const settings = useSettings.getState();
+    const initialPages =
+      record.pages && record.pages.length > 0
+        ? record.pages
+        : [
+            createPage({
+              size: settings.defaultPaperSize,
+              style: settings.defaultPageStyle,
+              orientation: settings.defaultOrientation,
+            }),
+          ];
+    this.patch({
+      annotations: record.annotations ?? [],
+      pages: initialPages,
+      currentPageIndex: 0,
+      loaded: true,
+      readOnly: false,
+      external: null,
+    });
 
     this.host.className = 'editor-host';
     this.editor = new Editor({
@@ -95,11 +125,13 @@ export class NoteSession {
     this.editor.view.dispatch(this.editor.state.tr.setMeta(ASSIGN_IDS_META, true).setMeta('addToHistory', false));
     this.captureClean();
     this.restoreDraftIfNewer();
+    this.refreshRelatedNotes();
 
     this.editor.on('transaction', ({ transaction }) => {
       if (transaction.docChanged) {
         this.mapCitations(transaction.mapping.map.bind(transaction.mapping));
         this.scheduleDirtyCheck();
+        this.scheduleRelatedNotesRefresh();
       }
     });
     this.unsubs.push(this.strokes.subscribe(() => this.scheduleDirtyCheck()));
@@ -121,6 +153,7 @@ export class NoteSession {
     this.cleanDoc = this.editor.state.doc;
     this.cleanStrokes = JSON.stringify(this.strokes.getAll());
     this.cleanAnnotations = JSON.stringify(this.ui.annotations);
+    this.cleanPages = JSON.stringify(this.ui.pages);
     this.patch({ dirty: false });
   }
 
@@ -134,7 +167,8 @@ export class NoteSession {
       !this.cleanDoc ||
       !this.editor.state.doc.eq(this.cleanDoc) ||
       JSON.stringify(this.strokes.getAll()) !== this.cleanStrokes ||
-      JSON.stringify(this.ui.annotations) !== this.cleanAnnotations;
+      JSON.stringify(this.ui.annotations) !== this.cleanAnnotations ||
+      JSON.stringify(this.ui.pages) !== this.cleanPages;
     if (dirty !== this.ui.dirty) this.patch({ dirty });
     if (dirty) this.scheduleDraft();
     else drafts.clear(this.id);
@@ -147,6 +181,7 @@ export class NoteSession {
         doc: this.editor.getJSON(),
         strokes: this.strokes.getAll(),
         annotations: this.ui.annotations,
+        pages: this.ui.pages,
         at: Date.now(),
       });
     }, 600);
@@ -162,7 +197,10 @@ export class NoteSession {
           .setMeta('addToHistory', false),
       );
       this.strokes.reset(d.strokes ?? []);
-      this.patch({ annotations: d.annotations ?? [] });
+      this.patch({
+        annotations: d.annotations ?? [],
+        ...(d.pages && d.pages.length > 0 ? { pages: d.pages } : {}),
+      });
       this.history.clear();
       setTimeout(() => {
         this.checkDirty();
@@ -170,6 +208,59 @@ export class NoteSession {
       }, 0);
     } catch {
       drafts.clear(this.id);
+    }
+  }
+
+  // ---------- pages & fonts ----------
+  /**
+   * 현재 페이지 바로 밑에 새 페이지를 추가한다.
+   * 현재 페이지와 동일한 규격(size, orientation) 및 동일한 스타일(style)로 생성된다.
+   */
+  addPageBelow(fromPageIndex?: number, override?: Partial<Omit<NotePage, 'id'>>): NotePage {
+    const targetIdx = fromPageIndex ?? this.ui.currentPageIndex;
+    const { pages, insertedIndex, insertedPage } = insertPageBelow(this.ui.pages, targetIdx, override);
+    this.patch({ pages, currentPageIndex: insertedIndex });
+    this.scheduleDirtyCheck();
+    return insertedPage;
+  }
+
+  setCurrentPageIndex(index: number) {
+    const clamped = Math.max(0, Math.min(this.ui.pages.length - 1, index));
+    if (clamped !== this.ui.currentPageIndex) {
+      this.patch({ currentPageIndex: clamped });
+    }
+  }
+
+  /** 노트 영역 확대/축소 배율 설정 (0.5x ~ 3.0x) */
+  setZoom(zoom: number): number {
+    const clamped = clampNoteZoom(zoom);
+    if (clamped !== this.ui.zoom) {
+      this.patch({ zoom: clamped });
+    }
+    return clamped;
+  }
+
+  /** 노트 배율 증감 (기본 step: 0.1) */
+  zoomBy(delta: number = NOTE_ZOOM_STEP): number {
+    return this.setZoom((this.ui.zoom || DEFAULT_NOTE_ZOOM) + delta);
+  }
+
+  /** 노트 배율 100%(1.0x)로 초기화 */
+  resetZoom(): number {
+    return this.setZoom(DEFAULT_NOTE_ZOOM);
+  }
+
+  updateCurrentPageFormat(patch: Partial<Omit<NotePage, 'id'>>, applyToAll = false) {
+    const targetIdx = this.ui.currentPageIndex;
+    const nextPages = this.ui.pages.map((p, idx) => (applyToAll || idx === targetIdx ? { ...p, ...patch } : p));
+    this.patch({ pages: nextPages });
+    this.scheduleDirtyCheck();
+  }
+
+  applyFontFamily(family: string) {
+    const { empty } = this.editor.state.selection;
+    if (!empty) {
+      this.editor.chain().focus().setMark('fontFamily', { family }).run();
     }
   }
 
@@ -211,6 +302,7 @@ export class NoteSession {
     } else if (this.ui.lassoIds.length > 0 && !point) {
       const box = this.strokes.boundsOf(this.ui.lassoIds)!;
       anchor = { type: 'strokes', strokeIds: this.ui.lassoIds.slice(), fallbackBox: box };
+      this.patch({ lassoIds: [], moveMode: false });
     } else {
       const p = point ?? this.caretPoint();
       anchor = { type: 'point', x: p.x, y: p.y };
@@ -276,6 +368,68 @@ export class NoteSession {
 
   dismissCitation(id: string) {
     this.patch((s) => ({ citations: s.citations.filter((c) => c.id !== id), openCitationId: s.openCitationId === id ? null : s.openCitationId }));
+  }
+
+  /**
+   * 오프라인 문서 링커: 편집이 1000ms 이상 멈추거나 저장될 때 현재 문서 인덱스를 갱신하고 연관 노트를 재계산한다.
+   */
+  scheduleRelatedNotesRefresh(delayMs = 1000) {
+    if (this.relatedTimer) clearTimeout(this.relatedTimer);
+    this.relatedTimer = setTimeout(() => {
+      this.relatedTimer = null;
+      this.refreshRelatedNotes();
+    }, delayMs);
+  }
+
+  refreshRelatedNotes(): LinkRecommendation[] {
+    if (this.editor.isDestroyed) return [];
+    const content = this.editor.getMarkdown() || this.record.markdown || plainTextOf(this.record.content);
+    offlineLinker.upsertDocument({
+      id: this.id,
+      title: this.record.title,
+      content,
+      updatedAt: Date.now(),
+    });
+    const relatedNotes = offlineLinker.recommendSimilarDocuments(this.id, 5);
+    this.patch({ relatedNotes });
+    return relatedNotes;
+  }
+
+  /**
+   * 드래그 선택 영역 기반 즉각 오프라인 연관 문서 추천 (< 10ms)
+   */
+  recommendByCurrentSelection(topK = 5): { text: string; from: number; to: number; recommendations: LinkRecommendation[] } {
+    const { from, to, empty } = this.editor.state.selection;
+    if (empty) return { text: '', from, to, recommendations: [] };
+    const text = this.editor.state.doc.textBetween(from, to, ' ').trim();
+    if (!text) return { text: '', from, to, recommendations: [] };
+    return {
+      text,
+      from,
+      to,
+      recommendations: offlineLinker.recommendBySelection(text, this.id, topK),
+    };
+  }
+
+  /**
+   * 선택한 추천 노트로 드래그 구절을 [[문서제목|선택된 구절]] 위키링크로 즉시 치환한다.
+   */
+  applySelectionWikiLink(rec: LinkRecommendation, range?: { from: number; to: number; text: string }) {
+    const from = range?.from ?? this.editor.state.selection.from;
+    const to = range?.to ?? this.editor.state.selection.to;
+    const label = (range?.text ?? this.editor.state.doc.textBetween(from, to, ' ')).trim() || rec.title;
+    const cleanTitle = rec.title.replace(/\.md$/i, '').trim() || rec.docId;
+    this.editor
+      .chain()
+      .focus()
+      .insertContentAt(
+        { from, to },
+        {
+          type: 'wikiLink',
+          attrs: { targetDocId: cleanTitle, targetBlockId: null, label },
+        },
+      )
+      .run();
   }
 
   // ---------- media insertion ----------
@@ -355,6 +509,7 @@ export class NoteSession {
       const content = this.editor.getJSON();
       const strokes = this.strokes.getAll();
       const annotations = this.ui.annotations;
+      const pages = this.ui.pages;
       let fileLastModified = this.record.fileLastModified ?? null;
       if (this.record.fileHandle) {
         try {
@@ -380,6 +535,7 @@ export class NoteSession {
         plainText: plainTextOf(content),
         strokes,
         annotations,
+        pages,
         fileLastModified,
         updatedAt: Date.now(),
       };
@@ -388,6 +544,7 @@ export class NoteSession {
       drafts.clear(this.id);
       this.captureClean();
       indexNote(updated);
+      this.refreshRelatedNotes();
       return true;
     } finally {
       this.saving = false;
@@ -468,6 +625,7 @@ export class NoteSession {
     this.unsubs.forEach((u) => u());
     if (this.dirtyTimer) clearTimeout(this.dirtyTimer);
     if (this.draftTimer) clearTimeout(this.draftTimer);
+    if (this.relatedTimer) clearTimeout(this.relatedTimer);
     this.editor.destroy();
   }
 }

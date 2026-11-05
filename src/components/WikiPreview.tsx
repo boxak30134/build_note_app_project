@@ -11,7 +11,10 @@ import { getSession } from '../session/NoteSession';
 async function resolveTarget(docRef: string) {
   const byId = await db.notes.get(docRef);
   if (byId && !byId.deletedAt) return byId;
-  return db.notes.filter((n) => !n.deletedAt && n.title === docRef).first();
+  const normalized = docRef.replace(/\.md$/i, '').trim().toLowerCase();
+  return db.notes
+    .filter((n) => !n.deletedAt && (n.title === docRef || n.title.replace(/\.md$/i, '').trim().toLowerCase() === normalized))
+    .first();
 }
 
 export async function openWikiTarget(docRef: string, blockId: string | null) {

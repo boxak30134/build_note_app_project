@@ -1,4 +1,5 @@
-import { extractBlocks } from '../core/doc/blocks';
+import { extractBlocks, plainTextOf } from '../core/doc/blocks';
+import { offlineLinker } from '../services/offlineDocumentLinker';
 import { db, type NoteRecord } from '../storage/db';
 import { useSettings } from '../store/settingsStore';
 import type { SearchDoc, SearchHit, WorkerRequest, WorkerResponse } from './protocol';
@@ -39,11 +40,19 @@ export function noteToDocs(note: Pick<NoteRecord, 'id' | 'title' | 'content'>): 
   }));
 }
 
-export function indexNote(note: Pick<NoteRecord, 'id' | 'title' | 'content'>) {
+export function indexNote(note: Pick<NoteRecord, 'id' | 'title' | 'content'> & Partial<Pick<NoteRecord, 'markdown' | 'updatedAt'>>) {
+  const rawContent = note.markdown ?? plainTextOf(note.content);
+  offlineLinker.upsertDocument({
+    id: note.id,
+    title: note.title,
+    content: rawContent,
+    updatedAt: note.updatedAt ?? Date.now(),
+  });
   send({ type: 'upsertNote', noteId: note.id, docs: noteToDocs(note) });
 }
 
 export function unindexNote(noteId: string) {
+  offlineLinker.removeDocument(noteId);
   send({ type: 'removeNote', noteId });
 }
 
