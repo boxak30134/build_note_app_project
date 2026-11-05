@@ -220,3 +220,42 @@ export function isEraserPointer(e: EraserPointerEventLike): boolean {
   if (e.pointerType === 'pen' && ((buttons & 2) !== 0 || button === 2)) return true;
   return false;
 }
+
+/**
+ * 스트로크 점들이 대략 직선 형태인지 판별 (직선 자동 보정용)
+ */
+export function isApproximatelyStraight(points: StrokePoint[], tolerance = 10): boolean {
+  if (points.length < 4) return false;
+  const [x1, y1] = points[0];
+  const [x2, y2] = points[points.length - 1];
+  const lineLen = Math.hypot(x2 - x1, y2 - y1);
+  if (lineLen < 20) return false;
+
+  for (let i = 1; i < points.length - 1; i++) {
+    const [px, py] = points[i];
+    const dist = Math.abs((y2 - y1) * px - (x2 - x1) * py + x2 * y1 - y2 * x1) / lineLen;
+    if (dist > tolerance) return false;
+  }
+  return true;
+}
+
+/**
+ * 대략적인 직선 스트로크를 완벽한 직선 스트로크 점들로 보정
+ */
+export function straightenStrokePoints(points: StrokePoint[]): StrokePoint[] {
+  if (points.length < 2) return points;
+  const start = points[0];
+  const end = points[points.length - 1];
+  const avgPressure = points.reduce((sum, p) => sum + (p[2] ?? 0.5), 0) / points.length;
+  const count = Math.min(10, Math.max(3, points.length));
+  const res: StrokePoint[] = [];
+  for (let i = 0; i < count; i++) {
+    const t = i / (count - 1);
+    res.push([
+      start[0] + (end[0] - start[0]) * t,
+      start[1] + (end[1] - start[1]) * t,
+      avgPressure,
+    ]);
+  }
+  return res;
+}

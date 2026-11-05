@@ -7,12 +7,14 @@
 import * as pdfjs from 'pdfjs-dist';
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import type { JSONContent } from '@tiptap/core';
-import { classifyOps, isHandwritingPage, itemsToBlocks, templateExcludedOps, type PdfTextItem, type OpsTable } from './pdfAnalysis';
+import { classifyOps, itemsToBlocks, type PdfTextItem, type OpsTable } from './pdfAnalysis';
 
 pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
 
 export interface PdfImportPage {
   index: number;
+  width: number;
+  height: number;
   blocks: JSONContent[];
   images: Blob[];
   template: { blob: Blob; width: number; height: number } | null;
@@ -85,7 +87,6 @@ export async function importPdf(data: ArrayBuffer, onProgress?: (page: number, t
   const loadingTask = pdfjs.getDocument({ data: new Uint8Array(data) });
   const doc = await loadingTask.promise;
   const OPS = pdfjs.OPS as unknown as OpsTable;
-  const excluded = templateExcludedOps(OPS);
   let title: string | null = null;
   try {
     const meta = await doc.getMetadata();
@@ -99,6 +100,7 @@ export async function importPdf(data: ArrayBuffer, onProgress?: (page: number, t
   for (let i = 1; i <= doc.numPages; i++) {
     onProgress?.(i, doc.numPages);
     const page = await doc.getPage(i);
+    const base = page.getViewport({ scale: 1 });
     const tc = await page.getTextContent();
     const items: PdfTextItem[] = [];
     for (const it of tc.items) {
@@ -118,25 +120,20 @@ export async function importPdf(data: ArrayBuffer, onProgress?: (page: number, t
       if (blob) images.push(blob);
     }
 
-    let template: PdfImportPage['template'] = null;
-    if (isHandwritingPage(stats)) {
-      const base = page.getViewport({ scale: 1 });
-      const scale = Math.min(TEMPLATE_SCALE, MAX_TEMPLATE_PX / Math.max(base.width, base.height));
-      const viewport = page.getViewport({ scale });
-      const canvas = document.createElement('canvas');
-      canvas.width = Math.ceil(viewport.width);
-      canvas.height = Math.ceil(viewport.height);
-      // 텍스트(→마크다운)와 이미지(→첨부)는 제외하고 손글씨 벡터만 렌더링
-      await page.render({
-        canvas,
-        viewport,
-        // pdf.js 는 불투명(alpha:false) 컨텍스트로 그리므로 투명 배경은 검게 나온다 → 흰 배경 + CSS multiply 합성
-        background: '#ffffff',
-        operationsFilter: (index, list) => !excluded.has(list.fnArray[index]),
-      }).promise;
-      template = { blob: await canvasToBlob(canvas), width: base.width, height: base.height };
-    }
-    pages.push({ index: i, blocks, images, template, stats });
+    const scale = Math.min(TEMPLATE_SCALE, MAX_TEMPLATE_PX / Math.max(base.width, base.height));
+    const viewport = page.getViewport({ scale });
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.ceil(viewport.width);
+    canvas.height = Math.ceil(viewport.height);
+    // 원본 PDF 페이지의 텍스트, 이미지, 수식, 손글씨 벡터를 완전하게 렌더링 (텍스트 제거 필터 미적용)
+    await page.render({
+      canvas,
+      viewport,
+      background: '#ffffff',
+    }).promise;
+    const template = { blob: await canvasToBlob(canvas), width: base.width, height: base.height };
+
+    pages.push({ index: i, width: base.width, height: base.height, blocks, images, template, stats });
     page.cleanup();
   }
   await loadingTask.destroy();

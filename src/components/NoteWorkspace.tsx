@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { AlertTriangle, RefreshCw, Lock, Plus, ArrowUp } from 'lucide-react';
 import { openSession, type NoteSession } from '../session/NoteSession';
 import { useSessionUI } from '../store/sessionStore';
@@ -61,6 +61,13 @@ function LoadedWorkspace({ session, active }: { session: NoteSession; active: bo
   const pendingScroll = useTabs((s) => s.pendingScroll[session.id]);
 
   const activeFont = resolveFontById(selectedFontId, customFonts);
+  const isPdfDoc = useMemo(() => {
+    try {
+      return JSON.stringify(session.record.content).includes('inkTemplate');
+    } catch {
+      return false;
+    }
+  }, [session.record.content]);
   const pages =
     ui.pages.length > 0
       ? ui.pages
@@ -431,7 +438,7 @@ function LoadedWorkspace({ session, active }: { session: NoteSession; active: bo
               data-doc-format={docFormat}
               data-paper-size={currentPage.size}
               data-zoom={zoom}
-              className={`note-page relative ${docFormat === 'continuous' ? `page-style-${currentPage.style}` : 'note-page-paginated'}`}
+              className={`note-page relative ${docFormat === 'continuous' ? `page-style-${currentPage.style}` : 'note-page-paginated'} ${isPdfDoc ? 'note-page-pdf' : ''}`}
               style={{
                 width: currentDims.width,
                 minHeight,

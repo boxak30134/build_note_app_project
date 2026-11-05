@@ -4,10 +4,12 @@ import type { CompositeHistoryManager } from '../history/CompositeHistoryManager
 import { newCommandId } from '../history/CompositeHistoryManager';
 
 export type StrokeTool = 'pencil' | 'highlighter';
+export type PenType = 'fountain-sharp' | 'fountain-flat' | 'ballpoint' | 'pencil' | 'brush';
 
 export interface Stroke {
   id: string;
   tool: StrokeTool;
+  penType?: PenType;
   color: string;
   size: number;
   points: StrokePoint[];

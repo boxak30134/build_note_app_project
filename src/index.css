@@ -213,15 +213,12 @@ body,
   padding: 0 2px;
   cursor: pointer;
 }
-/* 손글씨 페이지 캔버스 템플릿 (가져온 삼성 노트 PDF) */
+/* PDF / 캔버스 페이지 템플릿 */
 .ink-template {
   position: relative;
   width: 100%;
-  border: 1px dashed #c7d2fe;
-  border-radius: 8px;
-  background-color: #fff;
-  background-image: radial-gradient(#e2e8f0 1px, transparent 1px);
-  background-size: 18px 18px;
+  border: none;
+  background-color: transparent;
   overflow: hidden;
   user-select: none;
 }
@@ -232,17 +229,14 @@ body,
   height: 100%;
   object-fit: contain;
   pointer-events: none;
-  mix-blend-mode: multiply;
 }
-.ink-template-label {
-  position: absolute;
-  top: 6px;
-  left: 8px;
-  font-size: 11px;
-  color: #6366f1;
-  background: rgb(238 242 255 / 0.9);
-  padding: 1px 6px;
-  border-radius: 6px;
+.note-page-pdf .prose-note,
+.note-page:has(.ink-template) .prose-note {
+  padding: 0 !important;
+}
+.note-page-pdf .prose-note > * + *,
+.note-page:has(.ink-template) .prose-note > * + * {
+  margin-top: 0 !important;
 }
 .math-block {
   padding: 8px;

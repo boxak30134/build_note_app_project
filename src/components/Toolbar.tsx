@@ -20,7 +20,9 @@ import {
   ZoomIn,
   ZoomOut,
 } from 'lucide-react';
-import { useSettings, type Tool } from '../store/settingsStore';
+import { useSettings, type Tool, PEN_TYPES, PALETTE_COLOR_NAMES } from '../store/settingsStore';
+import { PenSettingsPopup } from './PenSettingsPopup';
+import { RgbColorPickerModal } from './RgbColorPickerModal';
 import { useTabs } from '../store/tabsStore';
 import { useSessionUI } from '../store/sessionStore';
 import { getSession } from '../session/NoteSession';
@@ -48,19 +50,25 @@ import {
 
 const TOOLS: Array<{ id: Tool; icon: React.ReactNode; label: string }> = [
   { id: 'none', icon: <Type size={17} />, label: '텍스트 (펜으로 필기하지 않음)' },
-  { id: 'pencil', icon: <Pencil size={17} />, label: '펜슬' },
+  { id: 'pencil', icon: <Pencil size={17} />, label: '펜 (만년필/볼펜/연필/붓)' },
   { id: 'highlighter', icon: <Highlighter size={17} />, label: '형광펜' },
   { id: 'eraser', icon: <Eraser size={17} />, label: '지우개' },
   { id: 'lasso', icon: <Lasso size={17} />, label: '올가미' },
 ];
 
-/** 툴바: [펜슬][형광펜][지우개][올가미] | [🔴][🟡][⚫] | [↶][↷] */
+/** 툴바: [펜][형광펜][지우개][올가미] | [빨주노초파남보 검정][🎨 RGB] | [↶][↷] */
 export function Toolbar() {
-  const { tool, setTool, mouseDraw, set, penSize, highlighterSize, eraserSize } = useSettings();
+  const { tool, setTool, mouseDraw, set, penSize, highlighterSize, eraserSize, penType } = useSettings();
+  const [penPopupOpen, setPenPopupOpen] = useState(false);
   const activeId = useTabs((s) => s.activeTabId);
   const ui = useSessionUI(activeId);
+  const activePenDef = PEN_TYPES.find((p) => p.id === penType);
 
   const pickTool = (t: Tool) => {
+    if (t === 'pencil' && tool === 'pencil') {
+      setPenPopupOpen((o) => !o);
+      return;
+    }
     setTool(t);
     const s = getSession(activeId);
     if (s && t !== 'lasso') s.patch({ lassoIds: [], moveMode: false });
@@ -71,11 +79,38 @@ export function Toolbar() {
 
   return (
     <div className="flex h-11 shrink-0 items-center gap-1 border-b border-slate-200 bg-slate-50/80 px-2">
-      {TOOLS.map((t) => (
-        <button key={t.id} className={`tool-btn ${tool === t.id ? 'tool-active' : ''}`} onClick={() => pickTool(t.id)} title={t.label}>
-          {t.icon}
-        </button>
-      ))}
+      {TOOLS.map((t) => {
+        if (t.id === 'pencil') {
+          return (
+            <div key={t.id} className="relative flex items-center">
+              <button
+                className={`tool-btn ${tool === t.id ? 'tool-active' : ''}`}
+                onClick={() => pickTool(t.id)}
+                title={tool === 'pencil' ? `펜: ${activePenDef?.name} (클릭하여 펜 설정 열기)` : t.label}
+                data-testid="tool-pen-btn"
+              >
+                {t.icon}
+              </button>
+              {tool === 'pencil' && (
+                <button
+                  type="button"
+                  className="h-7 w-3.5 -ml-1 flex items-center justify-center rounded text-slate-500 hover:bg-slate-200"
+                  onClick={() => setPenPopupOpen((o) => !o)}
+                  title="펜 종류 및 세부 설정 열기"
+                  data-testid="pen-popup-toggle"
+                >
+                  <ChevronDown size={11} />
+                </button>
+              )}
+            </div>
+          );
+        }
+        return (
+          <button key={t.id} className={`tool-btn ${tool === t.id ? 'tool-active' : ''}`} onClick={() => pickTool(t.id)} title={t.label}>
+            {t.icon}
+          </button>
+        );
+      })}
       <div className="mx-2 h-6 w-px bg-slate-300" />
       <ColorSlots />
       {(tool === 'pencil' || tool === 'highlighter' || tool === 'eraser') && (
@@ -136,26 +171,67 @@ export function Toolbar() {
       >
         <MousePointer2 size={13} /> 마우스 필기 {mouseDraw ? 'ON' : 'OFF'}
       </button>
+      <PenSettingsPopup open={penPopupOpen} onClose={() => setPenPopupOpen(false)} />
     </div>
   );
 }
 
+function getContrastColor(hex: string): string {
+  const [r, g, b] = hexToRgb(hex);
+  const yiq = (r * 299 + g * 587 + b * 114) / 1000;
+  return yiq >= 150 ? '#000000' : '#FFFFFF';
+}
+
 function ColorSlots() {
-  const { colorSlots, activeSlot, selectSlot } = useSettings();
+  const { colorSlots, activeSlot, selectSlot, customColor, isCustomColorActive } = useSettings();
   const [editing, setEditing] = useState<{ index: number; el: HTMLElement } | null>(null);
+  const [rgbModalOpen, setRgbModalOpen] = useState(false);
+
   return (
-    <div className="flex items-center gap-1.5">
-      {colorSlots.map((c, i) => (
-        <button
-          key={i}
-          className={`color-slot ${activeSlot === i ? 'color-slot-active' : ''}`}
-          style={{ background: c }}
-          title="클릭: 선택 / 더블클릭: 색상 변경"
-          onClick={() => selectSlot(i)}
-          onDoubleClick={(e) => setEditing({ index: i, el: e.currentTarget })}
-        />
-      ))}
+    <div className="flex items-center gap-1" data-testid="toolbar-color-slots">
+      {/* 1~8: 빨주노초파남보 검정 */}
+      {colorSlots.slice(0, 8).map((c, i) => {
+        const isActive = !isCustomColorActive && activeSlot === i;
+        const contrast = getContrastColor(c);
+        return (
+          <button
+            key={i}
+            className={`color-slot relative flex items-center justify-center transition-transform hover:scale-110 ${
+              isActive ? 'color-slot-active ring-2 ring-indigo-500 ring-offset-1 scale-105' : ''
+            }`}
+            style={{ background: c }}
+            title={`${PALETTE_COLOR_NAMES[i] || '색상'} (${c}) — 클릭: 선택 / 더블클릭: 변경`}
+            onClick={() => selectSlot(i)}
+            onDoubleClick={(e) => setEditing({ index: i, el: e.currentTarget })}
+            data-testid={`color-slot-${i}`}
+          >
+            {isActive && <Check size={11} color={contrast} strokeWidth={3} />}
+          </button>
+        );
+      })}
+
+      {/* 검정의 오른쪽: RGB 사용자 지정 동그라미 */}
+      <button
+        type="button"
+        className={`color-slot relative flex items-center justify-center transition-transform hover:scale-110 ${
+          isCustomColorActive ? 'color-slot-active ring-2 ring-indigo-500 ring-offset-1 scale-105' : ''
+        }`}
+        style={{
+          background: isCustomColorActive && customColor
+            ? customColor
+            : 'conic-gradient(from 0deg, #ff0000, #ff8800, #ffff00, #00ff00, #00ffff, #0000ff, #8800ff, #ff0088, #ff0000)',
+        }}
+        title="RGB 사용자 지정 색상 설정 창 열기"
+        onClick={() => setRgbModalOpen(true)}
+        data-testid="rgb-custom-picker-btn"
+      >
+        {isCustomColorActive && (
+          <Check size={11} color={getContrastColor(customColor)} strokeWidth={3} />
+        )}
+      </button>
+
       {editing && <ColorPickerPopover index={editing.index} reference={editing.el} onClose={() => setEditing(null)} />}
+      <RgbColorPickerModal open={rgbModalOpen} onClose={() => setRgbModalOpen(false)} />
     </div>
   );
 }

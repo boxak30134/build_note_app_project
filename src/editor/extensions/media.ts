@@ -90,16 +90,12 @@ export const InkTemplate = Node.create<NoteImageOptions>({
       dom.contentEditable = 'false';
       dom.style.aspectRatio = `${node.attrs.width} / ${node.attrs.height}`;
       dom.dataset.inkTemplate = '';
-      const label = document.createElement('span');
-      label.className = 'ink-template-label';
-      label.textContent = `✍️ 손글씨 페이지 ${node.attrs.page} · 캔버스 템플릿`;
       const img = document.createElement('img');
-      img.alt = `손글씨 페이지 ${node.attrs.page}`;
+      img.alt = `페이지 ${node.attrs.page}`;
       img.draggable = false;
-      dom.append(img, label);
+      dom.append(img);
       void attachmentUrl(noteId, node.attrs.src).then((url) => {
         if (url) img.src = url;
-        else label.textContent = `손글씨 페이지 ${node.attrs.page} (파일을 찾을 수 없음)`;
       });
       return { dom };
     };

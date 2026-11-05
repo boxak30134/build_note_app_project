@@ -3,7 +3,9 @@ import type { NoteSession } from '../session/NoteSession';
 import { newStrokeId, type Stroke } from '../core/strokes/StrokeStore';
 import {
   extractClosedLassoPolygon,
+  isApproximatelyStraight,
   isEraserPointer,
+  straightenStrokePoints,
   strokeInPolygon,
   type Point,
   type StrokePoint,
@@ -301,6 +303,7 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
           stroke: {
             id: newStrokeId(),
             tool,
+            penType: settings.penType,
             color: activeColor(),
             size: tool === 'highlighter' ? settings.highlighterSize : settings.penSize,
             points: [[p.x, p.y, pressure]],
@@ -406,7 +409,19 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
         }
       }
       if (l.kind === 'draw' && !cancelled) {
-        session.strokes.addStroke(l.stroke);
+        let finalStroke = l.stroke;
+        const currentSettings = useSettings.getState();
+        if (
+          currentSettings.autoStraighten &&
+          l.stroke.tool !== 'highlighter' &&
+          isApproximatelyStraight(l.stroke.points)
+        ) {
+          finalStroke = {
+            ...l.stroke,
+            points: straightenStrokePoints(l.stroke.points),
+          };
+        }
+        session.strokes.addStroke(finalStroke);
       } else if (l.kind === 'lasso') {
         if (cancelled) {
           session.patch({ lassoIds: [], moveMode: false });

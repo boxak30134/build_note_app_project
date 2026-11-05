@@ -19,18 +19,80 @@ function outlineToPath(points: number[][]): Path2D {
   return path;
 }
 
+export function getPenStrokeOptions(stroke: Stroke, simulatePressure = false) {
+  const penType = stroke.penType || 'pencil';
+  const hasPressure = stroke.points.some((p) => p[2] !== 0.5);
+  const sim = simulatePressure || !hasPressure;
+
+  switch (penType) {
+    case 'fountain-sharp':
+      // 1. 끝이 뾰족한 만년필: 필압에 민감하게 반응하고 끝이 날카롭게 테이퍼링됨
+      return {
+        size: stroke.size,
+        thinning: 0.72,
+        smoothing: 0.55,
+        streamline: 0.48,
+        start: { taper: 4, cap: true },
+        end: { taper: 8, cap: true },
+        simulatePressure: sim,
+        last: true,
+      };
+    case 'fountain-flat':
+      // 2. 끝이 뭉툭한 만년필: 납작한 닙 형태의 캘리그래피 질감
+      return {
+        size: stroke.size,
+        thinning: 0.25,
+        smoothing: 0.4,
+        streamline: 0.4,
+        start: { taper: 0, cap: false },
+        end: { taper: 0, cap: false },
+        simulatePressure: sim,
+        last: true,
+      };
+    case 'ballpoint':
+      // 3. 볼펜: 일정한 굵기, 둥근 캡, 압력 변화 최소화
+      return {
+        size: stroke.size,
+        thinning: 0.05,
+        smoothing: 0.6,
+        streamline: 0.5,
+        start: { taper: 0, cap: true },
+        end: { taper: 0, cap: true },
+        simulatePressure: false,
+        last: true,
+      };
+    case 'brush':
+      // 5. 붓: 극적인 굵기 변화와 부드러운 유선형 끝단
+      return {
+        size: stroke.size * 1.25,
+        thinning: 0.88,
+        smoothing: 0.75,
+        streamline: 0.65,
+        start: { taper: 10, cap: true },
+        end: { taper: 14, cap: true },
+        simulatePressure: sim,
+        last: true,
+      };
+    case 'pencil':
+    default:
+      // 4. 연필: 기존 자연스러운 필기감
+      return {
+        size: stroke.size,
+        thinning: 0.55,
+        smoothing: 0.5,
+        streamline: 0.45,
+        start: { taper: 2, cap: true },
+        end: { taper: 3, cap: true },
+        simulatePressure: sim,
+        last: true,
+      };
+  }
+}
+
 export function pencilPath(stroke: Stroke, simulatePressure = false): Path2D {
   const cached = pathCache.get(stroke);
   if (cached) return cached;
-  const hasPressure = stroke.points.some((p) => p[2] !== 0.5);
-  const outline = getStroke(stroke.points, {
-    size: stroke.size,
-    thinning: 0.6,
-    smoothing: 0.5,
-    streamline: 0.45,
-    simulatePressure: simulatePressure || !hasPressure,
-    last: true,
-  });
+  const outline = getStroke(stroke.points, getPenStrokeOptions(stroke, simulatePressure));
   const path = outlineToPath(outline);
   pathCache.set(stroke, path);
   return path;

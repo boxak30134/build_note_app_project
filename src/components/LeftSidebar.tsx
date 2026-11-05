@@ -133,9 +133,9 @@ export function LeftSidebar() {
     }
   };
 
-  /** 삼성 노트(PDF 내보내기 / .sdocx) 가져오기 */
+  /** PDF 문서 가져오기 */
   const importExternal = async () => {
-    const files = await pickFiles('.pdf,.sdocx,application/pdf', true);
+    const files = await pickFiles('.pdf,application/pdf', true);
     if (files.length === 0) return;
     const { importExternalFile } = await import('../features/import/importer');
     for (const f of files) {
@@ -144,10 +144,7 @@ export function LeftSidebar() {
         const r = await importExternalFile(f, selectedFolder, (msg) => setImporting(`${f.name} — ${msg}`));
         indexNote(r.note);
         openTab(r.note.id);
-        const detail =
-          r.kind === 'pdf'
-            ? `${r.pages}쪽 · 텍스트 블록 ${r.textBlocks}개 · 손글씨 템플릿 ${r.handwritingPages}쪽 · 이미지 ${r.media}개`
-            : `텍스트 단락 ${r.textBlocks}개 · 미디어 ${r.media}개`;
+        const detail = `${r.pages}쪽 · 텍스트 블록 ${r.textBlocks}개 · 페이지 템플릿 ${r.handwritingPages}쪽 · 이미지 ${r.media}개`;
         toast.success(`'${r.note.title}' 가져오기 완료\n${detail}`);
       } catch (e) {
         toast.error((e as Error).message, `${f.name} 가져오기 실패`);
@@ -252,8 +249,8 @@ export function LeftSidebar() {
             <FolderInput size={14} />
           </button>
         </div>
-        <button className="btn-ghost mt-1 w-full justify-center border border-dashed border-slate-300" onClick={() => void importExternal()} disabled={!!importing} title="삼성 노트 PDF 내보내기 또는 .sdocx 파일을 새 노트로 가져옵니다">
-          {importing ? <Loader2 size={14} className="animate-spin" /> : <Import size={14} />} 삼성 노트 / PDF 가져오기
+        <button className="btn-ghost mt-1 w-full justify-center border border-dashed border-slate-300" onClick={() => void importExternal()} disabled={!!importing} title="PDF 파일을 새 노트로 가져옵니다">
+          {importing ? <Loader2 size={14} className="animate-spin" /> : <Import size={14} />} PDF 가져오기
         </button>
         {importing && <div className="mt-1 truncate text-[10px] text-indigo-500" data-testid="import-progress">{importing}</div>}
         {selectedFolder && <div className="mt-1 truncate text-[10px] text-slate-400">새 항목 위치: {folders.find((f) => f.id === selectedFolder)?.name}</div>}
