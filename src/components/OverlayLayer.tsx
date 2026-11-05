@@ -20,13 +20,13 @@ function useLayoutTick(session: NoteSession): number {
     };
     session.editor.on('transaction', bump);
     const unsub = session.strokes.subscribe(bump);
-    const ro = new ResizeObserver(bump);
-    if (session.pageEl) ro.observe(session.pageEl);
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(bump) : null;
+    if (session.pageEl) ro?.observe(session.pageEl);
     return () => {
       cancelAnimationFrame(raf);
       session.editor.off('transaction', bump);
       unsub();
-      ro.disconnect();
+      ro?.disconnect();
     };
   }, [session]);
   return tick;
@@ -40,7 +40,8 @@ function pinPosition(session: NoteSession, a: Annotation): { x: number; y: numbe
     if (els.length === 0) return null; // 앵커 텍스트가 삭제됨(Undo 시 복원)
     const last = els[els.length - 1].getBoundingClientRect();
     const pr = page.getBoundingClientRect();
-    return { x: last.right - pr.left, y: last.top - pr.top - 14 };
+    const zoom = session.ui.zoom || 1;
+    return { x: (last.right - pr.left) / zoom, y: (last.top - pr.top) / zoom - 14 };
   }
   if (a.anchor.type === 'strokes') {
     const b = session.strokes.boundsOf(a.anchor.strokeIds);
@@ -129,7 +130,8 @@ function CitationBadge({ session, citation, open }: { session: NoteSession; cita
   try {
     const c = session.editor.view.coordsAtPos(Math.min(citation.to, session.editor.state.doc.content.size));
     const pr = session.pageEl!.getBoundingClientRect();
-    pos = { x: c.right - pr.left + 4, y: c.top - pr.top - 4 };
+    const zoom = session.ui.zoom || 1;
+    pos = { x: (c.right - pr.left) / zoom + 4, y: (c.top - pr.top) / zoom - 4 };
   } catch {
     pos = null;
   }

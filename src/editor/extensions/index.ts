@@ -6,6 +6,7 @@ import { Placeholder } from '@tiptap/extensions';
 import { InlineMath, BlockMath } from './math';
 import { WikiLink } from './wikiLink';
 import { AnnotationMark } from './annotationMark';
+import { FontFamilyMark } from './fontFamily';
 import { BlockId } from './blockId';
 import { NoteImage, PdfEmbed, InkTemplate } from './media';
 import { HistoryBridge } from './historyBridge';
@@ -33,6 +34,7 @@ export function schemaExtensions(noteId: string): AnyExtension[] {
     InlineMath,
     BlockMath,
     AnnotationMark,
+    FontFamilyMark,
     BlockId,
   ];
 }

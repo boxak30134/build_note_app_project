@@ -2,7 +2,7 @@
 
 export const MAX_AI_TURNS_PER_BUBBLE = 5;
 export const MAX_BUBBLE_CHAR_LENGTH = 2500;
-export const MAX_OUTPUT_TOKENS = 600;
+export const MAX_OUTPUT_TOKENS = 800;
 export const AI_TURN_LIMIT_MESSAGE = '말풍선 당 AI 질문은 최대 5회까지 가능합니다.';
 
 export class BubbleTurnLimitError extends Error {

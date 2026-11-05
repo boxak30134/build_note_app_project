@@ -1,9 +1,16 @@
 import { streamText, type ModelMessage } from 'ai';
-import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
 import { loadApiKey } from '../storage/secureStore';
 import { useSettings, type AiProviderId } from '../store/settingsStore';
+import {
+  BUBBLE_MAX_OUTPUT_TOKENS,
+  buildAcademicSystemInstruction,
+  GEMINI_PRIMARY_MODEL,
+  resolveMaxOutputTokens,
+  streamGeminiTutor,
+  type GeminiTutorTarget,
+} from '../modules/ai';
 
 export const PROVIDER_LABEL: Record<AiProviderId, string> = {
   openai: 'ChatGPT',
@@ -17,10 +24,8 @@ export const PROVIDER_KEY_URL: Record<AiProviderId, string> = {
   anthropic: 'https://console.anthropic.com/settings/keys',
 };
 
-function modelFor(provider: AiProviderId, apiKey: string, modelId: string) {
+function modelFor(provider: Exclude<AiProviderId, 'google'>, apiKey: string, modelId: string) {
   switch (provider) {
-    case 'google':
-      return createGoogleGenerativeAI({ apiKey })(modelId);
     case 'anthropic':
       // 브라우저 직접 호출(BYOK) 허용 헤더
       return createAnthropic({ apiKey, headers: { 'anthropic-dangerous-direct-browser-access': 'true' } })(modelId);
@@ -34,20 +39,38 @@ export interface AiRequest {
   provider: AiProviderId;
   system?: string;
   messages: ModelMessage[];
+  target?: GeminiTutorTarget;
   maxOutputTokens?: number;
   signal?: AbortSignal;
 }
 
-/** 사용자 토큰(BYOK)으로 스트리밍 호출. 텍스트 델타를 비동기로 산출한다. */
+/** 사용자 토큰(BYOK) 또는 VITE_GEMINI_API_KEY로 스트리밍 호출. 텍스트 델타를 비동기로 산출한다. */
 export async function* streamAi(req: AiRequest): AsyncGenerator<string> {
+  const target: GeminiTutorTarget =
+    req.target ?? (req.maxOutputTokens !== undefined && req.maxOutputTokens <= BUBBLE_MAX_OUTPUT_TOKENS ? 'bubble' : 'sidebar');
+  const maxOutputTokens = resolveMaxOutputTokens(target, req.maxOutputTokens);
+
+  if (req.provider === 'google') {
+    const modelId = useSettings.getState().aiModels.google || GEMINI_PRIMARY_MODEL;
+    yield* streamGeminiTutor({
+      messages: req.messages,
+      systemContext: req.system,
+      target,
+      maxOutputTokens,
+      model: modelId,
+      signal: req.signal,
+    });
+    return;
+  }
+
   const apiKey = await loadApiKey(req.provider);
   if (!apiKey) throw new Error(`${PROVIDER_LABEL[req.provider]} API Key가 등록되지 않았습니다. 우측 사이드바에서 연결하세요.`);
   const modelId = useSettings.getState().aiModels[req.provider];
   const result = streamText({
     model: modelFor(req.provider, apiKey, modelId),
-    system: req.system,
+    system: buildAcademicSystemInstruction(req.system),
     messages: req.messages,
-    maxOutputTokens: req.maxOutputTokens,
+    maxOutputTokens,
     abortSignal: req.signal,
     maxRetries: 1,
   });

@@ -1,11 +1,50 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useFloating, autoUpdate, offset, flip, shift, useDismiss, useInteractions, FloatingPortal } from '@floating-ui/react';
 import { motion } from 'framer-motion';
-import { Pencil, Highlighter, Eraser, Lasso, Undo2, Redo2, MousePointer2, Type } from 'lucide-react';
+import {
+  Pencil,
+  Highlighter,
+  Eraser,
+  Lasso,
+  Undo2,
+  Redo2,
+  MousePointer2,
+  Type,
+  FilePlus2,
+  FileSpreadsheet,
+  ChevronDown,
+  Check,
+  Upload,
+  Sparkles,
+  Trash2,
+  ZoomIn,
+  ZoomOut,
+} from 'lucide-react';
 import { useSettings, type Tool } from '../store/settingsStore';
 import { useTabs } from '../store/tabsStore';
 import { useSessionUI } from '../store/sessionStore';
 import { getSession } from '../session/NoteSession';
+import { toast } from '../store/uiStore';
+import { db } from '../storage/db';
+import {
+  DEFAULT_NOTE_ZOOM,
+  MAX_NOTE_ZOOM,
+  MIN_NOTE_ZOOM,
+  NOTE_ZOOM_STEP,
+  PAPER_SPECS,
+  PAGE_STYLE_LABELS,
+  type DocFormatMode,
+  type PageOrientation,
+  type PageStyleId,
+  type PaperSizeId,
+} from '../core/page/pageTypes';
+import {
+  getCategorizedFontList,
+  parseCustomFontFile,
+  registerCustomFontInDOM,
+  resolveFontById,
+  type FontItem,
+} from '../core/font/fontManager';
 
 const TOOLS: Array<{ id: Tool; icon: React.ReactNode; label: string }> = [
   { id: 'none', icon: <Type size={17} />, label: '텍스트 (펜으로 필기하지 않음)' },
@@ -52,6 +91,43 @@ export function Toolbar() {
       <button className="tool-btn" disabled={!ui.canRedo} onClick={() => getSession(activeId)?.redo()} title="앞으로 가기 (Ctrl+Shift+Z / Ctrl+Y)">
         <Redo2 size={17} />
       </button>
+      <div className="mx-2 h-6 w-px bg-slate-300" />
+      <FontSelector activeId={activeId} />
+      <div className="mx-1.5 h-6 w-px bg-slate-300" />
+      <PageFormatControls activeId={activeId} />
+      <div className="mx-1.5 h-6 w-px bg-slate-300" />
+      <div className="flex items-center gap-0.5 rounded-lg border border-slate-200 bg-white px-1 py-0.5" data-testid="zoom-controls">
+        <button
+          type="button"
+          data-testid="zoom-out-btn"
+          className="tool-btn h-6 w-6"
+          disabled={!activeId || (ui.zoom || DEFAULT_NOTE_ZOOM) <= MIN_NOTE_ZOOM}
+          onClick={() => getSession(activeId)?.zoomBy(-NOTE_ZOOM_STEP)}
+          title="노트 축소"
+        >
+          <ZoomOut size={13} />
+        </button>
+        <button
+          type="button"
+          data-testid="zoom-reset-btn"
+          className="min-w-[44px] rounded px-1 py-0.5 text-center text-[11px] font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-40"
+          disabled={!activeId}
+          onClick={() => getSession(activeId)?.resetZoom()}
+          title="배율 100% 초기화"
+        >
+          {Math.round((ui.zoom || DEFAULT_NOTE_ZOOM) * 100)}%
+        </button>
+        <button
+          type="button"
+          data-testid="zoom-in-btn"
+          className="tool-btn h-6 w-6"
+          disabled={!activeId || (ui.zoom || DEFAULT_NOTE_ZOOM) >= MAX_NOTE_ZOOM}
+          onClick={() => getSession(activeId)?.zoomBy(NOTE_ZOOM_STEP)}
+          title="노트 확대"
+        >
+          <ZoomIn size={13} />
+        </button>
+      </div>
       <div className="flex-1" />
       <button
         className={`flex items-center gap-1 rounded-lg px-2 py-1 text-[11px] ${mouseDraw ? 'bg-indigo-100 text-indigo-700' : 'text-slate-500 hover:bg-slate-200'}`}
@@ -173,5 +249,419 @@ function ColorPickerPopover({ index, reference, onClose }: { index: number; refe
         </div>
       </motion.div>
     </FloatingPortal>
+  );
+}
+
+/**
+ * 폰트 선택기 & 로컬 폰트(.ttf, .otf) 추가 팝오버
+ * - 최근에 선택한 폰트들은 맨 위에 따로 구분하여 표시 및 추천한다.
+ */
+function FontSelector({ activeId }: { activeId: string | null }) {
+  const { selectedFontId, recentFontIds, customFonts, selectFont, addCustomFont, removeCustomFont } = useSettings();
+  const [open, setOpen] = useState(false);
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const currentFont = resolveFontById(selectedFontId, customFonts);
+  const { recentFonts, allFonts } = getCategorizedFontList(customFonts, recentFontIds);
+
+  const { refs, floatingStyles, context } = useFloating({
+    open,
+    onOpenChange: setOpen,
+    placement: 'bottom-start',
+    middleware: [offset(6), flip(), shift({ padding: 8 })],
+    whileElementsMounted: autoUpdate,
+    transform: false,
+    elements: { reference: btnRef.current },
+  });
+  const { getFloatingProps } = useInteractions([useDismiss(context)]);
+
+  const onChooseFont = (font: FontItem) => {
+    selectFont(font.id);
+    getSession(activeId)?.applyFontFamily(font.family);
+    setOpen(false);
+  };
+
+  const onAddFontFiles = async (files: FileList | File[] | null) => {
+    if (!files || files.length === 0) return;
+    const list = Array.from(files);
+    for (const file of list) {
+      try {
+        const record = await parseCustomFontFile(file);
+        registerCustomFontInDOM(record);
+        try {
+          await db.customFonts.put(record);
+        } catch {
+          // IndexedDB 미지원 환경에서도 메모리/설정에 추가
+        }
+        addCustomFont({
+          id: record.id,
+          name: record.name,
+          family: record.family,
+          isCustom: true,
+          fileName: record.fileName,
+          format: record.format,
+        });
+        getSession(activeId)?.applyFontFamily(record.family);
+        toast.success(`폰트 '${record.name}' 이(가) 추가되었습니다.`);
+      } catch (e) {
+        toast.error((e as Error).message);
+      }
+    }
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const onRemoveCustomFont = async (e: React.MouseEvent, fontId: string) => {
+    e.stopPropagation();
+    removeCustomFont(fontId);
+    try {
+      await db.customFonts.delete(fontId);
+    } catch {
+      /* noop */
+    }
+  };
+
+  return (
+    <div className="relative flex items-center">
+      <button
+        ref={btnRef}
+        type="button"
+        data-testid="font-selector-btn"
+        className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100"
+        onClick={() => setOpen((o) => !o)}
+        title="폰트 선택 및 로컬 폰트(.ttf, .otf) 추가"
+      >
+        <Type size={13} className="text-indigo-600" />
+        <span className="max-w-[110px] truncate" style={{ fontFamily: currentFont.family }}>
+          {currentFont.name}
+        </span>
+        <ChevronDown size={12} className="text-slate-400" />
+      </button>
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".ttf,.otf,.woff,.woff2,font/ttf,font/otf"
+        multiple
+        className="hidden"
+        data-testid="font-file-input"
+        onChange={(e) => void onAddFontFiles(e.target.files)}
+      />
+      {open && (
+        <FloatingPortal>
+          <motion.div
+            ref={refs.setFloating}
+            style={floatingStyles}
+            {...getFloatingProps()}
+            initial={{ opacity: 0, y: -4 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="z-50 w-72 rounded-xl border border-slate-200 bg-white p-2 shadow-2xl"
+            data-testid="font-selector-popover"
+          >
+            {/* 최근 선택 및 추천 폰트 상단 구분 영역 */}
+            {recentFonts.length > 0 && (
+              <div data-testid="recent-fonts-section" className="mb-2 rounded-lg bg-indigo-50/60 p-1.5">
+                <div className="mb-1 flex items-center gap-1 px-1.5 text-[11px] font-semibold text-indigo-700">
+                  <Sparkles size={11} /> 최근 선택 · 추천 폰트
+                </div>
+                <div className="flex flex-col gap-0.5">
+                  {recentFonts.map((f) => (
+                    <button
+                      key={`recent-${f.id}`}
+                      type="button"
+                      data-testid={`recent-font-item-${f.id}`}
+                      className={`flex w-full items-center justify-between rounded-md px-2 py-1 text-left text-xs transition ${
+                        selectedFontId === f.id ? 'bg-indigo-600 text-white' : 'text-slate-700 hover:bg-indigo-100/70'
+                      }`}
+                      style={{ fontFamily: f.family }}
+                      onClick={() => onChooseFont(f)}
+                    >
+                      <span className="truncate">{f.name}</span>
+                      {selectedFontId === f.id && <Check size={12} />}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="my-1.5 border-t border-slate-200" />
+
+            {/* 전체 폰트 목록 */}
+            <div data-testid="all-fonts-section">
+              <div className="mb-1 px-1.5 text-[11px] font-semibold text-slate-500">
+                전체 폰트 ({allFonts.length})
+              </div>
+              <div className="max-h-48 overflow-y-auto pr-0.5">
+                {allFonts.map((f) => (
+                  <div
+                    key={f.id}
+                    className={`flex items-center justify-between rounded-md px-2 py-1 text-xs transition ${
+                      selectedFontId === f.id ? 'bg-slate-100 font-semibold text-indigo-700' : 'text-slate-700 hover:bg-slate-50'
+                    }`}
+                  >
+                    <button
+                      type="button"
+                      data-testid={`all-font-item-${f.id}`}
+                      className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+                      style={{ fontFamily: f.family }}
+                      onClick={() => onChooseFont(f)}
+                    >
+                      <span className="truncate">{f.name}</span>
+                      {f.isCustom && (
+                        <span className="shrink-0 rounded bg-emerald-100 px-1 py-0.2 text-[9px] font-medium text-emerald-700">
+                          로컬
+                        </span>
+                      )}
+                    </button>
+                    <div className="flex items-center gap-1">
+                      {selectedFontId === f.id && <Check size={12} className="text-indigo-600" />}
+                      {f.isCustom && (
+                        <button
+                          type="button"
+                          className="rounded p-0.5 text-slate-400 hover:bg-red-50 hover:text-red-500"
+                          title="사용자 폰트 제거"
+                          onClick={(e) => void onRemoveCustomFont(e, f.id)}
+                        >
+                          <Trash2 size={11} />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="mt-2 border-t border-slate-200 pt-2">
+              <button
+                type="button"
+                data-testid="add-font-btn"
+                className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-indigo-300 bg-indigo-50/40 px-2.5 py-1.5 text-xs font-medium text-indigo-700 transition hover:bg-indigo-100/70"
+                onClick={() => fileInputRef.current?.click()}
+              >
+                <Upload size={13} /> 로컬 폰트 추가 (.ttf, .otf)
+              </button>
+            </div>
+          </motion.div>
+        </FloatingPortal>
+      )}
+    </div>
+  );
+}
+
+/**
+ * 페이지 추가 버튼 및 용지 규격(A4/A3 등) · 문서 포맷(페이지 분리형 / 연속형) 설정 팝오버
+ */
+function PageFormatControls({ activeId }: { activeId: string | null }) {
+  const {
+    docFormat,
+    defaultPaperSize,
+    defaultPageStyle,
+    defaultOrientation,
+    setDocFormat,
+    setDefaultPaperSize,
+    setDefaultPageStyle,
+    setDefaultOrientation,
+  } = useSettings();
+  const ui = useSessionUI(activeId);
+  const [open, setOpen] = useState(false);
+  const btnRef = useRef<HTMLButtonElement>(null);
+
+  const currentPage = ui.pages[ui.currentPageIndex] ?? ui.pages[0] ?? {
+    size: defaultPaperSize,
+    style: defaultPageStyle,
+    orientation: defaultOrientation,
+  };
+
+  const { refs, floatingStyles, context } = useFloating({
+    open,
+    onOpenChange: setOpen,
+    placement: 'bottom-start',
+    middleware: [offset(6), flip(), shift({ padding: 8 })],
+    whileElementsMounted: autoUpdate,
+    transform: false,
+    elements: { reference: btnRef.current },
+  });
+  const { getFloatingProps } = useInteractions([useDismiss(context)]);
+
+  const handleAddPageBelow = () => {
+    const s = getSession(activeId);
+    if (!s) {
+      toast.info('먼저 노트를 여세요.');
+      return;
+    }
+    const created = s.addPageBelow();
+    toast.success(`현재 페이지 아래에 새 페이지(${created.size})를 추가했습니다.`);
+  };
+
+  const handleSelectPaperSize = (size: PaperSizeId) => {
+    setDefaultPaperSize(size);
+    getSession(activeId)?.updateCurrentPageFormat({ size });
+  };
+
+  const handleSelectPageStyle = (style: PageStyleId) => {
+    setDefaultPageStyle(style);
+    getSession(activeId)?.updateCurrentPageFormat({ style });
+  };
+
+  const handleSelectOrientation = (orientation: PageOrientation) => {
+    setDefaultOrientation(orientation);
+    getSession(activeId)?.updateCurrentPageFormat({ orientation });
+  };
+
+  const handleSelectDocFormat = (mode: DocFormatMode) => {
+    setDocFormat(mode);
+  };
+
+  return (
+    <div className="flex items-center gap-1">
+      {docFormat === 'paginated' && (
+        <button
+          type="button"
+          data-testid="add-page-btn"
+          className="flex items-center gap-1 rounded-lg border border-indigo-200 bg-indigo-50 px-2 py-1 text-xs font-medium text-indigo-700 transition hover:bg-indigo-100 disabled:opacity-40"
+          disabled={!activeId}
+          onClick={handleAddPageBelow}
+          title="현재 페이지 바로 밑에 동일한 규격·스타일의 새 페이지 추가"
+        >
+          <FilePlus2 size={13} /> 페이지 추가
+        </button>
+      )}
+      <button
+        ref={btnRef}
+        type="button"
+        data-testid="page-settings-btn"
+        className="flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100"
+        onClick={() => setOpen((o) => !o)}
+        title="용지 규격(A4/A3 등) 및 문서 포맷(페이지 분리형/연속형) 설정"
+      >
+        <FileSpreadsheet size={13} className="text-indigo-600" />
+        <span>
+          {currentPage.size} · {docFormat === 'paginated' ? `페이지 분리 (${ui.pages.length}p)` : '연속 페이지'}
+        </span>
+        <ChevronDown size={12} className="text-slate-400" />
+      </button>
+
+      {open && (
+        <FloatingPortal>
+          <motion.div
+            ref={refs.setFloating}
+            style={floatingStyles}
+            {...getFloatingProps()}
+            initial={{ opacity: 0, y: -4 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="z-50 w-80 rounded-xl border border-slate-200 bg-white p-3 shadow-2xl"
+            data-testid="page-settings-popover"
+          >
+            {/* 1. 문서 포맷 설정 (페이지 분리형 vs 연속 페이지형) */}
+            <div className="mb-3">
+              <div className="mb-1.5 text-xs font-semibold text-slate-700">문서 작성 포맷</div>
+              <div className="grid grid-cols-2 gap-1.5">
+                <button
+                  type="button"
+                  data-testid="doc-format-paginated"
+                  className={`rounded-lg border px-2.5 py-2 text-left text-xs transition ${
+                    docFormat === 'paginated'
+                      ? 'border-indigo-500 bg-indigo-50 font-semibold text-indigo-700'
+                      : 'border-slate-200 text-slate-600 hover:bg-slate-50'
+                  }`}
+                  onClick={() => handleSelectDocFormat('paginated')}
+                >
+                  <div>페이지 분리형</div>
+                  <div className="mt-0.5 text-[10px] font-normal text-slate-500">표준 용지 단위로 분리</div>
+                </button>
+                <button
+                  type="button"
+                  data-testid="doc-format-continuous"
+                  className={`rounded-lg border px-2.5 py-2 text-left text-xs transition ${
+                    docFormat === 'continuous'
+                      ? 'border-indigo-500 bg-indigo-50 font-semibold text-indigo-700'
+                      : 'border-slate-200 text-slate-600 hover:bg-slate-50'
+                  }`}
+                  onClick={() => handleSelectDocFormat('continuous')}
+                >
+                  <div>연속 단일 페이지</div>
+                  <div className="mt-0.5 text-[10px] font-normal text-slate-500">분리 없이 한 페이지에 계속 작성</div>
+                </button>
+              </div>
+            </div>
+
+            {/* 2. 표준 종이 규격 (기본 A4) */}
+            <div className="mb-3">
+              <div className="mb-1.5 flex items-center justify-between text-xs font-semibold text-slate-700">
+                <span>용지 규격 (표준 포맷)</span>
+                <div className="flex gap-1 text-[11px] font-normal">
+                  <button
+                    type="button"
+                    data-testid="orientation-portrait"
+                    className={`rounded px-1.5 py-0.5 ${
+                      currentPage.orientation === 'portrait' ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-600'
+                    }`}
+                    onClick={() => handleSelectOrientation('portrait')}
+                  >
+                    세로
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="orientation-landscape"
+                    className={`rounded px-1.5 py-0.5 ${
+                      currentPage.orientation === 'landscape' ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-600'
+                    }`}
+                    onClick={() => handleSelectOrientation('landscape')}
+                  >
+                    가로
+                  </button>
+                </div>
+              </div>
+              <div className="grid grid-cols-1 gap-1">
+                {(Object.keys(PAPER_SPECS) as PaperSizeId[]).map((sizeId) => {
+                  const spec = PAPER_SPECS[sizeId];
+                  const active = currentPage.size === sizeId;
+                  return (
+                    <button
+                      key={sizeId}
+                      type="button"
+                      data-testid={`paper-size-${sizeId}`}
+                      className={`flex items-center justify-between rounded-lg border px-2.5 py-1.5 text-xs transition ${
+                        active
+                          ? 'border-indigo-500 bg-indigo-50 font-semibold text-indigo-700'
+                          : 'border-slate-200 text-slate-700 hover:bg-slate-50'
+                      }`}
+                      onClick={() => handleSelectPaperSize(sizeId)}
+                    >
+                      <span>{spec.label}</span>
+                      {active && <Check size={13} />}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* 3. 페이지 배경 스타일 */}
+            <div>
+              <div className="mb-1.5 text-xs font-semibold text-slate-700">페이지 스타일</div>
+              <div className="grid grid-cols-2 gap-1">
+                {(Object.keys(PAGE_STYLE_LABELS) as PageStyleId[]).map((styleId) => {
+                  const active = currentPage.style === styleId;
+                  return (
+                    <button
+                      key={styleId}
+                      type="button"
+                      data-testid={`page-style-${styleId}`}
+                      className={`rounded-lg border px-2 py-1.5 text-xs transition ${
+                        active
+                          ? 'border-indigo-500 bg-indigo-50 font-semibold text-indigo-700'
+                          : 'border-slate-200 text-slate-600 hover:bg-slate-50'
+                      }`}
+                      onClick={() => handleSelectPageStyle(styleId)}
+                    >
+                      {PAGE_STYLE_LABELS[styleId]}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </motion.div>
+        </FloatingPortal>
+      )}
+    </div>
   );
 }

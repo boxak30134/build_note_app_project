@@ -1,6 +1,7 @@
 /** BYOK API Key 로컬 암호화 저장 (Web Crypto AES-GCM, 추출 불가능한 마스터 키를 IndexedDB 에 보관) */
 import { db } from './db';
 import type { AiProviderId } from '../store/settingsStore';
+import { sanitizeEnvApiKey } from '../core/android/androidDeployment';
 
 async function masterKey(): Promise<CryptoKey> {
   const rec = await db.secrets.get('master-key');
@@ -22,17 +23,32 @@ export async function saveApiKey(provider: AiProviderId, apiKey: string): Promis
   await db.secrets.put({ id: `ai:${provider}`, value: { iv, data } satisfies Encrypted });
 }
 
-export async function loadApiKey(provider: AiProviderId): Promise<string | null> {
-  const rec = await db.secrets.get(`ai:${provider}`);
-  if (!rec) return null;
-  const { iv, data } = rec.value as Encrypted;
+export function getEnvGeminiKey(): string | null {
   try {
-    const key = await masterKey();
-    const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: iv as BufferSource }, key, data);
-    return new TextDecoder().decode(plain);
+    return sanitizeEnvApiKey(import.meta.env?.VITE_GEMINI_API_KEY, import.meta.env);
   } catch {
-    return null;
+    // ignore
   }
+  return null;
+}
+
+export async function loadApiKey(provider: AiProviderId): Promise<string | null> {
+  try {
+    const rec = await db.secrets.get(`ai:${provider}`);
+    if (rec) {
+      const { iv, data } = rec.value as Encrypted;
+      const key = await masterKey();
+      const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: iv as BufferSource }, key, data);
+      const decoded = new TextDecoder().decode(plain).trim();
+      if (decoded) return decoded;
+    }
+  } catch {
+    // IndexedDB 또는 WebCrypto 비활성 환경에서는 환경변수 폴백으로 진행
+  }
+  if (provider === 'google') {
+    return getEnvGeminiKey();
+  }
+  return null;
 }
 
 export async function removeApiKey(provider: AiProviderId): Promise<void> {
@@ -40,6 +56,15 @@ export async function removeApiKey(provider: AiProviderId): Promise<void> {
 }
 
 export async function connectedProviders(): Promise<AiProviderId[]> {
-  const all = await db.secrets.where('id').startsWith('ai:').primaryKeys();
-  return all.map((k) => String(k).slice(3) as AiProviderId);
+  let list: AiProviderId[] = [];
+  try {
+    const all = await db.secrets.where('id').startsWith('ai:').primaryKeys();
+    list = all.map((k) => String(k).slice(3) as AiProviderId);
+  } catch {
+    list = [];
+  }
+  if (getEnvGeminiKey() && !list.includes('google')) {
+    list = ['google', ...list];
+  }
+  return list;
 }

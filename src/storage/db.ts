@@ -2,6 +2,8 @@ import Dexie, { type EntityTable } from 'dexie';
 import type { Stroke } from '../core/strokes/StrokeStore';
 import type { EolKind, TextEncodingKind } from '../core/codec/textCodec';
 import type { Annotation } from '../features/annotations/types';
+import { createPage, type NotePage } from '../core/page/pageTypes';
+import type { CustomFontRecord } from '../core/font/fontManager';
 import { plainTextOf } from '../core/doc/blocks';
 
 export interface FolderRecord {
@@ -24,6 +26,8 @@ export interface NoteRecord {
   plainText: string;
   strokes: Stroke[];
   annotations: Annotation[];
+  /** 문서 페이지 목록 (규격·스타일·방향 보존, 기본 A4) */
+  pages?: NotePage[];
   encoding: TextEncodingKind;
   eol: EolKind;
   /** 로컬 파일에 연결된 경우 (File System Access API) */
@@ -43,6 +47,7 @@ export class EduInkDB extends Dexie {
   notes!: EntityTable<NoteRecord, 'id'>;
   folders!: EntityTable<FolderRecord, 'id'>;
   secrets!: EntityTable<SecretRecord, 'id'>;
+  customFonts!: EntityTable<CustomFontRecord, 'id'>;
 
   constructor() {
     super('eduink-studio');
@@ -50,6 +55,12 @@ export class EduInkDB extends Dexie {
       notes: 'id, folderId, title, updatedAt, deletedAt',
       folders: 'id, parentId, name, deletedAt',
       secrets: 'id',
+    });
+    this.version(2).stores({
+      notes: 'id, folderId, title, updatedAt, deletedAt',
+      folders: 'id, parentId, name, deletedAt',
+      secrets: 'id',
+      customFonts: 'id, name, createdAt',
     });
   }
 }
@@ -71,6 +82,7 @@ export function emptyNote(partial: Partial<NoteRecord> = {}): NoteRecord {
     plainText: '',
     strokes: [],
     annotations: [],
+    pages: [createPage()],
     encoding: 'utf-8',
     eol: 'lf',
     fileHandle: null,

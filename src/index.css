@@ -68,6 +68,26 @@ body,
   box-shadow: 0 1px 3px rgb(0 0 0 / 0.08), 0 8px 24px rgb(0 0 0 / 0.04);
   border-radius: 6px;
 }
+.page-style-plain {
+  background-color: #ffffff;
+}
+.page-style-lined {
+  background-color: #ffffff;
+  background-image: linear-gradient(to bottom, transparent 27px, #e2e8f0 28px);
+  background-size: 100% 28px;
+}
+.page-style-grid {
+  background-color: #ffffff;
+  background-image:
+    linear-gradient(to right, #f1f5f9 1px, transparent 1px),
+    linear-gradient(to bottom, #f1f5f9 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+.page-style-dotted {
+  background-color: #ffffff;
+  background-image: radial-gradient(#cbd5e1 1.2px, transparent 1.2px);
+  background-size: 20px 20px;
+}
 .ink-canvas {
   mix-blend-mode: multiply;
   z-index: 30;

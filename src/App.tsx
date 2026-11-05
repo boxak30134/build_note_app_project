@@ -14,6 +14,7 @@ import { useSettings } from './store/settingsStore';
 import { useTabs } from './store/tabsStore';
 import { useSessions } from './store/sessionStore';
 import { db, emptyNote, seedIfEmpty } from './storage/db';
+import { registerCustomFontInDOM } from './core/font/fontManager';
 import { indexAllNotes, indexNote } from './search/searchClient';
 import { allSessions, getSession } from './session/NoteSession';
 import { toast } from './store/uiStore';
@@ -47,6 +48,32 @@ export default function App() {
   useEffect(() => {
     void (async () => {
       await seedIfEmpty();
+      // 로컬 저장된 커스텀 폰트(.ttf, .otf 등) DOM 등록 및 복원
+      try {
+        const storedFonts = await db.customFonts.toArray();
+        for (const font of storedFonts) {
+          registerCustomFontInDOM(font);
+        }
+        if (storedFonts.length > 0) {
+          const existingIds = new Set(useSettings.getState().customFonts.map((f) => f.id));
+          const merged = [
+            ...useSettings.getState().customFonts,
+            ...storedFonts
+              .filter((f) => !existingIds.has(f.id))
+              .map(({ id, name, family, isCustom, fileName, format }) => ({
+                id,
+                name,
+                family,
+                isCustom,
+                fileName,
+                format,
+              })),
+          ];
+          useSettings.setState({ customFonts: merged });
+        }
+      } catch {
+        // IndexedDB 미지원 환경 폴백
+      }
       // 재시작 시 마지막 열린 탭 복원 (삭제된 노트 제외)
       const tabs = useTabs.getState().openDocTabs;
       const existing = await db.notes.bulkGet(tabs);

@@ -9,6 +9,7 @@ export function lassoCopy(s: NoteSession) {
   const sel = s.strokes.getMany(s.ui.lassoIds);
   if (sel.length === 0) return;
   strokeClipboard.strokes = sel.map((x) => ({ ...x, points: x.points.map((p) => [...p] as typeof p) }));
+  s.patch({ lassoIds: [], moveMode: false });
   toast.info(`필기 ${sel.length}개 복사됨 — 길게 누르거나 우클릭하여 붙여넣기`);
 }
 
@@ -18,8 +19,13 @@ export function lassoDelete(s: NoteSession) {
 }
 
 export function lassoCut(s: NoteSession) {
-  lassoCopy(s);
-  lassoDelete(s);
+  const ids = s.ui.lassoIds.slice();
+  const sel = s.strokes.getMany(ids);
+  if (sel.length === 0) return;
+  strokeClipboard.strokes = sel.map((x) => ({ ...x, points: x.points.map((p) => [...p] as typeof p) }));
+  s.strokes.removeStrokes(ids);
+  s.patch({ lassoIds: [], moveMode: false });
+  toast.info(`필기 ${sel.length}개 잘라냄 — 길게 누르거나 우클릭하여 붙여넣기`);
 }
 
 /** 내부 클립보드의 스트로크를 지정 지점(좌상단 기준)에 붙여넣기 */

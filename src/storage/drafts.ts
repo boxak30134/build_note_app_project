@@ -1,11 +1,13 @@
 /** 작성 중 내용(Draft) 로컬 임시 저장: drafts[tabId] */
 import type { Stroke } from '../core/strokes/StrokeStore';
 import type { Annotation } from '../features/annotations/types';
+import type { NotePage } from '../core/page/pageTypes';
 
 export interface NoteDraft {
   doc: unknown;
   strokes: Stroke[];
   annotations: Annotation[];
+  pages?: NotePage[];
   at: number;
 }
 

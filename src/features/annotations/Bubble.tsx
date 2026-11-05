@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type MouseEvent } from 'react';
 import { useFloating, autoUpdate, offset, flip, shift, useDismiss, useInteractions, FloatingPortal } from '@floating-ui/react';
 import { motion } from 'framer-motion';
 import { Bot, Paperclip, Send, Trash2, X, Loader2, Image as ImageIcon, FileText } from 'lucide-react';
@@ -11,10 +11,15 @@ import {
   consumeAiTurn,
   MAX_AI_TURNS_PER_BUBBLE,
   MAX_BUBBLE_CHAR_LENGTH,
-  MAX_OUTPUT_TOKENS,
 } from '../../core/bubble/limits';
 import { bubbleDrafts } from '../../storage/drafts';
 import { streamAi, PROVIDER_LABEL, dataUrlToBase64 } from '../../ai/aiClient';
+import {
+  BUBBLE_MAX_OUTPUT_TOKENS,
+  GEMINI_PRIMARY_MODEL,
+  parseMathSegments,
+  streamGeminiTutor,
+} from '../../modules/ai';
 import { useSettings, type AiProviderId } from '../../store/settingsStore';
 import { useConnectedProviders } from '../../ai/useConnectedProviders';
 import { renderStrokesToDataUrl } from '../../canvas/render';
@@ -47,18 +52,24 @@ export function Bubble({ session, annotation, reference, onClose }: Props) {
   const [question, setQuestion] = useState(() => bubbleDrafts.get(annotation.id));
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [busy, setBusy] = useState(false);
-  const abortRef = useRef<AbortController | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
   const bodyRef = useRef(annotation.body);
   bodyRef.current = annotation.body;
   const connected = useConnectedProviders();
   const preferred = useSettings((s) => s.aiProvider);
   const [provider, setProvider] = useState<AiProviderId | null>(null);
-  const activeProvider = provider ?? (preferred && connected.includes(preferred) ? preferred : connected[0] ?? null);
+  const activeProvider =
+    provider ??
+    (preferred && connected.includes(preferred)
+      ? preferred
+      : connected.includes('google')
+        ? 'google'
+        : connected[0] ?? null);
 
   const { refs, floatingStyles, context } = useFloating({
     open: true,
     onOpenChange: (o) => {
-      if (!o) onClose();
+      if (!o && !busy) onClose();
     },
     placement: 'right-start',
     middleware: [offset(10), flip({ fallbackPlacements: ['left-start', 'bottom', 'top'] }), shift({ padding: 8 })],
@@ -66,17 +77,29 @@ export function Bubble({ session, annotation, reference, onClose }: Props) {
     transform: false, // framer-motion 이 transform 을 제어하므로 top/left 위치 지정
     elements: { reference },
   });
-  const dismiss = useDismiss(context, { outsidePress: (e) => !(e.target as HTMLElement).closest('[data-pin]') });
+  const dismiss = useDismiss(context, {
+    outsidePress: (e) => !busy && !(e.target as HTMLElement).closest('[data-pin]'),
+  });
   const { getFloatingProps } = useInteractions([dismiss]);
 
-  useEffect(() => () => abortRef.current?.abort(), []);
+  // 컴포넌트 언마운트(unmount) 시점에만 진행 중인 요청을 abort 하도록 격리
+  useEffect(() => {
+    return () => {
+      abortControllerRef.current?.abort();
+    };
+  }, []);
 
   const turns = annotation.turns.length;
   const limitReached = !canAskAi(turns);
 
   const setBody = (body: string) => session.updateAnnotation(annotation.id, { body });
 
-  const ask = async () => {
+  const handleSendMessage = async (
+    e?: FormEvent<HTMLFormElement> | KeyboardEvent<HTMLInputElement> | MouseEvent<HTMLButtonElement>,
+  ) => {
+    e?.preventDefault();
+    e?.stopPropagation();
+
     const q = question.trim();
     if (!q || busy) return;
     if (!activeProvider) {
@@ -85,10 +108,11 @@ export function Bubble({ session, annotation, reference, onClose }: Props) {
     }
     try {
       consumeAiTurn(turns);
-    } catch (e) {
-      toast.error((e as Error).message);
+    } catch (err) {
+      toast.error((err as Error).message);
       return;
     }
+
     // 주석 원문(텍스트) 또는 올가미 캡처 손글씨 이미지를 자동으로 컨텍스트에 포함
     const quote = session.annotationQuote(annotation);
     const strokeImg = annotation.anchor.type === 'strokes' ? renderStrokesToDataUrl(session.getStrokesForAnnotation(annotation)) : null;
@@ -116,34 +140,61 @@ export function Bubble({ session, annotation, reference, onClose }: Props) {
     const header = `${bodyRef.current ? '\n\n' : ''}**Q.** ${q}\n**A(${PROVIDER_LABEL[activeProvider]}).** `;
     let { text, truncated } = appendBubbleText(bodyRef.current, header);
     setBody(text);
-    const ctrl = new AbortController();
-    abortRef.current = ctrl;
+
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+    const systemContext =
+      '[말풍선 주석 컨텍스트: 선택된 원문/수식/손글씨에 대해 학술 튜터 규칙에 따라 핵심 정의·정리·증명 아이디어를 간결하게 답변하라.]';
+
     try {
       if (!truncated) {
-        for await (const delta of streamAi({
-          provider: activeProvider,
-          system: '당신은 학습자의 노트에 달린 말풍선 주석 안에서 답하는 튜터입니다. 한국어로 간결하게(최대 5~8문장) 마크다운으로 답하세요.',
-          messages: [{ role: 'user', content: parts }],
-          maxOutputTokens: MAX_OUTPUT_TOKENS,
-          signal: ctrl.signal,
-        })) {
-          ({ text, truncated } = appendBubbleText(text, delta));
-          setBody(text);
-          if (truncated) {
-            ctrl.abort();
-            break;
+        if (activeProvider === 'google') {
+          const modelId = useSettings.getState().aiModels.google || GEMINI_PRIMARY_MODEL;
+          for await (const delta of streamGeminiTutor({
+            messages: [{ role: 'user', content: parts }],
+            systemContext,
+            target: 'bubble',
+            maxOutputTokens: BUBBLE_MAX_OUTPUT_TOKENS,
+            model: modelId,
+            signal: controller.signal,
+          })) {
+            ({ text, truncated } = appendBubbleText(text, delta));
+            setBody(text);
+            if (truncated) {
+              controller.abort();
+              break;
+            }
+          }
+        } else {
+          for await (const delta of streamAi({
+            provider: activeProvider,
+            target: 'bubble',
+            system: systemContext,
+            messages: [{ role: 'user', content: parts }],
+            maxOutputTokens: BUBBLE_MAX_OUTPUT_TOKENS,
+            signal: controller.signal,
+          })) {
+            ({ text, truncated } = appendBubbleText(text, delta));
+            setBody(text);
+            if (truncated) {
+              controller.abort();
+              break;
+            }
           }
         }
       }
       if (truncated) toast.info(`말풍선 텍스트가 최대 ${MAX_BUBBLE_CHAR_LENGTH.toLocaleString()}자에 도달하여 답변이 절삭되었습니다.`);
-    } catch (e) {
-      if (!ctrl.signal.aborted) {
-        toast.error((e as Error).message, 'AI 호출 실패');
-        setBody(appendBubbleText(text, '(오류로 답변을 받지 못했습니다)').text);
+    } catch (err) {
+      if (!controller.signal.aborted) {
+        const errMsg = (err as Error)?.message || 'AI 호출 중 알 수 없는 오류가 발생했습니다.';
+        toast.error(errMsg, 'AI 호출 실패');
+        setBody(appendBubbleText(text, `(⚠️ 오류: ${errMsg})`).text);
       }
     } finally {
       setBusy(false);
-      abortRef.current = null;
+      if (abortControllerRef.current === controller) {
+        abortControllerRef.current = null;
+      }
     }
   };
 
@@ -186,10 +237,10 @@ export function Bubble({ session, annotation, reference, onClose }: Props) {
           <span className="flex-1 truncate text-xs text-amber-900" title={anchorLabel}>
             {anchorLabel}
           </span>
-          <button className="icon-btn" title="주석 삭제" onClick={() => session.deleteAnnotation(annotation.id)}>
+          <button type="button" className="icon-btn" title="주석 삭제" onClick={() => session.deleteAnnotation(annotation.id)}>
             <Trash2 size={14} />
           </button>
-          <button className="icon-btn" title="닫기(최소화)" onClick={onClose}>
+          <button type="button" className="icon-btn" title="닫기(최소화)" onClick={onClose}>
             <X size={14} />
           </button>
         </div>
@@ -203,6 +254,22 @@ export function Bubble({ session, annotation, reference, onClose }: Props) {
             onChange={(e) => setBody(e.target.value)}
             rows={Math.min(14, Math.max(4, annotation.body.split('\n').length + 1))}
           />
+          {annotation.body.includes('$') && (
+            <div className="mt-1 border-t border-amber-100 pt-1.5 pb-1 text-xs leading-relaxed text-slate-700">
+              <div className="mb-0.5 text-[10px] font-medium text-amber-700">KaTeX 수식 미리보기</div>
+              <div className="whitespace-pre-wrap break-words">
+                {parseMathSegments(annotation.body).map((seg, idx) =>
+                  seg.type === 'text' ? (
+                    <span key={idx}>{seg.content}</span>
+                  ) : seg.type === 'block-math' ? (
+                    <div key={idx} className="my-1 overflow-x-auto" dangerouslySetInnerHTML={{ __html: seg.html }} />
+                  ) : (
+                    <span key={idx} dangerouslySetInnerHTML={{ __html: seg.html }} />
+                  ),
+                )}
+              </div>
+            </div>
+          )}
         </div>
         <div className="flex justify-between px-3 pb-1 text-[10px] text-slate-400">
           <span>
@@ -224,14 +291,14 @@ export function Bubble({ session, annotation, reference, onClose }: Props) {
                     <span key={i} className="flex items-center gap-1 rounded bg-slate-100 px-1.5 py-0.5 text-[10px]">
                       {a.kind === 'image' ? <ImageIcon size={10} /> : <FileText size={10} />}
                       {a.name}
-                      <button onClick={() => setAttachments((l) => l.filter((_, j) => j !== i))}>
+                      <button type="button" onClick={() => setAttachments((l) => l.filter((_, j) => j !== i))}>
                         <X size={10} />
                       </button>
                     </span>
                   ))}
                 </div>
               )}
-              <div className="flex items-center gap-1">
+              <form className="flex items-center gap-1" onSubmit={(e) => void handleSendMessage(e)}>
                 <select
                   className="rounded border border-slate-200 bg-white px-1 py-1 text-[11px]"
                   value={activeProvider ?? ''}
@@ -256,14 +323,17 @@ export function Bubble({ session, annotation, reference, onClose }: Props) {
                     bubbleDrafts.set(annotation.id, e.target.value);
                   }}
                   onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !e.nativeEvent.isComposing) void ask();
+                    if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
+                      e.preventDefault();
+                      void handleSendMessage(e);
+                    }
                   }}
                 />
-                <button className="btn-primary !px-2 !py-1 text-xs" onClick={() => void ask()} disabled={busy || !question.trim()} title="AI에게 질문">
+                <button type="submit" className="btn-primary !px-2 !py-1 text-xs" disabled={busy || !question.trim()} title="AI에게 질문">
                   {busy ? <Loader2 size={14} className="animate-spin" /> : <Bot size={14} />}
                   <Send size={12} />
                 </button>
-              </div>
+              </form>
             </>
           )}
         </div>
@@ -276,15 +346,15 @@ function AttachMenu({ onPick }: { onPick: (k: 'image' | 'text') => void }) {
   const [open, setOpen] = useState(false);
   return (
     <div className="relative">
-      <button className="icon-btn" title="미니 파일 첨부" onClick={() => setOpen((o) => !o)}>
+      <button type="button" className="icon-btn" title="미니 파일 첨부" onClick={() => setOpen((o) => !o)}>
         <Paperclip size={14} />
       </button>
       {open && (
         <div className="absolute bottom-full left-0 z-10 mb-1 w-28 rounded-lg border bg-white py-1 text-xs shadow-lg">
-          <button className="menu-item" onClick={() => (setOpen(false), onPick('image'))}>
+          <button type="button" className="menu-item" onClick={() => (setOpen(false), onPick('image'))}>
             <ImageIcon size={12} /> 이미지
           </button>
-          <button className="menu-item" onClick={() => (setOpen(false), onPick('text'))}>
+          <button type="button" className="menu-item" onClick={() => (setOpen(false), onPick('text'))}>
             <FileText size={12} /> 문서 조각
           </button>
         </div>
