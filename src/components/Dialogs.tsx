@@ -71,9 +71,20 @@ export function ConfirmDialog() {
 export function PromptDialog() {
   const req = useUi((s) => s.prompt);
   const [value, setValue] = useState('');
+  const inputRef = useRef<HTMLInputElement>(null);
+
   useEffect(() => {
     setValue(req?.initial ?? '');
+    if (req) {
+      // 태블릿 가상 키보드 IME 초기화 및 포커스 분실 방지
+      const timer = setTimeout(() => {
+        inputRef.current?.focus();
+        inputRef.current?.select();
+      }, 60);
+      return () => clearTimeout(timer);
+    }
   }, [req]);
+
   if (!req) return null;
   const err = req.validate?.(value) ?? null;
   const submit = () => !err && req.resolve(value);
@@ -81,7 +92,13 @@ export function PromptDialog() {
     <Modal onClose={() => req.resolve(null)}>
       <h3 className="mb-3 text-base font-semibold text-slate-800">{req.title}</h3>
       <input
-        autoFocus
+        ref={inputRef}
+        type="text"
+        inputMode="text"
+        lang="ko"
+        autoCapitalize="off"
+        autoCorrect="off"
+        spellCheck={false}
         className={`w-full rounded-lg border px-3 py-2 text-sm outline-none ${err ? 'border-red-400' : 'focus:border-indigo-400'}`}
         value={value}
         onChange={(e) => setValue(e.target.value)}

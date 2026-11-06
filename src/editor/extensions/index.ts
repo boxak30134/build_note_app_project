@@ -2,13 +2,13 @@ import type { AnyExtension } from '@tiptap/core';
 import StarterKit from '@tiptap/starter-kit';
 import { Markdown, MarkdownManager } from '@tiptap/markdown';
 import { Table, TableRow, TableHeader, TableCell } from '@tiptap/extension-table';
-import { Placeholder } from '@tiptap/extensions';
 import { InlineMath, BlockMath } from './math';
 import { WikiLink } from './wikiLink';
 import { AnnotationMark } from './annotationMark';
 import { FontFamilyMark } from './fontFamily';
 import { BlockId } from './blockId';
 import { NoteImage, PdfEmbed, InkTemplate } from './media';
+import { RubyText } from './rubyText';
 import { HistoryBridge } from './historyBridge';
 import type { CompositeHistoryManager } from '../../core/history/CompositeHistoryManager';
 
@@ -33,6 +33,7 @@ export function schemaExtensions(noteId: string): AnyExtension[] {
     InkTemplate.configure({ noteId }),
     InlineMath,
     BlockMath,
+    RubyText,
     AnnotationMark,
     FontFamilyMark,
     BlockId,
@@ -44,7 +45,6 @@ export function buildExtensions(opts: BuildOptions): AnyExtension[] {
     ...schemaExtensions(opts.noteId),
     WikiLink,
     Markdown,
-    Placeholder.configure({ placeholder: '여기에 입력하세요… ( [[ 로 노트 링크, $수식$ )' }),
     HistoryBridge.configure({ getHistory: opts.getHistory ?? (() => null), editorKey: opts.noteId }),
   ];
 }

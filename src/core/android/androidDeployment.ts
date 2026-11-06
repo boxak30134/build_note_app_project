@@ -54,7 +54,7 @@ export function buildCapacitorConfig(options: BuildCapacitorConfigOptions = {}):
     server,
     android: {
       allowMixedContent: false,
-      captureInput: true,
+      captureInput: false,
       webContentsDebuggingEnabled: options.webContentsDebuggingEnabled ?? true,
     },
   };

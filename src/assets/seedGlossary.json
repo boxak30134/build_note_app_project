@@ -1,0 +1,519 @@
+[
+  {
+    "word": "ring",
+    "defaultMeaning": "고리, 반지",
+    "senses": [
+      {
+        "id": "ring-algebra",
+        "meaning": "환(環)",
+        "domain": "algebra",
+        "baseWeight": 1.0,
+        "contextTriggers": [
+          "abstract algebra", "algebra", "field", "ideal", "group",
+          "subring", "homomorphism", "isomorphism", "commutative",
+          "polynomial", "integral domain", "characteristic", "module", "unit"
+        ]
+      },
+      {
+        "id": "ring-general",
+        "meaning": "고리, 반지",
+        "domain": "general",
+        "baseWeight": 0.8,
+        "contextTriggers": ["wear", "finger", "gold", "silver", "jewelry", "circular", "bell", "call", "wedding", "diamond"]
+      }
+    ]
+  },
+  {
+    "word": "field",
+    "defaultMeaning": "분야, 들판",
+    "senses": [
+      {
+        "id": "field-algebra",
+        "meaning": "체(體)",
+        "domain": "algebra",
+        "baseWeight": 1.0,
+        "contextTriggers": [
+          "abstract algebra", "algebra", "ring", "galois", "vector space",
+          "characteristic", "subfield", "finite field", "extension", "algebraic", "polynomial"
+        ]
+      },
+      {
+        "id": "field-physics",
+        "meaning": "장(場)",
+        "domain": "physics",
+        "baseWeight": 0.9,
+        "contextTriggers": [
+          "electric", "magnetic", "electromagnetic", "gravitational",
+          "scalar", "vector field", "potential", "force", "flux", "quantum"
+        ]
+      },
+      {
+        "id": "field-general",
+        "meaning": "분야, 들판",
+        "domain": "general",
+        "baseWeight": 0.7,
+        "contextTriggers": ["grass", "farm", "sports", "research", "study", "industry", "career"]
+      }
+    ]
+  },
+  {
+    "word": "compact",
+    "defaultMeaning": "소형의, 조밀한",
+    "senses": [
+      {
+        "id": "compact-topology",
+        "meaning": "콤팩트(위상)",
+        "domain": "topology",
+        "baseWeight": 1.0,
+        "contextTriggers": [
+          "topology", "open cover", "subcover", "finite subcover",
+          "hausdorff", "heine-borel", "metric space", "bounded", "closed", "continuous", "set"
+        ]
+      },
+      {
+        "id": "compact-general",
+        "meaning": "소형의, 조밀한",
+        "domain": "general",
+        "baseWeight": 0.7,
+        "contextTriggers": ["car", "size", "small", "camera", "disc", "design", "portable"]
+      }
+    ]
+  },
+  {
+    "word": "ideal",
+    "defaultMeaning": "이상적인",
+    "senses": [
+      {
+        "id": "ideal-algebra",
+        "meaning": "아이디얼(이데알)",
+        "domain": "algebra",
+        "baseWeight": 1.0,
+        "contextTriggers": [
+          "ring", "maximal", "prime ideal", "principal", "quotient",
+          "algebra", "subring", "generator", "radical", "noetherian", "commutative"
+        ]
+      },
+      {
+        "id": "ideal-general",
+        "meaning": "이상적인",
+        "domain": "general",
+        "baseWeight": 0.7,
+        "contextTriggers": ["perfect", "condition", "weather", "place", "choice", "candidate"]
+      }
+    ]
+  },
+  {
+    "word": "group",
+    "defaultMeaning": "그룹, 집단",
+    "senses": [
+      {
+        "id": "group-algebra",
+        "meaning": "군(群)",
+        "domain": "algebra",
+        "baseWeight": 1.0,
+        "contextTriggers": [
+          "abelian", "subgroup", "cyclic", "order", "generator",
+          "homomorphism", "normal subgroup", "coset", "lagrange", "abstract algebra",
+          "isomorphism", "binary operation", "identity", "inverse", "sylow", "permutation"
+        ]
+      },
+      {
+        "id": "group-general",
+        "meaning": "그룹, 집단",
+        "domain": "general",
+        "baseWeight": 0.7,
+        "contextTriggers": ["people", "team", "students", "social", "company", "organization"]
+      }
+    ]
+  },
+  {
+    "word": "kernel",
+    "defaultMeaning": "핵심, 알맹이",
+    "senses": [
+      {
+        "id": "kernel-math",
+        "meaning": "핵(Kernel)",
+        "domain": "algebra",
+        "baseWeight": 1.0,
+        "contextTriggers": [
+          "homomorphism", "linear map", "transformation", "null space",
+          "image", "injective", "isomorphism", "quotient", "matrix", "group", "ring"
+        ]
+      },
+      {
+        "id": "kernel-cs",
+        "meaning": "운영체제 커널",
+        "domain": "computer-science",
+        "baseWeight": 0.9,
+        "contextTriggers": ["linux", "operating system", "os", "process", "memory", "syscall", "driver", "thread"]
+      }
+    ]
+  },
+  {
+    "word": "normal",
+    "defaultMeaning": "보통의, 정상적인",
+    "senses": [
+      {
+        "id": "normal-algebra",
+        "meaning": "정규(正規)",
+        "domain": "algebra",
+        "baseWeight": 1.0,
+        "contextTriggers": [
+          "subgroup", "quotient group", "galois", "extension", "conjugate",
+          "operator", "matrix", "abelian", "homomorphism"
+        ]
+      },
+      {
+        "id": "normal-geometry",
+        "meaning": "법선(法線)",
+        "domain": "geometry",
+        "baseWeight": 0.95,
+        "contextTriggers": ["vector", "surface", "plane", "tangent", "perpendicular", "orthogonal", "curve"]
+      },
+      {
+        "id": "normal-probability",
+        "meaning": "정규분포(가우스)",
+        "domain": "statistics",
+        "baseWeight": 0.95,
+        "contextTriggers": ["distribution", "gaussian", "mean", "variance", "standard deviation", "random variable"]
+      }
+    ]
+  },
+  {
+    "word": "order",
+    "defaultMeaning": "순서, 주문",
+    "senses": [
+      {
+        "id": "order-algebra",
+        "meaning": "위수(位數)",
+        "domain": "algebra",
+        "baseWeight": 1.0,
+        "contextTriggers": ["group", "element", "cyclic", "lagrange", "subgroup", "finite", "generator", "divides"]
+      },
+      {
+        "id": "order-analysis",
+        "meaning": "계수(階數) / 차수",
+        "domain": "analysis",
+        "baseWeight": 0.9,
+        "contextTriggers": ["differential equation", "derivative", "taylor", "convergence", "approximation", "pole"]
+      },
+      {
+        "id": "order-set",
+        "meaning": "순서 관계",
+        "domain": "set-theory",
+        "baseWeight": 0.85,
+        "contextTriggers": ["partial", "total", "well-ordered", "lattice", "poset", "zorn", "maximal"]
+      }
+    ]
+  },
+  {
+    "word": "open",
+    "defaultMeaning": "열린, 개방된",
+    "senses": [
+      {
+        "id": "open-topology",
+        "meaning": "열린집합(개집합)",
+        "domain": "topology",
+        "baseWeight": 1.0,
+        "contextTriggers": [
+          "set", "topology", "neighborhood", "ball", "interior",
+          "closed", "cover", "continuous", "metric space", "hausdorff"
+        ]
+      }
+    ]
+  },
+  {
+    "word": "closed",
+    "defaultMeaning": "닫힌, 폐쇄된",
+    "senses": [
+      {
+        "id": "closed-topology",
+        "meaning": "닫힌집합(폐집합)",
+        "domain": "topology",
+        "baseWeight": 1.0,
+        "contextTriggers": ["set", "topology", "limit point", "closure", "boundary", "compact", "open", "complement"]
+      },
+      {
+        "id": "closed-algebra",
+        "meaning": "연산에 대해 닫혀있는",
+        "domain": "algebra",
+        "baseWeight": 0.95,
+        "contextTriggers": ["under", "operation", "binary", "addition", "multiplication", "subgroup", "subspace", "algebraically"]
+      }
+    ]
+  },
+  {
+    "word": "domain",
+    "defaultMeaning": "영역, 도메인",
+    "senses": [
+      {
+        "id": "domain-function",
+        "meaning": "정의역(定義域)",
+        "domain": "mathematics",
+        "baseWeight": 1.0,
+        "contextTriggers": ["function", "codomain", "range", "mapping", "inverse", "bijection", "injective"]
+      },
+      {
+        "id": "domain-algebra",
+        "meaning": "정역(整域)",
+        "domain": "algebra",
+        "baseWeight": 0.95,
+        "contextTriggers": ["integral", "principal ideal", "euclidean", "unique factorization", "zero divisor", "ring"]
+      }
+    ]
+  },
+  {
+    "word": "range",
+    "defaultMeaning": "범위, 영역",
+    "senses": [
+      {
+        "id": "range-function",
+        "meaning": "치역(値域)",
+        "domain": "mathematics",
+        "baseWeight": 1.0,
+        "contextTriggers": ["function", "domain", "codomain", "image", "mapping", "linear transformation"]
+      }
+    ]
+  },
+  {
+    "word": "basis",
+    "defaultMeaning": "기초, 근거",
+    "senses": [
+      {
+        "id": "basis-linear",
+        "meaning": "기저(基底)",
+        "domain": "linear-algebra",
+        "baseWeight": 1.0,
+        "contextTriggers": [
+          "vector space", "linearly independent", "span", "dimension",
+          "orthonormal", "standard basis", "coordinate", "subspace", "topology"
+        ]
+      }
+    ]
+  },
+  {
+    "word": "space",
+    "defaultMeaning": "공간, 우주",
+    "senses": [
+      {
+        "id": "space-math",
+        "meaning": "공간(空間)",
+        "domain": "mathematics",
+        "baseWeight": 1.0,
+        "contextTriggers": [
+          "vector", "metric", "topological", "hilbert", "banach",
+          "inner product", "normed", "euclidean", "hausdorff", "quotient", "dual"
+        ]
+      }
+    ]
+  },
+  {
+    "word": "module",
+    "defaultMeaning": "모듈, 부품",
+    "senses": [
+      {
+        "id": "module-algebra",
+        "meaning": "가군(加群)",
+        "domain": "algebra",
+        "baseWeight": 1.0,
+        "contextTriggers": ["ring", "free module", "finitely generated", "projective", "injective", "exact sequence", "tensor", "noetherian"]
+      }
+    ]
+  },
+  {
+    "word": "trace",
+    "defaultMeaning": "흔적, 추적하다",
+    "senses": [
+      {
+        "id": "trace-linear",
+        "meaning": "대각합(Trace)",
+        "domain": "linear-algebra",
+        "baseWeight": 1.0,
+        "contextTriggers": ["matrix", "eigenvalue", "determinant", "linear operator", "diagonal", "characteristic polynomial"]
+      }
+    ]
+  },
+  {
+    "word": "rank",
+    "defaultMeaning": "순위, 계급",
+    "senses": [
+      {
+        "id": "rank-linear",
+        "meaning": "계수(Rank)",
+        "domain": "linear-algebra",
+        "baseWeight": 1.0,
+        "contextTriggers": ["matrix", "nullity", "column space", "row space", "dimension", "linear map", "free module"]
+      }
+    ]
+  },
+  {
+    "word": "series",
+    "defaultMeaning": "연속, 시리즈",
+    "senses": [
+      {
+        "id": "series-analysis",
+        "meaning": "급수(級數)",
+        "domain": "analysis",
+        "baseWeight": 1.0,
+        "contextTriggers": ["infinite", "converge", "diverge", "power series", "taylor", "fourier", "sequence", "partial sum"]
+      }
+    ]
+  },
+  {
+    "word": "limit",
+    "defaultMeaning": "한계, 제한",
+    "senses": [
+      {
+        "id": "limit-analysis",
+        "meaning": "극한(極限)",
+        "domain": "analysis",
+        "baseWeight": 1.0,
+        "contextTriggers": ["sequence", "converge", "infinity", "continuous", "derivative", "epsilon", "delta", "approaches"]
+      }
+    ]
+  },
+  {
+    "word": "measure",
+    "defaultMeaning": "측정하다, 조치",
+    "senses": [
+      {
+        "id": "measure-analysis",
+        "meaning": "측도(測度)",
+        "domain": "analysis",
+        "baseWeight": 1.0,
+        "contextTriggers": ["lebesgue", "sigma-algebra", "measurable", "integration", "borel", "probability", "null set"]
+      }
+    ]
+  },
+  {
+    "word": "manifold",
+    "defaultMeaning": "다양한, 다기관",
+    "senses": [
+      {
+        "id": "manifold-geometry",
+        "meaning": "다양체(多樣體)",
+        "domain": "geometry",
+        "baseWeight": 1.0,
+        "contextTriggers": ["smooth", "differentiable", "riemannian", "topological", "tangent bundle", "chart", "atlas", "dimension"]
+      }
+    ]
+  },
+  {
+    "word": "lattice",
+    "defaultMeaning": "격자 구조",
+    "senses": [
+      {
+        "id": "lattice-math",
+        "meaning": "격자(Lattice)",
+        "domain": "mathematics",
+        "baseWeight": 1.0,
+        "contextTriggers": ["supremum", "infimum", "join", "meet", "boolean", "poset", "partial order", "subgroup"]
+      }
+    ]
+  },
+  {
+    "word": "simple",
+    "defaultMeaning": "단순한, 간단한",
+    "senses": [
+      {
+        "id": "simple-algebra",
+        "meaning": "단순군/단순환",
+        "domain": "algebra",
+        "baseWeight": 1.0,
+        "contextTriggers": ["group", "normal subgroup", "ring", "ideal", "semisimple", "lie algebra", "alternating"]
+      }
+    ]
+  },
+  {
+    "word": "free",
+    "defaultMeaning": "자유로운, 무료의",
+    "senses": [
+      {
+        "id": "free-algebra",
+        "meaning": "자유(Free) 대수구조",
+        "domain": "algebra",
+        "baseWeight": 1.0,
+        "contextTriggers": ["group", "module", "abelian", "generator", "relation", "rank", "basis", "torsion-free"]
+      }
+    ]
+  },
+  {
+    "word": "action",
+    "defaultMeaning": "행동, 작용",
+    "senses": [
+      {
+        "id": "action-algebra",
+        "meaning": "군 작용(Group Action)",
+        "domain": "algebra",
+        "baseWeight": 1.0,
+        "contextTriggers": ["group", "orbit", "stabilizer", "transitive", "faithful", "fixed point", "burnside", "sylow"]
+      }
+    ]
+  },
+  {
+    "word": "orbit",
+    "defaultMeaning": "궤도",
+    "senses": [
+      {
+        "id": "orbit-algebra",
+        "meaning": "궤도(Orbit)",
+        "domain": "algebra",
+        "baseWeight": 1.0,
+        "contextTriggers": ["group", "action", "stabilizer", "burnside", "conjugacy class", "transitive"]
+      }
+    ]
+  },
+  {
+    "word": "character",
+    "defaultMeaning": "성격, 등장인물, 문자",
+    "senses": [
+      {
+        "id": "character-algebra",
+        "meaning": "지표(Character)",
+        "domain": "algebra",
+        "baseWeight": 1.0,
+        "contextTriggers": ["representation", "group", "irreducible", "trace", "class function", "orthogonality", "dirichlet"]
+      }
+    ]
+  },
+  {
+    "word": "extension",
+    "defaultMeaning": "확장, 연장",
+    "senses": [
+      {
+        "id": "extension-algebra",
+        "meaning": "확대체/확장(Extension)",
+        "domain": "algebra",
+        "baseWeight": 1.0,
+        "contextTriggers": ["field", "galois", "algebraic", "separable", "normal", "degree", "splitting field", "group"]
+      }
+    ]
+  },
+  {
+    "word": "dense",
+    "defaultMeaning": "밀집한, 짙은",
+    "senses": [
+      {
+        "id": "dense-topology",
+        "meaning": "조밀한(Dense)",
+        "domain": "topology",
+        "baseWeight": 1.0,
+        "contextTriggers": ["closure", "subset", "topology", "metric space", "separable", "baire", "nowhere dense", "rational"]
+      }
+    ]
+  },
+  {
+    "word": "connected",
+    "defaultMeaning": "연결된",
+    "senses": [
+      {
+        "id": "connected-topology",
+        "meaning": "연결 공간(Connected)",
+        "domain": "topology",
+        "baseWeight": 1.0,
+        "contextTriggers": ["path-connected", "simply connected", "component", "topology", "open", "closed", "disjoint"]
+      }
+    ]
+  }
+]
+

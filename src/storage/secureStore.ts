@@ -17,10 +17,18 @@ interface Encrypted {
 }
 
 export async function saveApiKey(provider: AiProviderId, apiKey: string): Promise<void> {
-  const key = await masterKey();
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const data = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(apiKey));
-  await db.secrets.put({ id: `ai:${provider}`, value: { iv, data } satisfies Encrypted });
+  try {
+    const key = await masterKey();
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const data = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(apiKey));
+    await db.secrets.put({ id: `ai:${provider}`, value: { iv, data } satisfies Encrypted });
+  } catch {
+    try {
+      localStorage.setItem(`eduink_key_${provider}`, apiKey);
+    } catch {
+      // ignore
+    }
+  }
 }
 
 export function getEnvGeminiKey(): string | null {
@@ -45,6 +53,12 @@ export async function loadApiKey(provider: AiProviderId): Promise<string | null>
   } catch {
     // IndexedDB 또는 WebCrypto 비활성 환경에서는 환경변수 폴백으로 진행
   }
+  try {
+    const local = localStorage.getItem(`eduink_key_${provider}`)?.trim();
+    if (local) return local;
+  } catch {
+    // ignore
+  }
   if (provider === 'google') {
     return getEnvGeminiKey();
   }
@@ -52,7 +66,16 @@ export async function loadApiKey(provider: AiProviderId): Promise<string | null>
 }
 
 export async function removeApiKey(provider: AiProviderId): Promise<void> {
-  await db.secrets.delete(`ai:${provider}`);
+  try {
+    await db.secrets.delete(`ai:${provider}`);
+  } catch {
+    // ignore
+  }
+  try {
+    localStorage.removeItem(`eduink_key_${provider}`);
+  } catch {
+    // ignore
+  }
 }
 
 export async function connectedProviders(): Promise<AiProviderId[]> {
@@ -67,4 +90,67 @@ export async function connectedProviders(): Promise<AiProviderId[]> {
     list = ['google', ...list];
   }
   return list;
+}
+
+/** Google Cloud Translation API 전용 Key 관리 (Google Gemini AI Key와 완전 분리 영속화) */
+export async function saveTranslateApiKey(apiKey: string): Promise<void> {
+  const trimmed = apiKey.trim();
+  try {
+    const key = await masterKey();
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const data = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(trimmed));
+    await db.secrets.put({ id: 'translate:google', value: { iv, data } satisfies Encrypted });
+  } catch {
+    try {
+      localStorage.setItem('eduink_key_translate_google', trimmed);
+    } catch {
+      // ignore
+    }
+  }
+}
+
+export function getEnvGoogleTranslateKey(): string | null {
+  try {
+    const raw = import.meta.env?.VITE_GOOGLE_TRANSLATE_API_KEY;
+    if (typeof raw === 'string' && raw.trim()) return raw.trim();
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+export async function loadTranslateApiKey(): Promise<string | null> {
+  try {
+    const rec = await db.secrets.get('translate:google');
+    if (rec) {
+      const { iv, data } = rec.value as Encrypted;
+      const key = await masterKey();
+      const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: iv as BufferSource }, key, data);
+      const decoded = new TextDecoder().decode(plain).trim();
+      if (decoded) return decoded;
+    }
+  } catch {
+    // ignore
+  }
+  try {
+    const local = localStorage.getItem('eduink_key_translate_google')?.trim();
+    if (local) return local;
+  } catch {
+    // ignore
+  }
+  // 절대 Google Gemini 키(VITE_GEMINI_API_KEY)를 반환하지 않고 전용 번역 환경변수만 확인
+  return getEnvGoogleTranslateKey();
+}
+
+export async function removeTranslateApiKey(): Promise<void> {
+  try {
+    await db.secrets.delete('translate:google');
+  } catch {
+    // ignore
+  }
+  try {
+    localStorage.removeItem('eduink_key_translate_google');
+  } catch {
+    // ignore
+  }
 }

@@ -102,6 +102,7 @@ export function Toolbar() {
                   <ChevronDown size={11} />
                 </button>
               )}
+              <PenSettingsPopup open={penPopupOpen} onClose={() => setPenPopupOpen(false)} />
             </div>
           );
         }
@@ -171,7 +172,6 @@ export function Toolbar() {
       >
         <MousePointer2 size={13} /> 마우스 필기 {mouseDraw ? 'ON' : 'OFF'}
       </button>
-      <PenSettingsPopup open={penPopupOpen} onClose={() => setPenPopupOpen(false)} />
     </div>
   );
 }

@@ -24,7 +24,7 @@ describe('Android Deployment & Tablet S-Pen Configuration (android_deployment_gu
     });
     expect(capacitorConfig.android).toEqual({
       allowMixedContent: false,
-      captureInput: true,
+      captureInput: false,
       webContentsDebuggingEnabled: true,
     });
   });

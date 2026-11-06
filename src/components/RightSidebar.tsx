@@ -5,7 +5,7 @@ import type { ModelMessage } from 'ai';
 import { useSettings, DEFAULT_MODELS, type AiProviderId } from '../store/settingsStore';
 import { useSessionUI } from '../store/sessionStore';
 import { useTabs } from '../store/tabsStore';
-import { saveApiKey, removeApiKey } from '../storage/secureStore';
+import { saveApiKey, removeApiKey, loadTranslateApiKey, saveTranslateApiKey, removeTranslateApiKey } from '../storage/secureStore';
 import { useConnectedProviders, useProvidersLoaded, refreshProviders } from '../ai/useConnectedProviders';
 import { streamAi, PROVIDER_LABEL, PROVIDER_KEY_URL } from '../ai/aiClient';
 import {
@@ -210,7 +210,15 @@ function ConnectForm({ provider, onDone }: { provider: AiProviderId; onDone: () 
 }
 
 function SettingsPanel({ connected, onConnect }: { connected: AiProviderId[]; onConnect: (p: AiProviderId) => void }) {
-  const { aiModels, set, esUrl, esIndex, aiProvider } = useSettings();
+  const { aiModels, set, esUrl, esIndex, aiProvider, translationInsertMode, setTranslationInsertMode } = useSettings();
+  const [translateKey, setTranslateKey] = useState<string | null>(null);
+  const [editingTranslate, setEditingTranslate] = useState(false);
+  const [newTranslateKey, setNewTranslateKey] = useState('');
+
+  useEffect(() => {
+    void loadTranslateApiKey().then(setTranslateKey);
+  }, []);
+
   return (
     <div className="flex-1 space-y-4 overflow-y-auto p-3 text-xs">
       <section>
@@ -258,6 +266,133 @@ function SettingsPanel({ connected, onConnect }: { connected: AiProviderId[]; on
             </div>
           );
         })}
+      </section>
+
+      <section>
+        <h4 className="mb-2 font-semibold text-slate-700">번역 서비스 (Google Cloud Translation API)</h4>
+        <div className="mb-2 rounded-lg border p-2">
+          <div className="flex items-center gap-2">
+            <span>🌐</span>
+            <span className="flex-1 font-medium">Google Cloud Translation</span>
+            {translateKey ? (
+              <>
+                <span className="rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700">연결됨</span>
+                <button
+                  type="button"
+                  className="icon-btn text-red-500"
+                  title="번역 키 삭제"
+                  onClick={async () => {
+                    await removeTranslateApiKey();
+                    setTranslateKey(null);
+                    toast.info('Google Translate API 키가 삭제되었습니다.');
+                  }}
+                >
+                  <Trash2 size={12} />
+                </button>
+              </>
+            ) : (
+              <button
+                type="button"
+                className="btn-ghost text-[11px]"
+                onClick={() => setEditingTranslate(true)}
+              >
+                키 등록
+              </button>
+            )}
+          </div>
+          <p className="mt-1 text-[11px] text-slate-400">
+            Google Gemini 학술 튜터 키와는 별개로 관리되는 전용 번역 API 키입니다.
+          </p>
+          {editingTranslate && (
+            <div className="mt-2 space-y-1.5 border-t border-slate-100 pt-2">
+              <input
+                type="password"
+                className="w-full rounded border px-2 py-1 font-mono text-xs outline-none focus:border-indigo-400"
+                placeholder="AIzaSy... (Translation API Key)"
+                value={newTranslateKey}
+                onChange={(e) => setNewTranslateKey(e.target.value)}
+                autoFocus
+              />
+              <div className="flex justify-end gap-1.5">
+                <button
+                  type="button"
+                  className="rounded px-2 py-0.5 text-[11px] text-slate-500 hover:bg-slate-100"
+                  onClick={() => {
+                    setEditingTranslate(false);
+                    setNewTranslateKey('');
+                  }}
+                >
+                  취소
+                </button>
+                <button
+                  type="button"
+                  className="btn-primary px-2.5 py-0.5 text-[11px]"
+                  onClick={async () => {
+                    if (!newTranslateKey.trim()) return;
+                    await saveTranslateApiKey(newTranslateKey.trim());
+                    setTranslateKey(newTranslateKey.trim());
+                    setEditingTranslate(false);
+                    setNewTranslateKey('');
+                    toast.success('Google Translate API 키가 등록되었습니다.');
+                  }}
+                >
+                  저장
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      </section>
+
+      <section>
+        <h4 className="mb-2 font-semibold text-slate-700">번역 결과 삽입 방식 설정</h4>
+        <div className="space-y-2 rounded-lg border border-slate-200 bg-slate-50/70 p-2.5">
+          <label className="flex items-start gap-2 cursor-pointer hover:text-slate-900">
+            <input
+              type="radio"
+              name="sidebarTranslationMode"
+              value="parentheses"
+              checked={translationInsertMode === 'parentheses'}
+              onChange={() => setTranslationInsertMode('parentheses')}
+              data-testid="sidebar-mode-parentheses"
+              className="mt-0.5 accent-indigo-600"
+            />
+            <div>
+              <span className="font-medium text-slate-800">1. 원문 뒤 괄호 삽입 (기본)</span>
+              <p className="text-[11px] text-slate-500">원래 문장 뒤에 괄호치고 번역 문장을 삽입합니다. 뒤에 다른 문장이 있어도 그 사이에 괄호로 삽입됩니다 (예: apple (사과)).</p>
+            </div>
+          </label>
+          <label className="flex items-start gap-2 cursor-pointer hover:text-slate-900">
+            <input
+              type="radio"
+              name="sidebarTranslationMode"
+              value="ruby"
+              checked={translationInsertMode === 'ruby'}
+              onChange={() => setTranslationInsertMode('ruby')}
+              data-testid="sidebar-mode-ruby"
+              className="mt-0.5 accent-indigo-600"
+            />
+            <div>
+              <span className="font-medium text-slate-800">2. 루비 주석 표시</span>
+              <p className="text-[11px] text-slate-500">원래 문장 위에 보라색 작은 글씨로 표시합니다.</p>
+            </div>
+          </label>
+          <label className="flex items-start gap-2 cursor-pointer hover:text-slate-900">
+            <input
+              type="radio"
+              name="sidebarTranslationMode"
+              value="replace"
+              checked={translationInsertMode === 'replace'}
+              onChange={() => setTranslationInsertMode('replace')}
+              data-testid="sidebar-mode-replace"
+              className="mt-0.5 accent-indigo-600"
+            />
+            <div>
+              <span className="font-medium text-slate-800">3. 원문 대체 (덮어쓰기)</span>
+              <p className="text-[11px] text-slate-500">원래 문장을 번역 문장으로 대체/덮어씌웁니다.</p>
+            </div>
+          </label>
+        </div>
       </section>
       <section>
         <h4 className="mb-1 font-semibold text-slate-700">Elasticsearch (선택)</h4>

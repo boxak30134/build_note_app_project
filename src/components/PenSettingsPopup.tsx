@@ -161,16 +161,16 @@ export function PenSettingsPopup({ open, onClose }: Props) {
   return (
     <>
       <div
-        className="fixed inset-0 z-40 bg-black/30 backdrop-blur-[1px]"
+        className="fixed inset-0 z-40 bg-transparent"
         onClick={onClose}
         data-testid="pen-settings-backdrop"
       />
       <motion.div
-        initial={{ opacity: 0, scale: 0.94, y: 16 }}
+        initial={{ opacity: 0, scale: 0.96, y: -6 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
-        exit={{ opacity: 0, scale: 0.94, y: 16 }}
-        transition={{ type: 'spring', damping: 25, stiffness: 350 }}
-        className="fixed bottom-16 left-1/2 z-50 w-[350px] -translate-x-1/2 rounded-3xl border border-slate-700/80 bg-[#232429] p-5 text-white shadow-2xl"
+        exit={{ opacity: 0, scale: 0.96, y: -6 }}
+        transition={{ type: 'spring', damping: 26, stiffness: 360 }}
+        className="absolute top-full left-0 mt-2 z-50 w-[350px] max-w-[calc(100vw-24px)] rounded-3xl border border-slate-700/80 bg-[#232429] p-5 text-white shadow-2xl"
         onClick={(e) => e.stopPropagation()}
         data-testid="pen-settings-popup"
       >

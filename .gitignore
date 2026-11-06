@@ -25,3 +25,4 @@ token_optimization_guide.md
 android_optimization_deployment_guide.md
 image-*.png
 app-debug.apk
+capacitor.config.ts

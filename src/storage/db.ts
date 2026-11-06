@@ -4,7 +4,12 @@ import type { EolKind, TextEncodingKind } from '../core/codec/textCodec';
 import type { Annotation } from '../features/annotations/types';
 import { createPage, type NotePage } from '../core/page/pageTypes';
 import type { CustomFontRecord } from '../core/font/fontManager';
+import type { UserWordStat } from '../types/adaptiveGlossary';
 import { plainTextOf } from '../core/doc/blocks';
+
+export interface UserWordStatRecord extends UserWordStat {
+  id: string;
+}
 
 export interface FolderRecord {
   id: string;
@@ -48,6 +53,7 @@ export class EduInkDB extends Dexie {
   folders!: EntityTable<FolderRecord, 'id'>;
   secrets!: EntityTable<SecretRecord, 'id'>;
   customFonts!: EntityTable<CustomFontRecord, 'id'>;
+  glossaryStats!: EntityTable<UserWordStatRecord, 'id'>;
 
   constructor() {
     super('eduink-studio');
@@ -61,6 +67,13 @@ export class EduInkDB extends Dexie {
       folders: 'id, parentId, name, deletedAt',
       secrets: 'id',
       customFonts: 'id, name, createdAt',
+    });
+    this.version(3).stores({
+      notes: 'id, folderId, title, updatedAt, deletedAt',
+      folders: 'id, parentId, name, deletedAt',
+      secrets: 'id',
+      customFonts: 'id, name, createdAt',
+      glossaryStats: 'id, word, contextTag, selectedMeaning, lastUpdated',
     });
   }
 }

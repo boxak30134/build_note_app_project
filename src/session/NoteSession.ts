@@ -14,14 +14,17 @@ import { readHandle, writeHandle } from '../storage/localFiles';
 import { extOfMime, saveAttachmentExclusive, saveImageExclusive } from '../storage/opfs';
 import { indexNote, searchRelated } from '../search/searchClient';
 import { offlineLinker, type LinkRecommendation } from '../services/offlineDocumentLinker';
+import { adaptiveGlossary } from '../services/AdaptiveGlossaryService';
+import type { TranslationResolution } from '../types/adaptiveGlossary';
 import { getSessionUI, useSessions, type PendingCitation } from '../store/sessionStore';
-import { useSettings } from '../store/settingsStore';
+import { useSettings, type TranslationInsertMode } from '../store/settingsStore';
 import { toast, confirmDialog } from '../store/uiStore';
 import type { Annotation, AnnotationAnchor } from '../features/annotations/types';
 import {
   clampNoteZoom,
   createPage,
   DEFAULT_NOTE_ZOOM,
+  getPageDimensions,
   insertPageBelow,
   NOTE_ZOOM_STEP,
   type NotePage,
@@ -231,6 +234,43 @@ export class NoteSession {
     }
   }
 
+  /** 특정 페이지로 스크롤 없이 즉시/부드럽게 이동 */
+  scrollToPage(index: number) {
+    const maxPages = Math.max(1, this.ui.pages.length);
+    const clamped = Math.max(0, Math.min(maxPages - 1, index));
+    this.setCurrentPageIndex(clamped);
+
+    const scrollEl = this.scrollEl;
+    const pageEl = this.pageEl;
+    if (!scrollEl || !pageEl) return;
+
+    // 1. PDF 템플릿 페이지 요소 검색 (1-based page: clamped + 1)
+    const pdfPage = pageEl.querySelector(
+      `[data-ink-template][data-page="${clamped + 1}"], #pdf-page-${clamped + 1}`
+    ) as HTMLElement | null;
+    if (pdfPage) {
+      pdfPage.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      return;
+    }
+
+    // 2. 분리형 페이지 시트 검색 ([data-page-index="..."])
+    const sheet = pageEl.querySelector(`[data-page-index="${clamped}"]`) as HTMLElement | null;
+    if (sheet) {
+      sheet.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      return;
+    }
+
+    // 3. 페이지 높이 누적 기반 스크롤 폴백
+    const zoom = this.ui.zoom || 1;
+    let targetY = 0;
+    for (let i = 0; i < clamped && i < this.ui.pages.length; i++) {
+      const p = this.ui.pages[i];
+      const d = getPageDimensions(p.size, p.orientation);
+      targetY += (d.height + 24) * zoom;
+    }
+    scrollEl.scrollTo({ top: targetY, behavior: 'smooth' });
+  }
+
   /** 노트 영역 확대/축소 배율 설정 (0.5x ~ 3.0x) */
   setZoom(zoom: number): number {
     const clamped = clampNoteZoom(zoom);
@@ -430,6 +470,131 @@ export class NoteSession {
         },
       )
       .run();
+  }
+
+  /**
+   * 드래그 선택 단어에 대해 오프라인 문맥 스코어링(<1ms)으로 최적 번역어를 즉시 판별한다.
+   */
+  resolveSelectionTranslation(): {
+    from: number;
+    to: number;
+    targetWord: string;
+    surroundingSentence: string;
+    activeTag: string;
+    resolution: TranslationResolution;
+  } | null {
+    const { from, to, empty } = this.editor.state.selection;
+    if (empty) return null;
+    const targetWord = this.editor.state.doc.textBetween(from, to, ' ').trim();
+    if (!targetWord || targetWord.length > 60) return null;
+
+    // 주변 문맥 추출 (앞뒤 250자 범위 + 노트 제목)
+    const docSize = this.editor.state.doc.content.size;
+    const ctxStart = Math.max(0, from - 250);
+    const ctxEnd = Math.min(docSize, to + 250);
+    const contextSnippet = this.editor.state.doc.textBetween(ctxStart, ctxEnd, ' ');
+    const fullText = this.editor.state.doc.textBetween(0, Math.min(docSize, 2000), ' ');
+    const tagMatches = fullText.match(/#[a-zA-Z0-9가-힣_-]+/g) || [];
+    const activeTags = [...tagMatches.map((t) => t.slice(1)), this.record.title];
+    const activeTag = tagMatches[0]?.slice(1) || 'default';
+    const surroundingSentence = `${this.record.title} ${contextSnippet}`.trim();
+
+    const resolution = adaptiveGlossary.resolveMeaning(targetWord, surroundingSentence, activeTags);
+    return {
+      from,
+      to,
+      targetWord,
+      surroundingSentence,
+      activeTag,
+      resolution,
+    };
+  }
+
+  /**
+   * 선택 영역에 번역 텍스트를 삽입하고 사용자 학습 피드백을 영속화한다.
+   * mode에 따라:
+   * 1. 'parentheses': 원래 문장 뒤에 괄호로 삽입 (${base} (${trimmed}))
+   * 2. 'ruby': <ruby>word<rt>meaning</rt></ruby> (보라색 작은 글씨로 위에 표시)
+   * 3. 'replace': 원래 문장을 번역 문장으로 대체(덮어쓰기)
+   */
+  applyTranslation(
+    meaning: string,
+    context?: {
+      from: number;
+      to: number;
+      targetWord: string;
+      surroundingSentence: string;
+      activeTag?: string;
+    },
+    recordFeedback = true,
+    insertMode?: TranslationInsertMode,
+  ) {
+    const trimmed = meaning.trim();
+    if (!trimmed) return;
+    const from = context?.from ?? this.editor.state.selection.from;
+    const to = context?.to ?? this.editor.state.selection.to;
+    const rawText = this.editor.state.doc.textBetween(from, to, ' ');
+    const base = (context?.targetWord ?? rawText).trim();
+    if (!base) return;
+
+    if (recordFeedback && context) {
+      void adaptiveGlossary.saveUserFeedback(
+        base,
+        trimmed,
+        context.surroundingSentence,
+        context.activeTag ?? 'default',
+      );
+    }
+
+    const mode = insertMode ?? useSettings.getState().translationInsertMode ?? 'parentheses';
+
+    if (mode === 'parentheses') {
+      const hasLeadingSpace = /^\s/.test(rawText);
+      const hasTrailingSpace = /\s$/.test(rawText);
+      const leading = hasLeadingSpace ? ' ' : '';
+      const trailing = hasTrailingSpace ? ' ' : '';
+      this.editor
+        .chain()
+        .focus()
+        .insertContentAt({ from, to }, `${leading}${base} (${trimmed})${trailing}`)
+        .run();
+    } else if (mode === 'replace') {
+      const hasLeadingSpace = /^\s/.test(rawText);
+      const hasTrailingSpace = /\s$/.test(rawText);
+      const leading = hasLeadingSpace ? ' ' : '';
+      const trailing = hasTrailingSpace ? ' ' : '';
+      this.editor
+        .chain()
+        .focus()
+        .insertContentAt({ from, to }, `${leading}${trimmed}${trailing}`)
+        .run();
+    } else {
+      this.editor
+        .chain()
+        .focus()
+        .insertContentAt(
+          { from, to },
+          {
+            type: 'rubyText',
+            attrs: { base, rt: trimmed },
+          },
+        )
+        .run();
+    }
+  }
+
+  applyRubyTranslation(
+    meaning: string,
+    context?: {
+      from: number;
+      to: number;
+      targetWord: string;
+      surroundingSentence: string;
+      activeTag?: string;
+    },
+    recordFeedback = true,
+  ) {
+    this.applyTranslation(meaning, context, recordFeedback);
   }
 
   // ---------- media insertion ----------

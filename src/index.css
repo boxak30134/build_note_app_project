@@ -213,14 +213,55 @@ body,
   padding: 0 2px;
   cursor: pointer;
 }
-/* PDF / 캔버스 페이지 템플릿 */
+/* 적응형 문맥 번역 루비 주석 (<ruby>word<rt>meaning</rt></ruby>) */
+.ruby-annotation {
+  ruby-position: over;
+  padding: 0 2px;
+  border-bottom: 1px dotted #818cf8;
+  color: #1e293b;
+}
+.ruby-annotation rt,
+.ruby-rt {
+  font-size: 0.65em;
+  font-weight: 600;
+  color: #4f46e5;
+  line-height: 1.1;
+  user-select: none;
+}
+/* PDF / 캔버스 페이지 템플릿: 페이지별 명확한 분리 및 종이 그림자 */
 .ink-template {
   position: relative;
   width: 100%;
-  border: none;
-  background-color: transparent;
+  background-color: #ffffff;
+  border-radius: 6px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08), 0 1px 3px rgba(0, 0, 0, 0.05);
+  border: 1px solid #cbd5e1;
   overflow: hidden;
   user-select: none;
+  margin-bottom: 24px;
+  transition: box-shadow 0.2s ease, border-color 0.2s ease;
+}
+.ink-template:last-child {
+  margin-bottom: 36px;
+}
+.ink-template:hover {
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+}
+.ink-template-badge {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  z-index: 20;
+  background: rgba(15, 23, 42, 0.75);
+  backdrop-filter: blur(4px);
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 9999px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
+  pointer-events: none;
+  letter-spacing: 0.02em;
 }
 .ink-template img {
   position: absolute;
@@ -230,9 +271,14 @@ body,
   object-fit: contain;
   pointer-events: none;
 }
+.note-page-pdf {
+  background: transparent !important;
+  box-shadow: none !important;
+  border-radius: 0 !important;
+}
 .note-page-pdf .prose-note,
 .note-page:has(.ink-template) .prose-note {
-  padding: 0 !important;
+  padding: 16px 0 0 0 !important;
 }
 .note-page-pdf .prose-note > * + *,
 .note-page:has(.ink-template) .prose-note > * + * {

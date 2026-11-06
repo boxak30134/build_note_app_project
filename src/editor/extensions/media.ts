@@ -90,6 +90,14 @@ export const InkTemplate = Node.create<NoteImageOptions>({
       dom.contentEditable = 'false';
       dom.style.aspectRatio = `${node.attrs.width} / ${node.attrs.height}`;
       dom.dataset.inkTemplate = '';
+      dom.id = `pdf-page-${node.attrs.page}`;
+      dom.dataset.page = String(node.attrs.page);
+
+      const badge = document.createElement('div');
+      badge.className = 'ink-template-badge';
+      badge.textContent = `${node.attrs.page}쪽`;
+      dom.append(badge);
+
       const img = document.createElement('img');
       img.alt = `페이지 ${node.attrs.page}`;
       img.draggable = false;

@@ -393,6 +393,58 @@ function LoadedWorkspace({ session, active }: { session: NoteSession; active: bo
     };
   }, [session]);
 
+  // 뷰포트 스크롤 시 현재 화면에 보이는 페이지를 실시간 감지하여 currentPageIndex 동기화
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+
+    let scrollRaf = 0;
+    const onScroll = () => {
+      cancelAnimationFrame(scrollRaf);
+      scrollRaf = requestAnimationFrame(() => {
+        const page = pageRef.current;
+        if (!viewport || !page) return;
+        const viewTop = viewport.scrollTop + 100;
+
+        // 1. PDF 템플릿 페이지 감지
+        const pdfPages = page.querySelectorAll<HTMLElement>('[data-ink-template]');
+        if (pdfPages.length > 0) {
+          for (let i = 0; i < pdfPages.length; i++) {
+            const el = pdfPages[i];
+            const top = el.offsetTop;
+            const bottom = top + el.offsetHeight;
+            if (viewTop >= top && viewTop <= bottom) {
+              const pNum = Number(el.dataset.page || i + 1);
+              session.setCurrentPageIndex(pNum - 1);
+              return;
+            }
+          }
+          return;
+        }
+
+        // 2. 분리형 페이지 시트 감지
+        const sheets = page.querySelectorAll<HTMLElement>('[data-page-index]');
+        if (sheets.length > 0) {
+          for (let i = 0; i < sheets.length; i++) {
+            const el = sheets[i];
+            const top = el.offsetTop;
+            const bottom = top + el.offsetHeight;
+            if (viewTop >= top && viewTop <= bottom) {
+              session.setCurrentPageIndex(i);
+              return;
+            }
+          }
+        }
+      });
+    };
+
+    viewport.addEventListener('scroll', onScroll, { passive: true });
+    return () => {
+      cancelAnimationFrame(scrollRaf);
+      viewport.removeEventListener('scroll', onScroll);
+    };
+  }, [session]);
+
   const zoom = ui.zoom || DEFAULT_NOTE_ZOOM;
   let maxY = 0;
   for (const s of strokes) for (const p of s.points) if (p[1] > maxY) maxY = p[1];

@@ -68,6 +68,12 @@ export function Header() {
       <div className="mr-2 hidden select-none items-center gap-1 text-sm font-bold text-indigo-600 md:flex">✒️ EduInk</div>
       <div className="relative mx-auto flex min-w-0 max-w-xl flex-1 items-center gap-2">
         <input
+          type="text"
+          inputMode="text"
+          lang="ko"
+          autoCapitalize="off"
+          autoCorrect="off"
+          spellCheck={false}
           className={`w-full rounded-lg border px-3 py-1.5 text-center text-sm font-medium outline-none transition ${error ? 'border-red-400 bg-red-50' : 'border-transparent hover:border-slate-200 focus:border-indigo-300'}`}
           value={title}
           disabled={!activeId}

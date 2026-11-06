@@ -1,6 +1,25 @@
 import { useMemo, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { ChevronDown, ChevronRight, FilePlus, FolderPlus, Folder, FolderOpen, FileText, Search, Trash2, RotateCcw, HardDrive, FileUp, FolderInput, Pencil, Import, Loader2 } from 'lucide-react';
+import {
+  ChevronDown,
+  ChevronRight,
+  FilePlus,
+  FolderPlus,
+  Folder,
+  FolderOpen,
+  FileText,
+  Search,
+  Trash2,
+  RotateCcw,
+  HardDrive,
+  FileUp,
+  FolderInput,
+  Pencil,
+  Import,
+  Loader2,
+  FolderTree,
+  Layers,
+} from 'lucide-react';
 import { db, emptyNote, uid, type FolderRecord, type NoteRecord } from '../storage/db';
 import { useTabs } from '../store/tabsStore';
 import { confirmDialog, promptDialog, toast } from '../store/uiStore';
@@ -10,6 +29,8 @@ import { openLocalFiles, importDirectory, fsAccessSupported, pickFiles } from '.
 import { markdownToJson } from '../editor/extensions';
 import { indexNote, unindexNote } from '../search/searchClient';
 import { deleteAttachmentsOf } from '../storage/attachmentsCleanup';
+import { getSession } from '../session/NoteSession';
+import { PageThumbnailList, extractPageItems } from './PageThumbnailList';
 
 type Menu = { x: number; y: number; kind: 'note' | 'folder'; id: string } | null;
 
@@ -22,8 +43,12 @@ export function LeftSidebar() {
   const [menu, setMenu] = useState<Menu>(null);
   const [showTrash, setShowTrash] = useState(false);
   const [importing, setImporting] = useState<string | null>(null);
+  const [sidebarView, setSidebarView] = useState<'files' | 'pages'>('files');
   const activeId = useTabs((s) => s.activeTabId);
   const openTab = useTabs((s) => s.openTab);
+  const activeSession = getSession(activeId) ?? null;
+  const pageItems = extractPageItems(activeSession);
+  const totalPages = pageItems.length;
 
   const liveFolders = folders.filter((f) => !f.deletedAt);
   const liveNotes = notes.filter((n) => !n.deletedAt);
@@ -230,76 +255,123 @@ export function LeftSidebar() {
 
   return (
     <aside className="flex h-full min-w-0 flex-col bg-slate-50" onClick={() => setMenu(null)}>
-      <div className="p-2">
-        <div className="flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2">
-          <Search size={14} className="text-slate-400" />
-          <input className="w-full bg-transparent py-1.5 text-sm outline-none" placeholder="파일명·본문 검색" value={query} onChange={(e) => setQuery(e.target.value)} />
-        </div>
-        <div className="mt-2 flex gap-1">
-          <button className="btn-ghost flex-1 justify-center" onClick={() => void newNote()} title="새 노트">
-            <FilePlus size={14} /> 노트
-          </button>
-          <button className="btn-ghost flex-1 justify-center" onClick={() => void newFolder()} title="새 폴더">
-            <FolderPlus size={14} /> 폴더
-          </button>
-          <button className="btn-ghost" onClick={() => void openFiles()} title="로컬 파일 열기 (UTF-8/CP949 자동 감지)">
-            <FileUp size={14} />
-          </button>
-          <button className="btn-ghost" onClick={() => void openFolder()} title="로컬 폴더 가져오기">
-            <FolderInput size={14} />
-          </button>
-        </div>
-        <button className="btn-ghost mt-1 w-full justify-center border border-dashed border-slate-300" onClick={() => void importExternal()} disabled={!!importing} title="PDF 파일을 새 노트로 가져옵니다">
-          {importing ? <Loader2 size={14} className="animate-spin" /> : <Import size={14} />} PDF 가져오기
+      {/* 뷰 전환 스위치 토글: [📁 파일 구조] [📑 페이지 목록] */}
+      <div className="flex shrink-0 border-b border-slate-200 bg-slate-100/80 p-1">
+        <button
+          type="button"
+          data-testid="sidebar-toggle-files"
+          className={`flex flex-1 items-center justify-center gap-1.5 rounded-lg py-1.5 text-xs font-semibold transition ${
+            sidebarView === 'files'
+              ? 'bg-white text-indigo-700 shadow-xs'
+              : 'text-slate-500 hover:text-slate-800'
+          }`}
+          onClick={() => setSidebarView('files')}
+        >
+          <FolderTree size={13} />
+          <span>파일 구조</span>
         </button>
-        {importing && <div className="mt-1 truncate text-[10px] text-indigo-500" data-testid="import-progress">{importing}</div>}
-        {selectedFolder && <div className="mt-1 truncate text-[10px] text-slate-400">새 항목 위치: {folders.find((f) => f.id === selectedFolder)?.name}</div>}
+        <button
+          type="button"
+          data-testid="sidebar-toggle-pages"
+          className={`flex flex-1 items-center justify-center gap-1.5 rounded-lg py-1.5 text-xs font-semibold transition ${
+            sidebarView === 'pages'
+              ? 'bg-white text-indigo-700 shadow-xs'
+              : 'text-slate-500 hover:text-slate-800'
+          }`}
+          onClick={() => setSidebarView('pages')}
+        >
+          <Layers size={13} />
+          <span>페이지 ({totalPages})</span>
+        </button>
       </div>
 
-      <div
-        className="min-h-0 flex-1 overflow-y-auto px-1 pb-2 text-sm"
-        onDragOver={(e) => e.preventDefault()}
-        onDrop={(e) => {
-          if ((e.target as HTMLElement).closest('.tree-row')) return;
-          const id = e.dataTransfer.getData('text/note-id');
-          if (id) void moveNote(id, null);
-        }}
-      >
-        {q ? (
-          <>
-            <div className="px-2 py-1 text-[11px] text-slate-400">검색 결과 {matches.length}개</div>
-            {matches.map((n) => renderNote(n, -1, liveFolders.find((f) => f.id === n.folderId)?.name ?? '최상위'))}
-          </>
-        ) : (
-          <>
-            {rootFolders.map((f) => renderFolder(f, 0))}
-            {rootNotes.map((n) => renderNote(n, -1))}
-          </>
-        )}
-      </div>
-
-      <div className="border-t border-slate-200">
-        <button className="flex w-full items-center gap-2 px-3 py-2 text-xs text-slate-500 hover:bg-slate-100" onClick={() => setShowTrash((s) => !s)}>
-          <Trash2 size={13} /> 휴지통 ({trashedNotes.length + trashedFolders.length})
-          {showTrash ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-        </button>
-        {showTrash && (
-          <div className="max-h-48 overflow-y-auto px-1 pb-2 text-xs">
-            {[...trashedFolders.map((f) => ({ kind: 'folder' as const, id: f.id, name: `📁 ${f.name}` })), ...trashedNotes.map((n) => ({ kind: 'note' as const, id: n.id, name: n.title }))].map((it) => (
-              <div key={it.id} className="flex items-center gap-1 rounded px-2 py-1 hover:bg-slate-100">
-                <span className="flex-1 truncate text-slate-500">{it.name}</span>
-                <button className="icon-btn" title="복원" onClick={() => void restore(it.kind, it.id)}>
-                  <RotateCcw size={12} />
-                </button>
-                <button className="icon-btn text-red-500" title="영구 삭제" onClick={() => void purge(it.kind, it.id)}>
-                  <Trash2 size={12} />
-                </button>
-              </div>
-            ))}
-            {trashedNotes.length + trashedFolders.length === 0 && <div className="px-2 py-1 text-slate-400">비어 있음</div>}
+      {sidebarView === 'pages' ? (
+        <PageThumbnailList session={activeSession} />
+      ) : (
+        <>
+          <div className="p-2">
+            <div className="flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2">
+              <Search size={14} className="text-slate-400" />
+              <input
+                type="text"
+                inputMode="search"
+                lang="ko"
+                autoCapitalize="off"
+                autoCorrect="off"
+                spellCheck={false}
+                className="w-full bg-transparent py-1.5 text-sm outline-none"
+                placeholder="파일명·본문 검색"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+              />
+            </div>
+            <div className="mt-2 flex gap-1">
+              <button className="btn-ghost flex-1 justify-center" onClick={() => void newNote()} title="새 노트">
+                <FilePlus size={14} /> 노트
+              </button>
+              <button className="btn-ghost flex-1 justify-center" onClick={() => void newFolder()} title="새 폴더">
+                <FolderPlus size={14} /> 폴더
+              </button>
+              <button className="btn-ghost" onClick={() => void openFiles()} title="로컬 파일 열기 (UTF-8/CP949 자동 감지)">
+                <FileUp size={14} />
+              </button>
+              <button className="btn-ghost" onClick={() => void openFolder()} title="로컬 폴더 가져오기">
+                <FolderInput size={14} />
+              </button>
+            </div>
+            <button className="btn-ghost mt-1 w-full justify-center border border-dashed border-slate-300" onClick={() => void importExternal()} disabled={!!importing} title="PDF 파일을 새 노트로 가져옵니다">
+              {importing ? <Loader2 size={14} className="animate-spin" /> : <Import size={14} />} PDF 가져오기
+            </button>
+            {importing && <div className="mt-1 truncate text-[10px] text-indigo-500" data-testid="import-progress">{importing}</div>}
+            {selectedFolder && <div className="mt-1 truncate text-[10px] text-slate-400">새 항목 위치: {folders.find((f) => f.id === selectedFolder)?.name}</div>}
           </div>
-        )}
-      </div>
+
+          <div
+            className="min-h-0 flex-1 overflow-y-auto px-1 pb-2 text-sm"
+            onDragOver={(e) => e.preventDefault()}
+            onDrop={(e) => {
+              if ((e.target as HTMLElement).closest('.tree-row')) return;
+              const id = e.dataTransfer.getData('text/note-id');
+              if (id) void moveNote(id, null);
+            }}
+          >
+            {q ? (
+              <>
+                <div className="px-2 py-1 text-[11px] text-slate-400">검색 결과 {matches.length}개</div>
+                {matches.map((n) => renderNote(n, -1, liveFolders.find((f) => f.id === n.folderId)?.name ?? '최상위'))}
+              </>
+            ) : (
+              <>
+                {rootFolders.map((f) => renderFolder(f, 0))}
+                {rootNotes.map((n) => renderNote(n, -1))}
+              </>
+            )}
+          </div>
+
+          <div className="border-t border-slate-200">
+            <button className="flex w-full items-center gap-2 px-3 py-2 text-xs text-slate-500 hover:bg-slate-100" onClick={() => setShowTrash((s) => !s)}>
+              <Trash2 size={13} /> 휴지통 ({trashedNotes.length + trashedFolders.length})
+              {showTrash ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+            </button>
+            {showTrash && (
+              <div className="max-h-48 overflow-y-auto px-1 pb-2 text-xs">
+                {[...trashedFolders.map((f) => ({ kind: 'folder' as const, id: f.id, name: `📁 ${f.name}` })), ...trashedNotes.map((n) => ({ kind: 'note' as const, id: n.id, name: n.title }))].map((it) => (
+                  <div key={it.id} className="flex items-center gap-1 rounded px-2 py-1 hover:bg-slate-100">
+                    <span className="flex-1 truncate text-slate-500">{it.name}</span>
+                    <button className="icon-btn" title="복원" onClick={() => void restore(it.kind, it.id)}>
+                      <RotateCcw size={12} />
+                    </button>
+                    <button className="icon-btn text-red-500" title="영구 삭제" onClick={() => void purge(it.kind, it.id)}>
+                      <Trash2 size={12} />
+                    </button>
+                  </div>
+                ))}
+                {trashedNotes.length + trashedFolders.length === 0 && <div className="px-2 py-1 text-slate-400">비어 있음</div>}
+              </div>
+            )}
+          </div>
+        </>
+      )}
 
       {menu && (
         <div className="fixed z-50 w-40 rounded-xl border bg-white py-1 text-sm shadow-xl" style={{ left: menu.x, top: menu.y }} onClick={(e) => e.stopPropagation()}>

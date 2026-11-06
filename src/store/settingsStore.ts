@@ -51,6 +51,8 @@ export const DEFAULT_PALETTE_COLORS = [
 export const PALETTE_COLOR_NAMES = ['빨강', '주황', '노랑', '초록', '파랑', '남색', '보라', '검정'];
 export const DEFAULT_COLORS = DEFAULT_PALETTE_COLORS;
 
+export type TranslationInsertMode = 'parentheses' | 'ruby' | 'replace';
+
 export const DEFAULT_MODELS: Record<AiProviderId, string> = {
   openai: 'gpt-4.1-mini',
   google: GEMINI_PRIMARY_MODEL,
@@ -99,6 +101,9 @@ export interface SettingsState {
   /** 사용자가 로컬 디렉토리(.ttf, .otf 등)에서 추가한 폰트 목록 */
   customFonts: FontItem[];
 
+  /** 번역 결과 삽입 형식: 'parentheses'(원문 뒤 괄호) | 'ruby'(루비 주석) | 'replace'(원문 대체) */
+  translationInsertMode: TranslationInsertMode;
+
   toggleLeft: () => void;
   toggleRight: () => void;
   setPaneWidth: (side: 'left' | 'right', w: number) => void;
@@ -116,6 +121,7 @@ export interface SettingsState {
   selectFont: (fontId: string) => void;
   addCustomFont: (font: FontItem) => void;
   removeCustomFont: (fontId: string) => void;
+  setTranslationInsertMode: (mode: TranslationInsertMode) => void;
   set: (p: Partial<SettingsState>) => void;
 }
 
@@ -151,6 +157,8 @@ export const useSettings = create<SettingsState>()(
       selectedFontId: DEFAULT_FONT_ID,
       recentFontIds: [DEFAULT_FONT_ID],
       customFonts: [],
+
+      translationInsertMode: 'parentheses',
 
       toggleLeft: () => set((s) => ({ leftOpen: !s.leftOpen })),
       toggleRight: () => set((s) => ({ rightOpen: !s.rightOpen })),
@@ -211,11 +219,12 @@ export const useSettings = create<SettingsState>()(
             selectedFontId,
           };
         }),
+      setTranslationInsertMode: (translationInsertMode) => set({ translationInsertMode }),
       set: (p) => set(p),
     }),
     {
       name: 'eduink-settings',
-      version: 4,
+      version: 5,
       migrate: (persistedState: unknown, version: number) => {
         const state = (persistedState ?? {}) as Partial<SettingsState>;
         if (version < 2 && state.aiModels) {
@@ -242,6 +251,9 @@ export const useSettings = create<SettingsState>()(
             state.colorSlots = DEFAULT_PALETTE_COLORS;
             state.activeSlot = 7;
           }
+        }
+        if (version < 5) {
+          state.translationInsertMode = state.translationInsertMode ?? 'parentheses';
         }
         return state as SettingsState;
       },
