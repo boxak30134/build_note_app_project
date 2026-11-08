@@ -13,7 +13,8 @@
     "android:open": "npx cap open android",
     "android:build:apk": "npm run android:sync && cd android && gradlew.bat assembleDebug",
     "preview": "vite preview",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:run": "tsc --noEmit && vitest run"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^4.0.92",

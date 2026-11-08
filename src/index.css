@@ -57,9 +57,12 @@ body,
 }
 
 /* ---------- Note page ---------- */
+/* S-Pen/제스처 격리 가이드 §4: 브라우저 기본 팬·줌 엔진 개입 차단.
+   펜 획이 네이티브 스크롤로 새지 않도록 touch-action 을 none 으로 고정하고,
+   손가락 1개 패닝·2개 피벗 핀치 줌은 NoteWorkspace 의 touch 전용 핸들러가 처리한다. */
 .note-viewport {
-  touch-action: pan-x pan-y;
-  overscroll-behavior: contain;
+  touch-action: none;
+  overscroll-behavior: none;
 }
 .note-page {
   background: white;
@@ -92,12 +95,29 @@ body,
   mix-blend-mode: multiply;
   z-index: 30;
 }
+/* S-Pen 저지연 가이드 §2.3: 필기 캔버스 제스처 판정 지연·텍스트 선택·바운스 차단 */
+.ink-canvas,
+.ink-canvas-wet {
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  overscroll-behavior: none;
+}
+/* 진행 중 획 전용 레이어: 블렌딩 효과가 없어야 desynchronized 저지연 경로가 유지된다 */
+.ink-canvas-wet {
+  z-index: 31;
+}
+.note-viewport.is-inking {
+  user-select: none;
+  -webkit-user-select: none;
+  overscroll-behavior: none;
+}
 
 .prose-note {
   outline: none;
   padding: 48px 64px 96px;
   min-height: 1200px;
-  font-size: 16px;
+  font-size: var(--note-font-size, 16px);
   line-height: 1.75;
   color: #1e293b;
   word-break: keep-all;
@@ -242,7 +262,7 @@ body,
   transition: box-shadow 0.2s ease, border-color 0.2s ease;
 }
 .ink-template:last-child {
-  margin-bottom: 36px;
+  margin-bottom: 0;
 }
 .ink-template:hover {
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
@@ -278,7 +298,8 @@ body,
 }
 .note-page-pdf .prose-note,
 .note-page:has(.ink-template) .prose-note {
-  padding: 16px 0 0 0 !important;
+  padding: 0 !important;
+  min-height: 0 !important;
 }
 .note-page-pdf .prose-note > * + *,
 .note-page:has(.ink-template) .prose-note > * + * {
@@ -385,4 +406,132 @@ body,
   100% {
     transform: scale(1);
   }
+}
+
+/* ---------- Academic Callout Blocks & Inline Block Embeds ---------- */
+.callout-block {
+  margin: 0.85em 0;
+  border-radius: 12px;
+  border-left: 4px solid #6366f1;
+  background: #f8fafc;
+  border-top: 1px solid #e2e8f0;
+  border-right: 1px solid #e2e8f0;
+  border-bottom: 1px solid #e2e8f0;
+  overflow: hidden;
+}
+.callout-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 14px;
+  font-size: 0.88em;
+  font-weight: 700;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+  user-select: none;
+}
+.callout-block.is-collapsed .callout-header {
+  border-bottom: none;
+}
+.callout-badge {
+  color: #1e293b;
+}
+.callout-title {
+  flex: 1;
+  color: #334155;
+  font-weight: 600;
+}
+.callout-fold-btn {
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  font-family: monospace;
+  font-size: 14px;
+  font-weight: 700;
+  color: #475569;
+  background: rgba(255, 255, 255, 0.75);
+  border: 1px solid rgba(148, 163, 184, 0.4);
+  cursor: pointer;
+}
+.callout-fold-btn:hover {
+  background: #ffffff;
+  color: #0f172a;
+}
+.callout-content {
+  padding: 10px 14px;
+}
+.callout-theorem,
+.callout-lemma,
+.callout-proposition,
+.callout-corollary {
+  border-left-color: #4f46e5;
+  background: #eef2ff;
+}
+.callout-definition {
+  border-left-color: #059669;
+  background: #ecfdf5;
+}
+.callout-proof {
+  border-left-color: #475569;
+  background: #f8fafc;
+  font-style: italic;
+}
+.callout-warning {
+  border-left-color: #d97706;
+  background: #fffbeb;
+}
+
+.block-embed-card {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  margin: 6px 0;
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 1px solid #c7d2fe;
+  border-left: 3px solid #6366f1;
+  background: #f5f7ff;
+  vertical-align: middle;
+}
+.block-embed-card.is-embed-warning {
+  border-color: #fca5a5;
+  border-left-color: #ef4444;
+  background: #fef2f2;
+}
+.block-embed-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 0.8em;
+  font-weight: 700;
+  color: #4338ca;
+}
+.block-embed-title {
+  cursor: pointer;
+}
+.block-embed-title:hover {
+  text-decoration: underline;
+}
+.block-embed-split-btn {
+  padding: 2px 6px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  background: #ffffff;
+  border: 1px solid #c7d2fe;
+  color: #4f46e5;
+  cursor: pointer;
+}
+.block-embed-split-btn:hover {
+  background: #e0e7ff;
+}
+.block-embed-body {
+  font-size: 0.88em;
+  color: #334155;
+  line-height: 1.5;
 }

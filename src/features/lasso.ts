@@ -9,6 +9,7 @@ export function lassoCopy(s: NoteSession) {
   const sel = s.strokes.getMany(s.ui.lassoIds);
   if (sel.length === 0) return;
   strokeClipboard.strokes = sel.map((x) => ({ ...x, points: x.points.map((p) => [...p] as typeof p) }));
+  strokeClipboard.active = true;
   s.patch({ lassoIds: [], moveMode: false });
   toast.info(`필기 ${sel.length}개 복사됨 — 길게 누르거나 우클릭하여 붙여넣기`);
 }
@@ -23,6 +24,7 @@ export function lassoCut(s: NoteSession) {
   const sel = s.strokes.getMany(ids);
   if (sel.length === 0) return;
   strokeClipboard.strokes = sel.map((x) => ({ ...x, points: x.points.map((p) => [...p] as typeof p) }));
+  strokeClipboard.active = true;
   s.strokes.removeStrokes(ids);
   s.patch({ lassoIds: [], moveMode: false });
   toast.info(`필기 ${sel.length}개 잘라냄 — 길게 누르거나 우클릭하여 붙여넣기`);

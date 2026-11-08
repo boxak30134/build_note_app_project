@@ -1,4 +1,5 @@
 /// <reference types="vitest/config" />
+import { fileURLToPath, URL } from 'node:url';
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
@@ -44,9 +45,17 @@ export default defineConfig(({ mode }) => {
         },
       },
     },
+    resolve: {
+      alias: [
+        {
+          find: /.*\/src\/utils\/androidDeployment$/,
+          replacement: fileURLToPath(new URL('./src/core/android/androidDeployment.ts', import.meta.url)),
+        },
+      ],
+    },
     test: {
       environment: 'node',
-      include: ['src/**/*.test.ts', 'src/**/*.test.tsx'],
+      include: ['src/**/*.test.ts', 'src/**/*.test.tsx', 'test/**/*.test.ts', 'test/**/*.test.tsx'],
     },
   };
 });

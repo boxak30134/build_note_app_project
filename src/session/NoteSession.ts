@@ -3,7 +3,7 @@ import type { Node as PMNode } from '@tiptap/pm/model';
 import { CompositeHistoryManager } from '../core/history/CompositeHistoryManager';
 import { StrokeStore, type Stroke } from '../core/strokes/StrokeStore';
 import { UnencodableCharError } from '../core/codec/textCodec';
-import { validateImageFiles } from '../core/files/validation';
+import { validateImageFiles, sanitizeDocumentTitle } from '../core/files/validation';
 import { clampBubbleText } from '../core/bubble/limits';
 import { plainTextOf } from '../core/doc/blocks';
 import { buildExtensions } from '../editor/extensions';
@@ -22,10 +22,13 @@ import { toast, confirmDialog } from '../store/uiStore';
 import type { Annotation, AnnotationAnchor } from '../features/annotations/types';
 import {
   clampNoteZoom,
+  computePdfPageLayout,
   createPage,
   DEFAULT_NOTE_ZOOM,
+  extractInkTemplateDimensions,
   getPageDimensions,
   insertPageBelow,
+  normalizePdfNoteContent,
   NOTE_ZOOM_STEP,
   type NotePage,
 } from '../core/page/pageTypes';
@@ -85,6 +88,9 @@ export class NoteSession {
   private dirtyTimer: ReturnType<typeof setTimeout> | null = null;
   private draftTimer: ReturnType<typeof setTimeout> | null = null;
   private relatedTimer: ReturnType<typeof setTimeout> | null = null;
+  private titleSyncTimer: ReturnType<typeof setTimeout> | null = null;
+  isManualTitle = false;
+  lastAutoTitle: string | null = null;
   private unsubs: Array<() => void> = [];
   private saving = false;
 
@@ -112,11 +118,14 @@ export class NoteSession {
       external: null,
     });
 
+    const normalizedInitialContent = normalizePdfNoteContent(
+      record.content as { type?: string; content?: Array<{ type?: string; attrs?: Record<string, unknown> }> },
+    );
     this.host.className = 'editor-host';
     this.editor = new Editor({
       element: this.host,
       extensions: buildExtensions({ noteId: record.id, getHistory: () => this.history }),
-      content: record.content as never,
+      content: normalizedInitialContent as never,
       editorProps: {
         attributes: { class: 'prose-note', spellcheck: 'false' },
         handlePaste: (_view, event) => this.handlePaste(event),
@@ -130,11 +139,26 @@ export class NoteSession {
     this.restoreDraftIfNewer();
     this.refreshRelatedNotes();
 
+    const initialHeader = this.extractTopHeader();
+    const cleanHeader = initialHeader ? sanitizeDocumentTitle(initialHeader) : null;
+    if (record.title === '제목 없는 노트' || !record.title) {
+      this.isManualTitle = false;
+      if (cleanHeader) {
+        this.scheduleTitleSync();
+      }
+    } else if (cleanHeader && cleanHeader === record.title) {
+      this.isManualTitle = false;
+      this.lastAutoTitle = cleanHeader;
+    } else {
+      this.isManualTitle = true;
+    }
+
     this.editor.on('transaction', ({ transaction }) => {
       if (transaction.docChanged) {
         this.mapCitations(transaction.mapping.map.bind(transaction.mapping));
         this.scheduleDirtyCheck();
         this.scheduleRelatedNotesRefresh();
+        this.scheduleTitleSync();
       }
     });
     this.unsubs.push(this.strokes.subscribe(() => this.scheduleDirtyCheck()));
@@ -194,9 +218,12 @@ export class NoteSession {
     const d = drafts.get(this.id);
     if (!d || d.at <= this.record.updatedAt) return;
     try {
+      const normalizedDraftDoc = normalizePdfNoteContent(
+        d.doc as { type?: string; content?: Array<{ type?: string; attrs?: Record<string, unknown> }> },
+      );
       this.editor.view.dispatch(
         this.editor.state.tr
-          .replaceWith(0, this.editor.state.doc.content.size, this.editor.schema.nodeFromJSON(d.doc).content)
+          .replaceWith(0, this.editor.state.doc.content.size, this.editor.schema.nodeFromJSON(normalizedDraftDoc).content)
           .setMeta('addToHistory', false),
       );
       this.strokes.reset(d.strokes ?? []);
@@ -222,8 +249,64 @@ export class NoteSession {
   addPageBelow(fromPageIndex?: number, override?: Partial<Omit<NotePage, 'id'>>): NotePage {
     const targetIdx = fromPageIndex ?? this.ui.currentPageIndex;
     const { pages, insertedIndex, insertedPage } = insertPageBelow(this.ui.pages, targetIdx, override);
+
+    // PDF 문서(`inkTemplate` 포함)인 경우 에디터 내 대상 페이지 바로 아래에 빈 `inkTemplate` 노드를 삽입하고 쪽수를 재정렬한다.
+    if (this.editor && !this.editor.isDestroyed) {
+      const templateNodes: Array<{ pos: number; node: PMNode }> = [];
+      this.editor.state.doc.descendants((node, pos) => {
+        if (node.type.name === 'inkTemplate') {
+          templateNodes.push({ pos, node });
+          return false;
+        }
+        return true;
+      });
+
+      const inkTemplateType = this.editor.schema.nodes.inkTemplate;
+      if (templateNodes.length > 0 && inkTemplateType) {
+        const clampedTarget = Math.max(0, Math.min(templateNodes.length - 1, targetIdx));
+        const targetEntry = templateNodes[clampedTarget];
+        const fallbackDims = getPageDimensions(insertedPage.size, insertedPage.orientation);
+        const hasExplicitSize = Boolean(override?.size || override?.orientation);
+        const newWidth = hasExplicitSize
+          ? fallbackDims.width
+          : Number(targetEntry.node.attrs.width) || fallbackDims.width;
+        const newHeight = hasExplicitSize
+          ? fallbackDims.height
+          : Number(targetEntry.node.attrs.height) || fallbackDims.height;
+
+        const newNode = inkTemplateType.create({
+          src: '',
+          width: newWidth,
+          height: newHeight,
+          page: clampedTarget + 2,
+          style: insertedPage.style,
+        });
+
+        const insertPos = targetEntry.pos + targetEntry.node.nodeSize;
+        let tr = this.editor.state.tr.insert(insertPos, newNode);
+
+        let seq = 0;
+        tr.doc.descendants((node, pos) => {
+          if (node.type.name === 'inkTemplate') {
+            seq += 1;
+            if (node.attrs.page !== seq) {
+              tr = tr.setNodeMarkup(pos, undefined, { ...node.attrs, page: seq });
+            }
+            return false;
+          }
+          return true;
+        });
+
+        this.editor.view.dispatch(tr);
+        this.record = { ...this.record, content: this.editor.getJSON(), pages };
+      }
+    }
+
     this.patch({ pages, currentPageIndex: insertedIndex });
     this.scheduleDirtyCheck();
+    if (this.scrollEl && this.pageEl) {
+      setTimeout(() => this.scrollToPage(insertedIndex), 30);
+    }
     return insertedPage;
   }
 
@@ -260,14 +343,15 @@ export class NoteSession {
       return;
     }
 
-    // 3. 페이지 높이 누적 기반 스크롤 폴백
+    // 3. 페이지별 yOffset 공식(computePdfPageLayout) 기반 스크롤 폴백
     const zoom = this.ui.zoom || 1;
-    let targetY = 0;
-    for (let i = 0; i < clamped && i < this.ui.pages.length; i++) {
-      const p = this.ui.pages[i];
-      const d = getPageDimensions(p.size, p.orientation);
-      targetY += (d.height + 24) * zoom;
-    }
+    const currentPage = this.ui.pages[clamped] ?? this.ui.pages[0];
+    const containerWidth = currentPage ? getPageDimensions(currentPage.size, currentPage.orientation).width : 840;
+    const layout = computePdfPageLayout(
+      extractInkTemplateDimensions(this.record.content, this.ui.pages),
+      containerWidth,
+    );
+    const targetY = (layout.yOffsets[clamped] ?? 0) * zoom;
     scrollEl.scrollTo({ top: targetY, behavior: 'smooth' });
   }
 
@@ -293,6 +377,36 @@ export class NoteSession {
   updateCurrentPageFormat(patch: Partial<Omit<NotePage, 'id'>>, applyToAll = false) {
     const targetIdx = this.ui.currentPageIndex;
     const nextPages = this.ui.pages.map((p, idx) => (applyToAll || idx === targetIdx ? { ...p, ...patch } : p));
+
+    if (this.editor && !this.editor.isDestroyed) {
+      let tr = this.editor.state.tr;
+      let changed = false;
+      let tplIdx = 0;
+      this.editor.state.doc.descendants((node, pos) => {
+        if (node.type.name === 'inkTemplate') {
+          const idx = tplIdx++;
+          if (applyToAll || idx === targetIdx) {
+            const pageMeta = nextPages[idx] ?? nextPages[0];
+            const nextAttrs: Record<string, unknown> = { ...node.attrs };
+            if (patch.style) nextAttrs.style = patch.style;
+            if (!node.attrs.src && (patch.size || patch.orientation) && pageMeta) {
+              const d = getPageDimensions(pageMeta.size, pageMeta.orientation);
+              nextAttrs.width = d.width;
+              nextAttrs.height = d.height;
+            }
+            tr = tr.setNodeMarkup(pos, undefined, nextAttrs);
+            changed = true;
+          }
+          return false;
+        }
+        return true;
+      });
+      if (changed) {
+        this.editor.view.dispatch(tr);
+        this.record = { ...this.record, content: this.editor.getJSON(), pages: nextPages };
+      }
+    }
+
     this.patch({ pages: nextPages });
     this.scheduleDirtyCheck();
   }
@@ -302,6 +416,69 @@ export class NoteSession {
     if (!empty) {
       this.editor.chain().focus().setMark('fontFamily', { family }).run();
     }
+  }
+
+  applyFontSize(size: number | string) {
+    if (!this.editor) return;
+    const sizeStr = typeof size === 'number' ? `${size}px` : size;
+    const { empty } = this.editor.state.selection;
+    const isTextMode = useSettings.getState().tool === 'none';
+    if (!empty) {
+      this.editor.chain().focus().setMark('fontSize', { size: sizeStr }).run();
+    } else if (isTextMode) {
+      this.editor.chain().focus().setMark('fontSize', { size: sizeStr }).run();
+    }
+  }
+
+  applyTextColor(color: string) {
+    if (!this.editor) return;
+    const { empty } = this.editor.state.selection;
+    const isTextMode = useSettings.getState().tool === 'none';
+    if (!empty) {
+      this.editor.chain().focus().setMark('textColor', { color }).run();
+    } else if (isTextMode) {
+      this.editor.chain().focus().setMark('textColor', { color }).run();
+    }
+  }
+
+  scheduleTitleSync() {
+    if (this.titleSyncTimer) clearTimeout(this.titleSyncTimer);
+    this.titleSyncTimer = setTimeout(() => void this.syncTitleFromHeader(), 300);
+  }
+
+  extractTopHeader(): string | null {
+    if (!this.editor) return null;
+    const doc = this.editor.state.doc;
+    let firstNonEmptyText: string | null = null;
+    for (let i = 0; i < doc.childCount; i++) {
+      const child = doc.child(i);
+      const text = child.textContent.trim();
+      if (!text) continue;
+      if (child.type.name === 'heading') {
+        return text;
+      }
+      if (!firstNonEmptyText) {
+        firstNonEmptyText = text;
+      }
+      if (i > 3) break;
+    }
+    return firstNonEmptyText;
+  }
+
+  async syncTitleFromHeader() {
+    const raw = this.extractTopHeader();
+    if (!raw) return;
+    const clean = sanitizeDocumentTitle(raw);
+    if (!clean) return;
+    if (clean === this.lastAutoTitle || clean === this.record.title) return;
+    if (this.isManualTitle && this.record.title && this.record.title !== '제목 없는 노트') {
+      return;
+    }
+    this.lastAutoTitle = clean;
+    this.record.title = clean;
+    await db.notes.update(this.id, { title: clean, updatedAt: Date.now() });
+    const fresh = await db.notes.get(this.id);
+    if (fresh) indexNote(fresh);
   }
 
   // ---------- annotations ----------
@@ -791,6 +968,7 @@ export class NoteSession {
     if (this.dirtyTimer) clearTimeout(this.dirtyTimer);
     if (this.draftTimer) clearTimeout(this.draftTimer);
     if (this.relatedTimer) clearTimeout(this.relatedTimer);
+    if (this.titleSyncTimer) clearTimeout(this.titleSyncTimer);
     this.editor.destroy();
   }
 }

@@ -1,5 +1,7 @@
 import { describe, expect, it, beforeEach } from 'vitest';
 import {
+  computeFocalZoomScrollOffsets,
+  createFocalZoomAnchor,
   createPage,
   DEFAULT_DOC_FORMAT,
   DEFAULT_PAPER_SIZE,
@@ -124,5 +126,44 @@ describe('Additional Features 1. Page (페이지 규격, 현재 페이지 아래
 
     useSettings.getState().setDocFormat('paginated');
     expect(useSettings.getState().docFormat).toBe('paginated');
+  });
+
+  it('두 손가락 핀치 줌 시 화면 상단(0,0)으로 튀지 않고 손가락 중심점(Focal Point)을 기준으로 정확히 확대/축소 스크롤 오프셋을 계산한다', () => {
+    // 1. 기준 뷰포트 및 페이지 위치 설정
+    const viewport = {
+      scrollTop: 100,
+      scrollLeft: 50,
+      rect: { top: 0, left: 0 },
+    };
+    const pageRect = { top: -68, left: -18 }; // scrollTop 100, padding 32 -> top: 32 - 100 = -68
+    const focalPoint = { x: 350, y: 300 }; // 손가락 중심 좌표
+    const currentZoom = 1.0;
+
+    // 2. 핀치 시작 시점의 앵커 생성
+    const anchor = createFocalZoomAnchor(focalPoint, currentZoom, viewport, pageRect);
+    // unscaled document 좌표 검증
+    expect(anchor.docX).toBeCloseTo(350 - (-18)); // 368
+    expect(anchor.docY).toBeCloseTo(300 - (-68)); // 368
+
+    // 3. 1.0x -> 1.5x 확대로 핀치 제스처 시
+    const nextZoom = 1.5;
+    const offsets = computeFocalZoomScrollOffsets(anchor, nextZoom, focalPoint, viewport.rect);
+
+    // 새 스크롤 위치에서 해당 문서 위치가 손가락 화면 좌표(350, 300)에 정확히 유지되는지 수학적 무결성 검증
+    // newPageTop = anchor.pageOffsetY - offsets.scrollTop = 32 - offsets.scrollTop
+    // screenY = newPageTop + anchor.docY * nextZoom = 32 - offsets.scrollTop + 368 * 1.5 = focalPoint.y (300)
+    const expectedScreenY = anchor.pageOffsetY - offsets.scrollTop + anchor.docY * nextZoom;
+    expect(expectedScreenY).toBeCloseTo(focalPoint.y);
+
+    const expectedScreenX = anchor.pageOffsetX - offsets.scrollLeft + anchor.docX * nextZoom;
+    expect(expectedScreenX).toBeCloseTo(focalPoint.x);
+
+    // 4. 손가락을 이동하며 핀치할 때(Pan + Pinch 복합 제스처) 손가락 이동 변위를 추적
+    const movedFocal = { x: 380, y: 340 };
+    const movedOffsets = computeFocalZoomScrollOffsets(anchor, 1.8, movedFocal, viewport.rect);
+    const movedScreenY = anchor.pageOffsetY - movedOffsets.scrollTop + anchor.docY * 1.8;
+    expect(movedScreenY).toBeCloseTo(movedFocal.y);
+    const movedScreenX = anchor.pageOffsetX - movedOffsets.scrollLeft + anchor.docX * 1.8;
+    expect(movedScreenX).toBeCloseTo(movedFocal.x);
   });
 });

@@ -113,7 +113,7 @@ export function Toolbar() {
         );
       })}
       <div className="mx-2 h-6 w-px bg-slate-300" />
-      <ColorSlots />
+      <ColorSlots activeId={activeId} />
       {(tool === 'pencil' || tool === 'highlighter' || tool === 'eraser') && (
         <label className="ml-2 flex items-center gap-1 text-[11px] text-slate-500" title="굵기">
           굵기
@@ -129,6 +129,7 @@ export function Toolbar() {
       </button>
       <div className="mx-2 h-6 w-px bg-slate-300" />
       <FontSelector activeId={activeId} />
+      <FontSizeSelector activeId={activeId} />
       <div className="mx-1.5 h-6 w-px bg-slate-300" />
       <PageFormatControls activeId={activeId} />
       <div className="mx-1.5 h-6 w-px bg-slate-300" />
@@ -182,10 +183,23 @@ function getContrastColor(hex: string): string {
   return yiq >= 150 ? '#000000' : '#FFFFFF';
 }
 
-function ColorSlots() {
-  const { colorSlots, activeSlot, selectSlot, customColor, isCustomColorActive } = useSettings();
+function ColorSlots({ activeId }: { activeId?: string | null }) {
+  const { colorSlots, activeSlot, selectSlot, customColor, isCustomColorActive, selectCustomColor } = useSettings();
   const [editing, setEditing] = useState<{ index: number; el: HTMLElement } | null>(null);
   const [rgbModalOpen, setRgbModalOpen] = useState(false);
+
+  const handleSelectSlot = (i: number) => {
+    selectSlot(i);
+    const color = colorSlots[i];
+    const s = getSession(activeId);
+    if (s && color) s.applyTextColor(color);
+  };
+
+  const handleSelectCustomColor = () => {
+    selectCustomColor();
+    const s = getSession(activeId);
+    if (s && customColor) s.applyTextColor(customColor);
+  };
 
   return (
     <div className="flex items-center gap-1" data-testid="toolbar-color-slots">
@@ -201,7 +215,7 @@ function ColorSlots() {
             }`}
             style={{ background: c }}
             title={`${PALETTE_COLOR_NAMES[i] || '색상'} (${c}) — 클릭: 선택 / 더블클릭: 변경`}
-            onClick={() => selectSlot(i)}
+            onClick={() => handleSelectSlot(i)}
             onDoubleClick={(e) => setEditing({ index: i, el: e.currentTarget })}
             data-testid={`color-slot-${i}`}
           >
@@ -222,7 +236,10 @@ function ColorSlots() {
             : 'conic-gradient(from 0deg, #ff0000, #ff8800, #ffff00, #00ff00, #00ffff, #0000ff, #8800ff, #ff0088, #ff0000)',
         }}
         title="RGB 사용자 지정 색상 설정 창 열기"
-        onClick={() => setRgbModalOpen(true)}
+        onClick={() => {
+          handleSelectCustomColor();
+          setRgbModalOpen(true);
+        }}
         data-testid="rgb-custom-picker-btn"
       >
         {isCustomColorActive && (
@@ -230,7 +247,14 @@ function ColorSlots() {
         )}
       </button>
 
-      {editing && <ColorPickerPopover index={editing.index} reference={editing.el} onClose={() => setEditing(null)} />}
+      {editing && (
+        <ColorPickerPopover
+          index={editing.index}
+          reference={editing.el}
+          activeId={activeId}
+          onClose={() => setEditing(null)}
+        />
+      )}
       <RgbColorPickerModal open={rgbModalOpen} onClose={() => setRgbModalOpen(false)} />
     </div>
   );
@@ -250,7 +274,17 @@ function rgbToHex(r: number, g: number, b: number) {
 const PRESETS = ['#EF4444', '#F97316', '#FACC15', '#22C55E', '#14B8A6', '#3B82F6', '#6366F1', '#A855F7', '#EC4899', '#000000', '#64748B', '#FFFFFF'];
 
 /** 더블클릭 시 슬롯 우측(right-start)에 뜨는 플로팅 컬러 피커 — 슬롯 색을 영구 재지정 */
-function ColorPickerPopover({ index, reference, onClose }: { index: number; reference: HTMLElement; onClose: () => void }) {
+function ColorPickerPopover({
+  index,
+  reference,
+  activeId,
+  onClose,
+}: {
+  index: number;
+  reference: HTMLElement;
+  activeId?: string | null;
+  onClose: () => void;
+}) {
   const { colorSlots, setSlotColor, selectSlot } = useSettings();
   const current = colorSlots[index];
   const [hex, setHex] = useState(current);
@@ -269,8 +303,11 @@ function ColorPickerPopover({ index, reference, onClose }: { index: number; refe
   const { getFloatingProps } = useInteractions([useDismiss(context)]);
   const apply = (c: string) => {
     if (/^#[0-9a-f]{6}$/i.test(c)) {
-      setSlotColor(index, c.toUpperCase());
+      const upper = c.toUpperCase();
+      setSlotColor(index, upper);
       selectSlot(index);
+      const s = getSession(activeId);
+      if (s) s.applyTextColor(upper);
     }
   };
   const [r, g, b] = hexToRgb(current);
@@ -515,6 +552,155 @@ function FontSelector({ activeId }: { activeId: string | null }) {
               >
                 <Upload size={13} /> 로컬 폰트 추가 (.ttf, .otf)
               </button>
+            </div>
+          </motion.div>
+        </FloatingPortal>
+      )}
+    </div>
+  );
+}
+
+const FONT_SIZE_PRESETS = [10, 11, 12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 48];
+
+/**
+ * 폰트 크기 조절 메뉴 (스텝퍼 + 드롭다운 + 직접 입력)
+ */
+function FontSizeSelector({ activeId }: { activeId: string | null }) {
+  const { fontSize, setFontSize } = useSettings();
+  const [open, setOpen] = useState(false);
+  const [customInput, setCustomInput] = useState(String(fontSize));
+  const btnRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    setCustomInput(String(fontSize));
+  }, [fontSize]);
+
+  const { refs, floatingStyles, context } = useFloating({
+    open,
+    onOpenChange: setOpen,
+    placement: 'bottom-start',
+    middleware: [offset(6), flip(), shift({ padding: 8 })],
+    whileElementsMounted: autoUpdate,
+    transform: false,
+    elements: { reference: btnRef.current },
+  });
+  const { getFloatingProps } = useInteractions([useDismiss(context)]);
+
+  const applySize = (size: number) => {
+    const clamped = Math.max(8, Math.min(72, Math.round(size)));
+    setFontSize(clamped);
+    getSession(activeId)?.applyFontSize(clamped);
+  };
+
+  const onSelectPreset = (size: number) => {
+    applySize(size);
+    setOpen(false);
+  };
+
+  const onDec = () => {
+    const lower = [...FONT_SIZE_PRESETS].reverse().find((s) => s < fontSize);
+    applySize(lower ?? Math.max(8, fontSize - 2));
+  };
+
+  const onInc = () => {
+    const higher = FONT_SIZE_PRESETS.find((s) => s > fontSize);
+    applySize(higher ?? Math.min(72, fontSize + 2));
+  };
+
+  const onSubmitCustom = (e: React.FormEvent) => {
+    e.preventDefault();
+    const val = parseInt(customInput, 10);
+    if (!isNaN(val)) {
+      applySize(val);
+      setOpen(false);
+    }
+  };
+
+  return (
+    <div className="flex items-center gap-0.5 rounded-lg border border-slate-200 bg-white px-1 py-0.5" data-testid="font-size-controls">
+      <button
+        type="button"
+        data-testid="font-size-dec-btn"
+        className="tool-btn h-6 w-6 text-xs font-bold text-slate-600 hover:bg-slate-100 disabled:opacity-40"
+        disabled={fontSize <= 8}
+        onClick={onDec}
+        title="글자 크기 축소 (-)"
+      >
+        -
+      </button>
+      <button
+        ref={btnRef}
+        type="button"
+        data-testid="font-size-dropdown-btn"
+        className="flex h-6 min-w-[42px] items-center justify-center gap-0.5 rounded px-1 text-[11px] font-medium text-slate-700 hover:bg-slate-100"
+        onClick={() => setOpen((o) => !o)}
+        title="글자 크기 선택 및 설정"
+      >
+        <span>{fontSize}px</span>
+        <ChevronDown size={11} className="text-slate-400" />
+      </button>
+      <button
+        type="button"
+        data-testid="font-size-inc-btn"
+        className="tool-btn h-6 w-6 text-xs font-bold text-slate-600 hover:bg-slate-100 disabled:opacity-40"
+        disabled={fontSize >= 72}
+        onClick={onInc}
+        title="글자 크기 확대 (+)"
+      >
+        +
+      </button>
+
+      {open && (
+        <FloatingPortal>
+          <motion.div
+            ref={refs.setFloating}
+            style={floatingStyles}
+            {...getFloatingProps()}
+            initial={{ opacity: 0, y: -4 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.15 }}
+            className="z-50 w-48 rounded-xl border border-slate-200 bg-white p-2.5 shadow-2xl"
+            data-testid="font-size-dropdown"
+          >
+            <div className="mb-2 text-[11px] font-semibold text-slate-500">글자 크기 (폰트 크기)</div>
+            <form onSubmit={onSubmitCustom} className="mb-2.5 flex items-center gap-1">
+              <input
+                type="number"
+                min={8}
+                max={72}
+                value={customInput}
+                onChange={(e) => setCustomInput(e.target.value)}
+                className="w-16 rounded border border-slate-200 px-2 py-1 text-xs font-medium outline-none focus:border-indigo-400"
+                data-testid="font-size-input"
+              />
+              <span className="text-xs text-slate-500">px</span>
+              <button
+                type="submit"
+                className="ml-auto rounded bg-indigo-50 px-2 py-1 text-[11px] font-medium text-indigo-600 hover:bg-indigo-100"
+                data-testid="font-size-apply-btn"
+              >
+                적용
+              </button>
+            </form>
+            <div className="grid grid-cols-3 gap-1 border-t border-slate-100 pt-2">
+              {FONT_SIZE_PRESETS.map((sz) => {
+                const isSelected = fontSize === sz;
+                return (
+                  <button
+                    key={sz}
+                    type="button"
+                    data-testid={`font-size-preset-${sz}`}
+                    className={`flex items-center justify-center rounded py-1 text-xs font-medium transition ${
+                      isSelected
+                        ? 'bg-indigo-600 text-white font-semibold'
+                        : 'text-slate-700 hover:bg-slate-100'
+                    }`}
+                    onClick={() => onSelectPreset(sz)}
+                  >
+                    {sz}px
+                  </button>
+                );
+              })}
             </div>
           </motion.div>
         </FloatingPortal>

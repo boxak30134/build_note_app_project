@@ -3,13 +3,14 @@ import { useFloating, autoUpdate, offset, flip, shift, useDismiss, useInteractio
 import { motion } from 'framer-motion';
 import { Move, Copy, Scissors, Trash2, MessageSquare, Loader2, Sparkles, X, Quote, Link2 } from 'lucide-react';
 import type { NoteSession } from '../session/NoteSession';
+import type { AABB } from '../core/geometry/geometry';
 import { useSessionUI, type PendingCitation, type CitationResult } from '../store/sessionStore';
 import { Bubble } from '../features/annotations/Bubble';
 import type { Annotation } from '../features/annotations/types';
 import { lassoCopy, lassoCut, lassoDelete } from '../features/lasso';
 import { snippet } from '../core/doc/blocks';
 
-/** 레이아웃 재계산 트리거: 에디터 트랜잭션, 스트로크 변경, 크기 변경 */
+/** 레이아웃 재계산 트리거: 에디터 트랜잭션, 스트로크 변경, 스크롤, 크기 변경 */
 function useLayoutTick(session: NoteSession): number {
   const [tick, setTick] = useState(0);
   useEffect(() => {
@@ -20,12 +21,17 @@ function useLayoutTick(session: NoteSession): number {
     };
     session.editor.on('transaction', bump);
     const unsub = session.strokes.subscribe(bump);
+    const scroller = session.scrollEl;
+    scroller?.addEventListener('scroll', bump, { passive: true });
+    window.addEventListener('resize', bump);
     const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(bump) : null;
     if (session.pageEl) ro?.observe(session.pageEl);
     return () => {
       cancelAnimationFrame(raf);
       session.editor.off('transaction', bump);
       unsub();
+      scroller?.removeEventListener('scroll', bump);
+      window.removeEventListener('resize', bump);
       ro?.disconnect();
     };
   }, [session]);
@@ -91,22 +97,7 @@ export function OverlayLayer({ session }: { session: NoteSession }) {
           <Bubble key={a.id} session={session} annotation={a} reference={pinEls[a.id] ?? null} onClose={() => session.patch({ openAnnotationId: null })} />
         ))}
 
-      {selBox && (
-        <motion.div
-          data-overlay
-          initial={{ opacity: 0, y: 6 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="pointer-events-auto absolute flex gap-0.5 rounded-xl border border-indigo-200 bg-white p-1 shadow-lg"
-          style={{ left: Math.max(0, selBox.minX - 6), top: Math.max(0, selBox.minY - 52) }}
-          onPointerDown={(e) => e.stopPropagation()}
-        >
-          <ActionBtn active={ui.moveMode} onClick={() => session.patch({ moveMode: !ui.moveMode })} icon={<Move size={14} />} label="이동" />
-          <ActionBtn onClick={() => lassoCopy(session)} icon={<Copy size={14} />} label="복사" />
-          <ActionBtn onClick={() => lassoCut(session)} icon={<Scissors size={14} />} label="잘라내기" />
-          <ActionBtn onClick={() => lassoDelete(session)} icon={<Trash2 size={14} />} label="삭제" />
-          <ActionBtn onClick={() => session.createAnnotation()} icon={<MessageSquare size={14} />} label="💬 말풍선" />
-        </motion.div>
-      )}
+      {selBox && <LassoActionBar session={session} selBox={selBox} />}
 
       {ui.citations.map((c) => (
         <CitationBadge key={c.id} session={session} citation={c} open={ui.openCitationId === c.id} />
@@ -115,9 +106,56 @@ export function OverlayLayer({ session }: { session: NoteSession }) {
   );
 }
 
+/** [Layer 3] 올가미 선택 영역 바로 위에 위치하며 다른 손글씨(z-30)보다 앞(z-50)에 표시되는 액션 바 */
+function LassoActionBar({ session, selBox }: { session: NoteSession; selBox: AABB }) {
+  const ui = useSessionUI(session.id);
+  const page = session.pageEl;
+  const zoom = session.ui.zoom || 1;
+
+  let left = Math.max(8, selBox.minX - 6);
+  let top = Math.max(8, selBox.minY - 52);
+
+  if (page) {
+    const pr = page.getBoundingClientRect();
+    const rawLeft = pr.left + Math.max(0, selBox.minX - 6) * zoom;
+    const rawTop = pr.top + (selBox.minY - 52) * zoom;
+    const belowTop = pr.top + (selBox.maxY + 10) * zoom;
+    const viewportTopLimit = session.scrollEl ? session.scrollEl.getBoundingClientRect().top + 8 : 56;
+    const maxLeft = typeof window !== 'undefined' && window.innerWidth > 340 ? window.innerWidth - 330 : rawLeft;
+
+    left = Math.round(Math.max(8, Math.min(rawLeft, maxLeft)));
+    top = Math.round(rawTop < viewportTopLimit ? belowTop : rawTop);
+  }
+
+  return (
+    <FloatingPortal>
+      <div
+        data-overlay
+        data-testid="lasso-action-bar"
+        style={{ left, top }}
+        className="pointer-events-auto fixed z-50 flex items-center gap-0.5 rounded-xl border border-indigo-200 bg-white p-1.5 shadow-2xl select-none"
+        onPointerDown={(e) => e.stopPropagation()}
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <ActionBtn active={ui.moveMode} onClick={() => session.patch({ moveMode: !ui.moveMode })} icon={<Move size={14} />} label="이동" />
+        <ActionBtn onClick={() => lassoCopy(session)} icon={<Copy size={14} />} label="복사" />
+        <ActionBtn onClick={() => lassoCut(session)} icon={<Scissors size={14} />} label="잘라내기" />
+        <ActionBtn onClick={() => lassoDelete(session)} icon={<Trash2 size={14} />} label="삭제" />
+        <ActionBtn onClick={() => session.createAnnotation()} icon={<MessageSquare size={14} />} label="💬 말풍선" />
+      </div>
+    </FloatingPortal>
+  );
+}
+
 function ActionBtn({ icon, label, onClick, active }: { icon: React.ReactNode; label: string; onClick: () => void; active?: boolean }) {
   return (
-    <button className={`flex items-center gap-1 rounded-lg px-2 py-1 text-xs ${active ? 'bg-indigo-100 text-indigo-700' : 'hover:bg-slate-100'}`} onClick={onClick}>
+    <button
+      type="button"
+      className={`flex items-center gap-1 rounded-lg px-2 py-1 text-xs font-medium transition-colors ${
+        active ? 'bg-indigo-100 text-indigo-700 font-semibold' : 'text-slate-700 hover:bg-slate-100 active:bg-slate-200'
+      }`}
+      onClick={onClick}
+    >
       {icon}
       {label}
     </button>

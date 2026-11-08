@@ -4,8 +4,12 @@ import { Markdown, MarkdownManager } from '@tiptap/markdown';
 import { Table, TableRow, TableHeader, TableCell } from '@tiptap/extension-table';
 import { InlineMath, BlockMath } from './math';
 import { WikiLink } from './wikiLink';
+import { Callout } from './callout';
+import { BlockEmbed } from './blockEmbed';
 import { AnnotationMark } from './annotationMark';
 import { FontFamilyMark } from './fontFamily';
+import { FontSizeMark } from './fontSize';
+import { TextColorMark } from './textColor';
 import { BlockId } from './blockId';
 import { NoteImage, PdfEmbed, InkTemplate } from './media';
 import { RubyText } from './rubyText';
@@ -31,11 +35,15 @@ export function schemaExtensions(noteId: string): AnyExtension[] {
     NoteImage.configure({ noteId }),
     PdfEmbed.configure({ noteId }),
     InkTemplate.configure({ noteId }),
+    Callout,
+    BlockEmbed.configure({ noteId }),
     InlineMath,
     BlockMath,
     RubyText,
     AnnotationMark,
     FontFamilyMark,
+    FontSizeMark,
+    TextColorMark,
     BlockId,
   ];
 }

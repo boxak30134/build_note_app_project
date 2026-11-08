@@ -26,5 +26,5 @@ export const useContextMenu = create<ContextMenuState>((set, get) => ({
   hide: () => set({ open: false }),
 }));
 
-/** 필기(스트로크) 내부 클립보드 */
-export const strokeClipboard: { strokes: Stroke[] } = { strokes: [] };
+/** 필기(스트로크) 내부 클립보드: active가 true일 때 최근 복사 항목이 손글씨임을 나타냄 */
+export const strokeClipboard: { strokes: Stroke[]; active: boolean } = { strokes: [], active: false };

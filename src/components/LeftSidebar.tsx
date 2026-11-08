@@ -19,6 +19,7 @@ import {
   Loader2,
   FolderTree,
   Layers,
+  CheckSquare,
 } from 'lucide-react';
 import { db, emptyNote, uid, type FolderRecord, type NoteRecord } from '../storage/db';
 import { useTabs } from '../store/tabsStore';
@@ -44,6 +45,14 @@ export function LeftSidebar() {
   const [showTrash, setShowTrash] = useState(false);
   const [importing, setImporting] = useState<string | null>(null);
   const [sidebarView, setSidebarView] = useState<'files' | 'pages'>('files');
+
+  // 파일 구조 및 휴지통 복수 선택 상태
+  const [isSelectMode, setIsSelectMode] = useState(false);
+  const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
+  const [showMoveModal, setShowMoveModal] = useState(false);
+  const [targetMoveFolderId, setTargetMoveFolderId] = useState<string | null>(null);
+  const [selectedTrashKeys, setSelectedTrashKeys] = useState<Set<string>>(new Set());
+
   const activeId = useTabs((s) => s.activeTabId);
   const openTab = useTabs((s) => s.openTab);
   const activeSession = getSession(activeId) ?? null;
@@ -145,6 +154,203 @@ export function LeftSidebar() {
     await db.notes.update(noteId, { folderId });
   };
 
+  const toggleKey = (key: string) => {
+    setSelectedKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  const toggleTrashKey = (key: string) => {
+    setSelectedTrashKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  const allLiveKeys = useMemo(() => {
+    const keys: string[] = [];
+    liveFolders.forEach((f) => keys.push(`folder:${f.id}`));
+    liveNotes.forEach((n) => keys.push(`note:${n.id}`));
+    return keys;
+  }, [liveFolders, liveNotes]);
+
+  const selectAllLive = () => {
+    if (selectedKeys.size === allLiveKeys.length) {
+      setSelectedKeys(new Set());
+    } else {
+      setSelectedKeys(new Set(allLiveKeys));
+    }
+  };
+
+  const allTrashKeys = useMemo(() => {
+    const keys: string[] = [];
+    trashedFolders.forEach((f) => keys.push(`folder:${f.id}`));
+    trashedNotes.forEach((n) => keys.push(`note:${n.id}`));
+    return keys;
+  }, [trashedFolders, trashedNotes]);
+
+  const selectAllTrash = () => {
+    if (selectedTrashKeys.size === allTrashKeys.length) {
+      setSelectedTrashKeys(new Set());
+    } else {
+      setSelectedTrashKeys(new Set(allTrashKeys));
+    }
+  };
+
+  /** 복수 선택된 파일/폴더 일괄 휴지통 이동 */
+  const trashSelected = async () => {
+    if (selectedKeys.size === 0) return;
+    const now = Date.now();
+    const folderIdsToTrash: string[] = [];
+    const noteIdsToTrash: string[] = [];
+
+    for (const key of selectedKeys) {
+      if (key.startsWith('folder:')) folderIdsToTrash.push(key.slice(7));
+      else if (key.startsWith('note:')) noteIdsToTrash.push(key.slice(5));
+    }
+
+    const allFolderIds: string[] = [];
+    for (const fid of folderIdsToTrash) {
+      allFolderIds.push(...descendantFolderIds(folders, fid));
+    }
+    const uniqueFolderIds = Array.from(new Set(allFolderIds));
+    if (uniqueFolderIds.length > 0) {
+      await db.folders.where('id').anyOf(uniqueFolderIds).modify({ deletedAt: now });
+      const affected = notes.filter((n) => n.folderId && uniqueFolderIds.includes(n.folderId) && !n.deletedAt);
+      for (const n of affected) {
+        await db.notes.update(n.id, { deletedAt: now });
+        forceCloseTab(n.id);
+        unindexNote(n.id);
+      }
+    }
+
+    for (const nid of noteIdsToTrash) {
+      await db.notes.update(nid, { deletedAt: now });
+      forceCloseTab(nid);
+      unindexNote(nid);
+    }
+
+    const count = selectedKeys.size;
+    setSelectedKeys(new Set());
+    setIsSelectMode(false);
+    toast.info(`${count}개 항목을 휴지통으로 이동했습니다.`);
+  };
+
+  /** 복수 선택된 파일/폴더 일괄 폴더 이동 */
+  const moveSelectedToTarget = async () => {
+    const folderIdsToMove: string[] = [];
+    const noteIdsToMove: string[] = [];
+
+    for (const key of selectedKeys) {
+      if (key.startsWith('folder:')) folderIdsToMove.push(key.slice(7));
+      else if (key.startsWith('note:')) noteIdsToMove.push(key.slice(5));
+    }
+
+    if (targetMoveFolderId) {
+      for (const fid of folderIdsToMove) {
+        const descendants = descendantFolderIds(folders, fid);
+        if (descendants.includes(targetMoveFolderId)) {
+          toast.error('선택한 폴더의 하위 폴더로는 이동할 수 없습니다.');
+          return;
+        }
+      }
+    }
+
+    for (const nid of noteIdsToMove) {
+      await db.notes.update(nid, { folderId: targetMoveFolderId });
+    }
+    for (const fid of folderIdsToMove) {
+      await db.folders.update(fid, { parentId: targetMoveFolderId });
+    }
+
+    const count = selectedKeys.size;
+    setSelectedKeys(new Set());
+    setIsSelectMode(false);
+    setShowMoveModal(false);
+    toast.success(`${count}개 항목을 이동했습니다.`);
+  };
+
+  /** 휴지통 복수 선택 항목 일괄 복원 */
+  const restoreSelectedTrash = async () => {
+    if (selectedTrashKeys.size === 0) return;
+    const folderIdsToRestore: string[] = [];
+    const noteIdsToRestore: string[] = [];
+
+    for (const key of selectedTrashKeys) {
+      if (key.startsWith('folder:')) folderIdsToRestore.push(key.slice(7));
+      else if (key.startsWith('note:')) noteIdsToRestore.push(key.slice(5));
+    }
+
+    for (const fid of folderIdsToRestore) {
+      const ids = descendantFolderIds(folders, fid);
+      const f = folders.find((x) => x.id === fid);
+      const parentAlive = !f?.parentId || liveFolders.some((x) => x.id === f.parentId);
+      await db.folders.where('id').anyOf(ids).modify({ deletedAt: null });
+      if (!parentAlive) await db.folders.update(fid, { parentId: null });
+      const restoredNotes = notes.filter((n) => n.folderId && ids.includes(n.folderId));
+      for (const n of restoredNotes) {
+        await db.notes.update(n.id, { deletedAt: null });
+        indexNote(n);
+      }
+    }
+
+    for (const nid of noteIdsToRestore) {
+      const n = notes.find((x) => x.id === nid);
+      const parentAlive = !n?.folderId || liveFolders.some((f) => f.id === n.folderId);
+      await db.notes.update(nid, { deletedAt: null, folderId: parentAlive ? n?.folderId ?? null : null });
+      const fresh = await db.notes.get(nid);
+      if (fresh) indexNote(fresh);
+    }
+
+    const count = selectedTrashKeys.size;
+    setSelectedTrashKeys(new Set());
+    toast.success(`${count}개 항목을 복원했습니다.`);
+  };
+
+  /** 휴지통 복수 선택 항목 일괄 영구 삭제 */
+  const purgeSelectedTrash = async () => {
+    if (selectedTrashKeys.size === 0) return;
+    const ok = await confirmDialog('영구 삭제', `선택한 ${selectedTrashKeys.size}개 항목을 영구 삭제합니다. 되돌릴 수 없습니다. 계속할까요?`, [
+      { label: '취소', value: 'cancel' },
+      { label: '영구 삭제', value: 'ok', variant: 'danger' },
+    ]);
+    if (ok !== 'ok') return;
+
+    const folderIdsToPurge: string[] = [];
+    const noteIdsToPurge: string[] = [];
+
+    for (const key of selectedTrashKeys) {
+      if (key.startsWith('folder:')) folderIdsToPurge.push(key.slice(7));
+      else if (key.startsWith('note:')) noteIdsToPurge.push(key.slice(5));
+    }
+
+    const allFolderIds: string[] = [];
+    for (const fid of folderIdsToPurge) {
+      allFolderIds.push(...descendantFolderIds(folders, fid));
+    }
+    const uniqueFolderIds = Array.from(new Set(allFolderIds));
+    if (uniqueFolderIds.length > 0) {
+      const ns = notes.filter((n) => n.folderId && uniqueFolderIds.includes(n.folderId));
+      await db.notes.bulkDelete(ns.map((n) => n.id));
+      ns.forEach((n) => void deleteAttachmentsOf(n.id));
+      await db.folders.bulkDelete(uniqueFolderIds);
+    }
+
+    if (noteIdsToPurge.length > 0) {
+      await db.notes.bulkDelete(noteIdsToPurge);
+      noteIdsToPurge.forEach((nid) => void deleteAttachmentsOf(nid));
+    }
+
+    const count = selectedTrashKeys.size;
+    setSelectedTrashKeys(new Set());
+    toast.info(`${count}개 항목을 영구 삭제했습니다.`);
+  };
+
   const openFiles = async () => {
     try {
       const created = await openLocalFiles(markdownToJson, selectedFolder);
@@ -192,15 +398,22 @@ export function LeftSidebar() {
   };
 
   const renderFolder = (f: FolderRecord, depth: number): React.ReactNode => {
+    const key = `folder:${f.id}`;
+    const isChecked = selectedKeys.has(key);
     const open = !collapsed[f.id];
     const childFolders = liveFolders.filter((c) => c.parentId === f.id).sort((a, b) => a.name.localeCompare(b.name, 'ko'));
     const childNotes = liveNotes.filter((n) => n.folderId === f.id).sort((a, b) => a.title.localeCompare(b.title, 'ko'));
     return (
       <div key={f.id}>
         <div
-          className={`tree-row ${selectedFolder === f.id ? 'bg-indigo-50' : ''}`}
+          data-testid={`folder-row-${f.id}`}
+          className={`tree-row ${isChecked ? 'bg-indigo-100/90 text-indigo-900 font-medium' : selectedFolder === f.id ? 'bg-indigo-50' : ''}`}
           style={{ paddingLeft: 6 + depth * 14 }}
           onClick={() => {
+            if (isSelectMode) {
+              toggleKey(key);
+              return;
+            }
             setSelectedFolder(selectedFolder === f.id ? null : f.id);
             setCollapsed((c) => ({ ...c, [f.id]: open }));
           }}
@@ -214,8 +427,28 @@ export function LeftSidebar() {
             if (id) void moveNote(id, f.id);
           }}
         >
-          {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-          {open ? <FolderOpen size={14} className="text-amber-500" /> : <Folder size={14} className="text-amber-500" />}
+          {isSelectMode && (
+            <input
+              type="checkbox"
+              data-testid={`checkbox-folder-${f.id}`}
+              checked={isChecked}
+              onChange={() => toggleKey(key)}
+              onClick={(e) => e.stopPropagation()}
+              className="mr-1 rounded accent-indigo-600"
+            />
+          )}
+          <span
+            className="flex items-center"
+            onClick={(e) => {
+              if (isSelectMode) {
+                e.stopPropagation();
+                setCollapsed((c) => ({ ...c, [f.id]: open }));
+              }
+            }}
+          >
+            {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+          </span>
+          {open ? <FolderOpen size={14} className="text-amber-500 shrink-0" /> : <Folder size={14} className="text-amber-500 shrink-0" />}
           <span className="truncate">{f.name}</span>
         </div>
         {open && (
@@ -228,27 +461,48 @@ export function LeftSidebar() {
     );
   };
 
-  const renderNote = (n: NoteRecord, depth: number, sub?: string) => (
-    <div
-      key={n.id}
-      draggable
-      onDragStart={(e) => e.dataTransfer.setData('text/note-id', n.id)}
-      className={`tree-row ${activeId === n.id ? 'bg-indigo-100 text-indigo-800' : ''}`}
-      style={{ paddingLeft: 6 + depth * 14 + 14 }}
-      onClick={() => openTab(n.id)}
-      onContextMenu={(e) => {
-        e.preventDefault();
-        setMenu({ x: e.clientX, y: e.clientY, kind: 'note', id: n.id });
-      }}
-      title={n.title}
-    >
-      {n.fileHandle ? <HardDrive size={13} className="shrink-0 text-slate-500" /> : <FileText size={13} className="shrink-0 text-slate-400" />}
-      <span className="min-w-0">
-        <span className="block truncate">{n.title}</span>
-        {sub && <span className="block truncate text-[10px] text-slate-400">{sub}</span>}
-      </span>
-    </div>
-  );
+  const renderNote = (n: NoteRecord, depth: number, sub?: string) => {
+    const key = `note:${n.id}`;
+    const isChecked = selectedKeys.has(key);
+    return (
+      <div
+        key={n.id}
+        data-testid={`note-row-${n.id}`}
+        draggable={!isSelectMode}
+        onDragStart={(e) => e.dataTransfer.setData('text/note-id', n.id)}
+        className={`tree-row ${isChecked ? 'bg-indigo-100/90 text-indigo-900 font-medium' : activeId === n.id ? 'bg-indigo-100 text-indigo-800' : ''}`}
+        style={{ paddingLeft: 6 + depth * 14 + 14 }}
+        onClick={() => {
+          if (isSelectMode) {
+            toggleKey(key);
+            return;
+          }
+          openTab(n.id);
+        }}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          setMenu({ x: e.clientX, y: e.clientY, kind: 'note', id: n.id });
+        }}
+        title={n.title}
+      >
+        {isSelectMode && (
+          <input
+            type="checkbox"
+            data-testid={`checkbox-note-${n.id}`}
+            checked={isChecked}
+            onChange={() => toggleKey(key)}
+            onClick={(e) => e.stopPropagation()}
+            className="mr-1 rounded accent-indigo-600"
+          />
+        )}
+        {n.fileHandle ? <HardDrive size={13} className="shrink-0 text-slate-500" /> : <FileText size={13} className="shrink-0 text-slate-400" />}
+        <span className="min-w-0 flex-1 truncate">
+          <span className="block truncate">{n.title}</span>
+          {sub && <span className="block truncate text-[10px] text-slate-400">{sub}</span>}
+        </span>
+      </div>
+    );
+  };
 
   const rootFolders = liveFolders.filter((f) => !f.parentId || !liveFolders.some((p) => p.id === f.parentId)).sort((a, b) => a.name.localeCompare(b.name, 'ko'));
   const rootNotes = liveNotes.filter((n) => !n.folderId || !liveFolders.some((f) => f.id === n.folderId));
@@ -312,6 +566,18 @@ export function LeftSidebar() {
               <button className="btn-ghost flex-1 justify-center" onClick={() => void newFolder()} title="새 폴더">
                 <FolderPlus size={14} /> 폴더
               </button>
+              <button
+                data-testid="toggle-select-mode-btn"
+                className={`btn-ghost px-2 ${isSelectMode ? 'bg-indigo-100 text-indigo-700 font-semibold' : ''}`}
+                onClick={() => {
+                  setIsSelectMode((v) => !v);
+                  if (isSelectMode) setSelectedKeys(new Set());
+                }}
+                title={isSelectMode ? '선택 모드 종료' : '다중 선택 모드 (일괄 삭제/이동)'}
+              >
+                <CheckSquare size={14} />
+                <span className="text-[11px] ml-0.5">선택</span>
+              </button>
               <button className="btn-ghost" onClick={() => void openFiles()} title="로컬 파일 열기 (UTF-8/CP949 자동 감지)">
                 <FileUp size={14} />
               </button>
@@ -319,6 +585,49 @@ export function LeftSidebar() {
                 <FolderInput size={14} />
               </button>
             </div>
+            {isSelectMode && (
+              <div
+                data-testid="selection-action-bar"
+                className="mt-2 flex items-center justify-between rounded-lg border border-indigo-200 bg-indigo-50/90 p-1.5 text-xs text-indigo-900 shadow-xs"
+              >
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <span className="font-semibold truncate">{selectedKeys.size}개 선택</span>
+                  <button
+                    type="button"
+                    data-testid="select-all-live-btn"
+                    className="text-[11px] text-indigo-700 underline shrink-0 hover:text-indigo-900"
+                    onClick={selectAllLive}
+                  >
+                    {selectedKeys.size === allLiveKeys.length && allLiveKeys.length > 0 ? '전체 해제' : '전체 선택'}
+                  </button>
+                </div>
+                <div className="flex items-center gap-1 shrink-0">
+                  <button
+                    type="button"
+                    data-testid="bulk-move-btn"
+                    disabled={selectedKeys.size === 0}
+                    className="flex items-center gap-1 rounded bg-white px-2 py-1 text-[11px] font-semibold text-indigo-700 shadow-xs hover:bg-indigo-100 disabled:opacity-40"
+                    onClick={() => {
+                      setTargetMoveFolderId(null);
+                      setShowMoveModal(true);
+                    }}
+                    title="선택한 항목을 다른 폴더로 일괄 이동"
+                  >
+                    <FolderInput size={12} /> 이동
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="bulk-trash-btn"
+                    disabled={selectedKeys.size === 0}
+                    className="flex items-center gap-1 rounded bg-red-50 px-2 py-1 text-[11px] font-semibold text-red-600 shadow-xs hover:bg-red-100 disabled:opacity-40"
+                    onClick={() => void trashSelected()}
+                    title="선택한 항목을 휴지통으로 일괄 이동"
+                  >
+                    <Trash2 size={12} /> 삭제
+                  </button>
+                </div>
+              </div>
+            )}
             <button className="btn-ghost mt-1 w-full justify-center border border-dashed border-slate-300" onClick={() => void importExternal()} disabled={!!importing} title="PDF 파일을 새 노트로 가져옵니다">
               {importing ? <Loader2 size={14} className="animate-spin" /> : <Import size={14} />} PDF 가져오기
             </button>
@@ -354,23 +663,153 @@ export function LeftSidebar() {
               {showTrash ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
             </button>
             {showTrash && (
-              <div className="max-h-48 overflow-y-auto px-1 pb-2 text-xs">
-                {[...trashedFolders.map((f) => ({ kind: 'folder' as const, id: f.id, name: `📁 ${f.name}` })), ...trashedNotes.map((n) => ({ kind: 'note' as const, id: n.id, name: n.title }))].map((it) => (
-                  <div key={it.id} className="flex items-center gap-1 rounded px-2 py-1 hover:bg-slate-100">
-                    <span className="flex-1 truncate text-slate-500">{it.name}</span>
-                    <button className="icon-btn" title="복원" onClick={() => void restore(it.kind, it.id)}>
-                      <RotateCcw size={12} />
-                    </button>
-                    <button className="icon-btn text-red-500" title="영구 삭제" onClick={() => void purge(it.kind, it.id)}>
-                      <Trash2 size={12} />
-                    </button>
+              <div className="max-h-56 overflow-y-auto px-1 pb-2 text-xs">
+                {allTrashKeys.length > 0 && (
+                  <div
+                    data-testid="trash-selection-bar"
+                    className="mb-1 flex items-center justify-between border-b border-slate-200 bg-slate-100/90 px-2 py-1.5 rounded"
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <input
+                        type="checkbox"
+                        data-testid="trash-select-all-checkbox"
+                        checked={selectedTrashKeys.size > 0 && selectedTrashKeys.size === allTrashKeys.length}
+                        onChange={selectAllTrash}
+                        className="rounded accent-indigo-600"
+                      />
+                      <span className="text-[11px] text-slate-600 font-medium">
+                        {selectedTrashKeys.size > 0 ? `${selectedTrashKeys.size}개 선택` : '전체 선택'}
+                      </span>
+                    </div>
+                    {selectedTrashKeys.size > 0 && (
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          data-testid="bulk-restore-trash-btn"
+                          className="flex items-center gap-1 rounded bg-indigo-50 px-2 py-1 text-[11px] font-semibold text-indigo-700 hover:bg-indigo-100"
+                          onClick={() => void restoreSelectedTrash()}
+                          title="선택한 항목 일괄 복원"
+                        >
+                          <RotateCcw size={11} /> 복원 ({selectedTrashKeys.size})
+                        </button>
+                        <button
+                          type="button"
+                          data-testid="bulk-purge-trash-btn"
+                          className="flex items-center gap-1 rounded bg-red-50 px-2 py-1 text-[11px] font-semibold text-red-600 hover:bg-red-100"
+                          onClick={() => void purgeSelectedTrash()}
+                          title="선택한 항목 일괄 영구 삭제"
+                        >
+                          <Trash2 size={11} /> 영구 삭제 ({selectedTrashKeys.size})
+                        </button>
+                      </div>
+                    )}
                   </div>
-                ))}
+                )}
+                {[...trashedFolders.map((f) => ({ kind: 'folder' as const, id: f.id, name: `📁 ${f.name}` })), ...trashedNotes.map((n) => ({ kind: 'note' as const, id: n.id, name: n.title }))].map((it) => {
+                  const key = `${it.kind}:${it.id}`;
+                  const isChecked = selectedTrashKeys.has(key);
+                  return (
+                    <div
+                      key={it.id}
+                      data-testid={`trash-item-${it.id}`}
+                      className={`flex items-center gap-1.5 rounded px-2 py-1 hover:bg-slate-100 ${isChecked ? 'bg-indigo-50/80 font-medium text-indigo-900' : ''}`}
+                    >
+                      <input
+                        type="checkbox"
+                        data-testid={`trash-checkbox-${it.id}`}
+                        checked={isChecked}
+                        onChange={() => toggleTrashKey(key)}
+                        className="rounded accent-indigo-600"
+                      />
+                      <span className="flex-1 truncate text-slate-600">{it.name}</span>
+                      <button className="icon-btn" title="복원" onClick={() => void restore(it.kind, it.id)}>
+                        <RotateCcw size={12} />
+                      </button>
+                      <button className="icon-btn text-red-500" title="영구 삭제" onClick={() => void purge(it.kind, it.id)}>
+                        <Trash2 size={12} />
+                      </button>
+                    </div>
+                  );
+                })}
                 {trashedNotes.length + trashedFolders.length === 0 && <div className="px-2 py-1 text-slate-400">비어 있음</div>}
               </div>
             )}
           </div>
         </>
+      )}
+
+      {showMoveModal && (
+        <div
+          data-testid="bulk-move-modal"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          onClick={() => setShowMoveModal(false)}
+        >
+          <div
+            className="w-full max-w-sm rounded-xl bg-white p-4 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="mb-1 text-sm font-semibold text-slate-800">
+              선택한 {selectedKeys.size}개 항목 이동
+            </h3>
+            <p className="mb-3 text-xs text-slate-500">이동할 대상 폴더를 선택하세요:</p>
+            <div className="max-h-60 overflow-y-auto space-y-1 rounded border border-slate-200 p-2 text-xs">
+              <button
+                type="button"
+                data-testid="target-folder-root"
+                className={`flex w-full items-center gap-1.5 rounded px-2 py-1.5 text-left transition hover:bg-indigo-50 ${
+                  targetMoveFolderId === null ? 'bg-indigo-100 font-semibold text-indigo-800' : 'text-slate-700'
+                }`}
+                onClick={() => setTargetMoveFolderId(null)}
+              >
+                <Folder size={14} className="text-amber-500 shrink-0" />
+                <span>최상위 (루트)</span>
+              </button>
+              {liveFolders
+                .filter((f) => {
+                  const selectedFolderIds = Array.from(selectedKeys)
+                    .filter((k) => k.startsWith('folder:'))
+                    .map((k) => k.slice(7));
+                  for (const sfid of selectedFolderIds) {
+                    if (descendantFolderIds(folders, sfid).includes(f.id)) {
+                      return false;
+                    }
+                  }
+                  return true;
+                })
+                .map((f) => (
+                  <button
+                    key={f.id}
+                    type="button"
+                    data-testid={`target-folder-${f.id}`}
+                    className={`flex w-full items-center gap-1.5 rounded px-2 py-1.5 text-left transition hover:bg-indigo-50 ${
+                      targetMoveFolderId === f.id ? 'bg-indigo-100 font-semibold text-indigo-800' : 'text-slate-700'
+                    }`}
+                    onClick={() => setTargetMoveFolderId(f.id)}
+                  >
+                    <Folder size={14} className="text-amber-500 shrink-0" />
+                    <span className="truncate">{f.name}</span>
+                  </button>
+                ))}
+            </div>
+            <div className="mt-4 flex justify-end gap-2 text-xs">
+              <button
+                type="button"
+                className="rounded px-3 py-1.5 text-slate-600 hover:bg-slate-100"
+                onClick={() => setShowMoveModal(false)}
+              >
+                취소
+              </button>
+              <button
+                type="button"
+                data-testid="confirm-bulk-move-btn"
+                className="btn-primary px-3 py-1.5"
+                onClick={() => void moveSelectedToTarget()}
+              >
+                이동 실행
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {menu && (

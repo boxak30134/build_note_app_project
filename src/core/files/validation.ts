@@ -13,6 +13,16 @@ export function validateFileName(name: string): string | null {
   return null;
 }
 
+/** 문서의 맨 위 헤더 텍스트를 안전한 문서 제목으로 변환 */
+export function sanitizeDocumentTitle(raw: string): string | null {
+  if (!raw) return null;
+  let cleaned = raw.replace(/[\\/<>:"|?*\u0000-\u001f\u007f#]/g, ' ').trim();
+  cleaned = cleaned.replace(/[. ]+$/, '').trim();
+  if (cleaned.length > 100) cleaned = cleaned.slice(0, 100).trim();
+  if (!cleaned) return null;
+  return cleaned;
+}
+
 /** chokidar/폴더 스캔 시 완전히 제외할 폴더 */
 export const IGNORED_DIRS = new Set([
   'node_modules',

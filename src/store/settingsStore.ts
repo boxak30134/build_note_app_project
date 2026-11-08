@@ -104,6 +104,9 @@ export interface SettingsState {
   /** 번역 결과 삽입 형식: 'parentheses'(원문 뒤 괄호) | 'ruby'(루비 주석) | 'replace'(원문 대체) */
   translationInsertMode: TranslationInsertMode;
 
+  /** 기본 글자 크기 (px, 기본값: 16) */
+  fontSize: number;
+
   toggleLeft: () => void;
   toggleRight: () => void;
   setPaneWidth: (side: 'left' | 'right', w: number) => void;
@@ -122,6 +125,7 @@ export interface SettingsState {
   addCustomFont: (font: FontItem) => void;
   removeCustomFont: (fontId: string) => void;
   setTranslationInsertMode: (mode: TranslationInsertMode) => void;
+  setFontSize: (size: number) => void;
   set: (p: Partial<SettingsState>) => void;
 }
 
@@ -159,6 +163,7 @@ export const useSettings = create<SettingsState>()(
       customFonts: [],
 
       translationInsertMode: 'parentheses',
+      fontSize: 16,
 
       toggleLeft: () => set((s) => ({ leftOpen: !s.leftOpen })),
       toggleRight: () => set((s) => ({ rightOpen: !s.rightOpen })),
@@ -174,18 +179,18 @@ export const useSettings = create<SettingsState>()(
         set((s) => ({
           activeSlot: i,
           isCustomColorActive: false,
-          tool: s.tool === 'eraser' || s.tool === 'lasso' || s.tool === 'none' ? 'pencil' : s.tool,
+          tool: s.tool === 'eraser' || s.tool === 'lasso' ? 'pencil' : s.tool,
         })),
       setCustomColor: (color) =>
         set((s) => ({
           customColor: color,
           isCustomColorActive: true,
-          tool: s.tool === 'eraser' || s.tool === 'lasso' || s.tool === 'none' ? 'pencil' : s.tool,
+          tool: s.tool === 'eraser' || s.tool === 'lasso' ? 'pencil' : s.tool,
         })),
       selectCustomColor: () =>
         set((s) => ({
           isCustomColorActive: true,
-          tool: s.tool === 'eraser' || s.tool === 'lasso' || s.tool === 'none' ? 'pencil' : s.tool,
+          tool: s.tool === 'eraser' || s.tool === 'lasso' ? 'pencil' : s.tool,
         })),
       setPenType: (penType) => set({ penType }),
       setAutoStraighten: (autoStraighten) => set({ autoStraighten }),
@@ -220,11 +225,12 @@ export const useSettings = create<SettingsState>()(
           };
         }),
       setTranslationInsertMode: (translationInsertMode) => set({ translationInsertMode }),
+      setFontSize: (fontSize) => set({ fontSize: Math.max(8, Math.min(72, Math.round(fontSize))) }),
       set: (p) => set(p),
     }),
     {
       name: 'eduink-settings',
-      version: 5,
+      version: 6,
       migrate: (persistedState: unknown, version: number) => {
         const state = (persistedState ?? {}) as Partial<SettingsState>;
         if (version < 2 && state.aiModels) {
@@ -254,6 +260,9 @@ export const useSettings = create<SettingsState>()(
         }
         if (version < 5) {
           state.translationInsertMode = state.translationInsertMode ?? 'parentheses';
+        }
+        if (version < 6) {
+          state.fontSize = state.fontSize ?? 16;
         }
         return state as SettingsState;
       },

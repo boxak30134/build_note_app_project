@@ -91,7 +91,10 @@ export const WikiLink = Node.create({
   markdownTokenizer: {
     name: 'wikiLink',
     level: 'inline',
-    start: (src: string) => src.indexOf('[['),
+    start: (src: string) => {
+      const m = /(?<!!)\[\[/.exec(src);
+      return m ? m.index : -1;
+    },
     tokenize: (src: string) => {
       const m = /^\[\[([^\]|#\n]+)(?:#([^\]|\n]+))?(?:\|([^\]\n]+))?\]\]/.exec(src);
       if (!m) return undefined;

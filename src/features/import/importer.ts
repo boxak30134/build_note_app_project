@@ -5,6 +5,7 @@ import { createPage, type NotePage } from '../../core/page/pageTypes';
 import { saveAttachmentExclusive } from '../../storage/opfs';
 import { plainTextOf } from '../../core/doc/blocks';
 import { validateFileName } from '../../core/files/validation';
+import type { PdfImportResult } from './pdfImport';
 
 export type ImportKind = 'pdf';
 
@@ -40,14 +41,26 @@ function baseName(name: string) {
   return name.replace(/\.[^.]+$/, '');
 }
 
-async function importPdfFile(file: File, noteId: string, onProgress?: (msg: string) => void) {
-  const { importPdf } = await import('./pdfImport');
-  const result = await importPdf(await file.arrayBuffer(), (p, t) => onProgress?.(`PDF 페이지 분석 중… ${p}/${t}`));
+export interface PdfAttachmentSaver {
+  (blob: Blob, fileName: string): Promise<string>;
+}
+
+/**
+ * PDF 분석 결과를 에디터 문서(Layer 1 inkTemplate 전용)와 검색 색인용 plainText로 변환한다.
+ * - 순수 캔버스 템플릿 마운트 원칙: page.template이 존재하는 페이지는 단일 `inkTemplate` 노드만 생성하며,
+ *   page.blocks(OCR 텍스트)나 page.images(삼성 노트 손글씨 XObject 등)를 에디터 본문에 중복 삽입하지 않는다.
+ * - 추출된 OCR 텍스트는 오직 `plainText` 검색 색인으로만 병합한다.
+ */
+export async function assemblePdfImportResult(
+  result: PdfImportResult,
+  fileName: string,
+  saveAttachment: PdfAttachmentSaver,
+) {
   const content: JSONContent[] = [];
   let media = 0;
   let handwriting = 0;
   let textBlocks = 0;
-  const stem = safeTitle(baseName(file.name), 'import');
+  const stem = safeTitle(baseName(fileName), 'import');
   const pages: NotePage[] = [];
   const textLines: string[] = [];
 
@@ -62,9 +75,24 @@ async function importPdfFile(file: File, noteId: string, onProgress?: (msg: stri
     );
 
     if (page.template) {
-      const rel = await saveAttachmentExclusive(noteId, page.template.blob, `${stem}-p${page.index}.png`);
-      content.push({ type: 'inkTemplate', attrs: { src: rel, width: page.template.width, height: page.template.height, page: page.index } });
+      const rel = await saveAttachment(page.template.blob, `${stem}-p${page.index}.png`);
+      content.push({
+        type: 'inkTemplate',
+        attrs: {
+          src: rel,
+          width: page.template.width,
+          height: page.template.height,
+          page: page.index,
+        },
+      });
       handwriting++;
+    } else {
+      // 템플릿이 없는 예외 폴백 시에만 개별 이미지를 마운트
+      for (let k = 0; k < page.images.length; k++) {
+        const rel = await saveAttachment(page.images[k], `${stem}-p${page.index}-img${k + 1}.png`);
+        content.push({ type: 'image', attrs: { src: rel, alt: '' } });
+        media++;
+      }
     }
 
     textBlocks += page.blocks.length;
@@ -75,17 +103,11 @@ async function importPdfFile(file: File, noteId: string, onProgress?: (msg: stri
         }
       }
     }
-
-    for (let k = 0; k < page.images.length; k++) {
-      const rel = await saveAttachmentExclusive(noteId, page.images[k], `${stem}-p${page.index}-img${k + 1}.png`);
-      content.push({ type: 'image', attrs: { src: rel, alt: '' } });
-      media++;
-    }
   }
 
   if (content.length === 0) content.push({ type: 'paragraph' });
   return {
-    title: safeTitle(result.title, safeTitle(baseName(file.name), '가져온 PDF')),
+    title: safeTitle(result.title, safeTitle(baseName(fileName), '가져온 PDF')),
     doc: { type: 'doc', content },
     pages,
     pageCount: result.pages.length,
@@ -94,6 +116,12 @@ async function importPdfFile(file: File, noteId: string, onProgress?: (msg: stri
     media,
     plainText: textLines.join('\n'),
   };
+}
+
+async function importPdfFile(file: File, noteId: string, onProgress?: (msg: string) => void) {
+  const { importPdf } = await import('./pdfImport');
+  const result = await importPdf(await file.arrayBuffer(), (p, t) => onProgress?.(`PDF 페이지 분석 중… ${p}/${t}`));
+  return assemblePdfImportResult(result, file.name, (blob, name) => saveAttachmentExclusive(noteId, blob, name));
 }
 
 /** 외부 PDF 문서를 새 노트로 가져온다 */

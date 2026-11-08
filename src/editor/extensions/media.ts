@@ -59,7 +59,13 @@ export const InkTemplate = Node.create<NoteImageOptions>({
   },
 
   addAttributes() {
-    return { src: { default: '' }, width: { default: 595 }, height: { default: 842 }, page: { default: 1 } };
+    return {
+      src: { default: '' },
+      width: { default: 595 },
+      height: { default: 842 },
+      page: { default: 1 },
+      style: { default: 'plain' },
+    };
   },
 
   parseHTML() {
@@ -68,7 +74,13 @@ export const InkTemplate = Node.create<NoteImageOptions>({
         tag: 'div[data-ink-template]',
         getAttrs: (el) => {
           const e = el as HTMLElement;
-          return { src: e.getAttribute('data-src'), width: Number(e.getAttribute('data-width')), height: Number(e.getAttribute('data-height')), page: Number(e.getAttribute('data-page')) };
+          return {
+            src: e.getAttribute('data-src') ?? '',
+            width: Number(e.getAttribute('data-width')) || 595,
+            height: Number(e.getAttribute('data-height')) || 842,
+            page: Number(e.getAttribute('data-page')) || 1,
+            style: e.getAttribute('data-style') || 'plain',
+          };
         },
       },
     ];
@@ -77,7 +89,14 @@ export const InkTemplate = Node.create<NoteImageOptions>({
   renderHTML({ node, HTMLAttributes }) {
     return [
       'div',
-      mergeAttributes(HTMLAttributes, { 'data-ink-template': '', 'data-src': node.attrs.src, 'data-width': node.attrs.width, 'data-height': node.attrs.height, 'data-page': node.attrs.page }),
+      mergeAttributes(HTMLAttributes, {
+        'data-ink-template': '',
+        'data-src': node.attrs.src ?? '',
+        'data-width': node.attrs.width,
+        'data-height': node.attrs.height,
+        'data-page': node.attrs.page,
+        'data-style': node.attrs.style ?? 'plain',
+      }),
       `손글씨 페이지 ${node.attrs.page}`,
     ];
   },
@@ -86,26 +105,68 @@ export const InkTemplate = Node.create<NoteImageOptions>({
     const noteId = this.options.noteId;
     return ({ node }) => {
       const dom = document.createElement('div');
-      dom.className = 'ink-template';
       dom.contentEditable = 'false';
-      dom.style.aspectRatio = `${node.attrs.width} / ${node.attrs.height}`;
       dom.dataset.inkTemplate = '';
-      dom.id = `pdf-page-${node.attrs.page}`;
-      dom.dataset.page = String(node.attrs.page);
 
       const badge = document.createElement('div');
       badge.className = 'ink-template-badge';
-      badge.textContent = `${node.attrs.page}쪽`;
       dom.append(badge);
 
-      const img = document.createElement('img');
-      img.alt = `페이지 ${node.attrs.page}`;
-      img.draggable = false;
-      dom.append(img);
-      void attachmentUrl(noteId, node.attrs.src).then((url) => {
-        if (url) img.src = url;
-      });
-      return { dom };
+      let imgEl: HTMLImageElement | null = null;
+      let loadedSrc = '';
+
+      const applyAttrs = (attrs: Record<string, unknown>) => {
+        const pageNum = Number(attrs.page) || 1;
+        const width = Number(attrs.width) || 595;
+        const height = Number(attrs.height) || 842;
+        const style = String(attrs.style || 'plain');
+        const src = String(attrs.src || '');
+
+        dom.className = `ink-template page-canvas-surface page-style-${style}`;
+        dom.style.aspectRatio = `${width} / ${height}`;
+        dom.style.width = '100%';
+        dom.id = `pdf-page-${pageNum}`;
+        dom.dataset.page = String(pageNum);
+        dom.dataset.src = src;
+        dom.dataset.width = String(width);
+        dom.dataset.height = String(height);
+        dom.dataset.style = style;
+        badge.textContent = `${pageNum}쪽`;
+
+        if (src) {
+          if (!imgEl) {
+            imgEl = document.createElement('img');
+            imgEl.draggable = false;
+            dom.append(imgEl);
+          }
+          imgEl.alt = `페이지 ${pageNum}`;
+          if (loadedSrc !== src) {
+            loadedSrc = src;
+            if (isRelative(src)) {
+              void attachmentUrl(noteId, src).then((url) => {
+                if (url && imgEl && loadedSrc === src) imgEl.src = url;
+              });
+            } else {
+              imgEl.src = src;
+            }
+          }
+        } else if (imgEl) {
+          imgEl.remove();
+          imgEl = null;
+          loadedSrc = '';
+        }
+      };
+
+      applyAttrs(node.attrs as Record<string, unknown>);
+
+      return {
+        dom,
+        update: (updatedNode) => {
+          if (updatedNode.type.name !== 'inkTemplate') return false;
+          applyAttrs(updatedNode.attrs as Record<string, unknown>);
+          return true;
+        },
+      };
     };
   },
 

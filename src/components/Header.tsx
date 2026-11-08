@@ -52,7 +52,14 @@ export function Header() {
     if (err || !activeId) return;
     const id = activeId;
     // 디바운스 300ms → 탭 타이틀·스토리지 문서 제목 동기화
-    timer.current = setTimeout(() => void db.notes.update(id, { title: v }), 300);
+    timer.current = setTimeout(() => {
+      void db.notes.update(id, { title: v });
+      const s = getSession(id);
+      if (s) {
+        s.record.title = v;
+        s.isManualTitle = v !== '제목 없는 노트' && v.trim() !== '';
+      }
+    }, 300);
   };
 
   const save = async () => {

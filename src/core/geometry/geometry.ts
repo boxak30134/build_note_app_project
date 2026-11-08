@@ -33,12 +33,74 @@ export function pointInPolygon(p: Point, polygon: Point[]): boolean {
 /**
  * 스트로크가 올가미 다각형에 포함되는지 판정.
  * 결정: 점의 threshold(기본 60%) 이상이 내부에 있으면 선택 — 손떨림으로 끝점이 살짝 벗어나도 선택되도록.
+ * 또한 직선 보정 등으로 점 개수가 적은 스트로크(예: 2점 직선)는 선분 중간 샘플링을 함께 검사한다.
  */
 export function strokeInPolygon(points: StrokePoint[], polygon: Point[], threshold = 0.6): boolean {
-  if (points.length === 0) return false;
+  if (points.length === 0 || polygon.length < 3) return false;
   let inside = 0;
-  for (const [x, y] of points) if (pointInPolygon({ x, y }, polygon)) inside++;
-  return inside / points.length >= threshold;
+  for (const [x, y] of points) {
+    if (pointInPolygon({ x, y }, polygon)) inside++;
+  }
+  if (inside / points.length >= threshold) return true;
+
+  // 점이 적은 선분(직선 보정 획 등)을 위해 각 선분을 등분 샘플링하여 재판정
+  if (points.length >= 2) {
+    const samplesPerSegment = 4;
+    let totalSamples = 0;
+    let insideSamples = 0;
+    for (let i = 0; i < points.length - 1; i++) {
+      const [x1, y1] = points[i];
+      const [x2, y2] = points[i + 1];
+      for (let s = 0; s <= samplesPerSegment; s++) {
+        if (i > 0 && s === 0) continue;
+        const t = s / samplesPerSegment;
+        totalSamples++;
+        if (pointInPolygon({ x: x1 + (x2 - x1) * t, y: y1 + (y2 - y1) * t }, polygon)) {
+          insideSamples++;
+        }
+      }
+    }
+    if (totalSamples > 0 && insideSamples / totalSamples >= threshold) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * 화면(clientX, clientY) 좌표를 대상 페이지(targetPage)의 로컬 좌표로 정규화 변환한다.
+ * - 실제 브라우저 레이아웃에서는 targetPage.getBoundingClientRect()에 이미 뷰포트 스크롤이 반영되어 있으므로
+ *   (client - pageRect.left/top) / scale 로 역산한다.
+ * - JSDOM 등 레이아웃 엔진이 동작하지 않아 pageRect가 고정된 상태에서 viewport.scrollTop/scrollLeft가
+ *   별도로 지정된 환경에서는 스크롤 오프셋을 함께 보정하여 항상 정확한 페이지 로컬 좌표를 반환한다.
+ */
+export function clientPointToPageLocal(
+  clientX: number,
+  clientY: number,
+  targetPage: HTMLElement,
+  viewportEl?: HTMLElement | null,
+  scale = 1,
+): Point {
+  const safeScale = scale > 0 ? scale : 1;
+  const pageRect = targetPage.getBoundingClientRect();
+
+  let scrollCompX = 0;
+  let scrollCompY = 0;
+  if (viewportEl && (viewportEl.scrollLeft !== 0 || viewportEl.scrollTop !== 0)) {
+    const vRect = viewportEl.getBoundingClientRect();
+    // 레이아웃 엔진이 없는 환경(offsetHeight === 0)이거나 pageRect가 스크롤만큼 이동하지 않은 경우 보정
+    const hasNativeLayout = targetPage.offsetHeight > 0 || targetPage.offsetWidth > 0;
+    if (!hasNativeLayout && pageRect.top >= vRect.top && pageRect.left >= vRect.left) {
+      scrollCompX = viewportEl.scrollLeft;
+      scrollCompY = viewportEl.scrollTop;
+    }
+  }
+
+  return {
+    x: (clientX - pageRect.left + scrollCompX) / safeScale,
+    y: (clientY - pageRect.top + scrollCompY) / safeScale,
+  };
 }
 
 /** 다각선(Polyline)의 총 길이 계산 */
@@ -122,6 +184,33 @@ export function isClosedLassoCurve(poly: Point[], options?: LassoClosureOptions)
   return extractClosedLassoPolygon(poly, options) !== null;
 }
 
+/**
+ * pointerup(펜을 뗄 때) 올가미 다각형 확정 함수.
+ * - 자체 교차(self-intersection) 또는 시작-끝점 근접 루프가 있으면 우선 반환한다.
+ * - 사용자가 긴 문장을 감싸느라 시작점과 끝점 사이가 다소 벌어진 채(열린 루프) 펜을 떼더라도,
+ *   유효한 곡선 길이(minLoopLength, 기본 24px) 및 점 3개 이상이면 시작점과 끝점을 자동으로 이어 닫힌 다각형으로 정규화한다.
+ */
+export function resolveLassoPolygonOnRelease(
+  poly: Point[],
+  options: LassoClosureOptions = {},
+): Point[] | null {
+  if (poly.length < 3) return null;
+  const minLoopLength = options.minLoopLength ?? 24;
+  const closed = extractClosedLassoPolygon(poly, {
+    closeDistance: options.closeDistance ?? 48,
+    minLoopLength,
+  });
+  if (closed) return closed;
+
+  if (polylineLength(poly) < minLoopLength) return null;
+  const first = poly[0];
+  const last = poly[poly.length - 1];
+  if (first.x === last.x && first.y === last.y) {
+    return poly.slice();
+  }
+  return [...poly, first];
+}
+
 export function boundsOfPoints(points: Array<StrokePoint | Point>): AABB {
   let minX = Infinity;
   let minY = Infinity;
@@ -198,6 +287,9 @@ export {
   touchMidpoint,
   computePinchZoom,
   type PinchZoomInput,
+  createFocalZoomAnchor,
+  computeFocalZoomScrollOffsets,
+  type FocalZoomAnchor,
 } from '../page/pageTypes';
 
 export interface EraserPointerEventLike {

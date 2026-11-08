@@ -10,6 +10,7 @@ function textOf(node: JSONContent): string {
   if (node.type === 'text') return node.text ?? '';
   if (node.type === 'inlineMath' || node.type === 'blockMath') return `$${node.attrs?.latex ?? ''}$`;
   if (node.type === 'wikiLink') return node.attrs?.label ?? '';
+  if (node.type === 'blockEmbed') return node.attrs?.label ?? '';
   if (node.type === 'rubyText') return node.attrs?.base ?? '';
   if (node.type === 'hardBreak') return '\n';
   return (node.content ?? []).map(textOf).join('');

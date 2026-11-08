@@ -165,6 +165,35 @@ export interface PalmRejectionState {
 }
 
 /**
+ * 듀얼 스플릿 패널(좌/우 화면 분할) 간 교차 손바닥 터치 차단을 위한 전역 S-Pen 활성 상태
+ */
+export const globalPalmRejectionState: PalmRejectionState = {
+  isPenDrawing: false,
+  lastPenTimestamp: 0,
+};
+
+export function recordGlobalPenDown(nowMs: number = Date.now()): void {
+  globalPalmRejectionState.isPenDrawing = true;
+  globalPalmRejectionState.lastPenTimestamp = nowMs;
+}
+
+export function recordGlobalPenMove(nowMs: number = Date.now()): void {
+  if (globalPalmRejectionState.isPenDrawing) {
+    globalPalmRejectionState.lastPenTimestamp = nowMs;
+  }
+}
+
+export function recordGlobalPenUp(nowMs: number = Date.now()): void {
+  globalPalmRejectionState.isPenDrawing = false;
+  globalPalmRejectionState.lastPenTimestamp = nowMs;
+}
+
+export function resetGlobalPalmState(): void {
+  globalPalmRejectionState.isPenDrawing = false;
+  globalPalmRejectionState.lastPenTimestamp = 0;
+}
+
+/**
  * §5. 손바닥(Palm) 터치 차단 판별 함수
  * - 현재 S-Pen 필기 중(`isPenDrawing === true`)이거나
  * - 최근 `PALM_REJECTION_WINDOW_MS` 이내에 S-Pen 입력/호버가 감지된 경우
@@ -182,6 +211,20 @@ export function shouldRejectPalmTouch(
     return true;
   }
   return false;
+}
+
+/**
+ * 듀얼 스플릿 패널 환경에서 로컬 패널 상태와 전역 S-Pen 상태를 동시에 검사하는 팜 리젝션 가드
+ * - 좌측 패널에서 필기 중이거나 펜을 뗀 후 450ms 이내에 우측 패널에 손바닥(touch)이 닿아도 즉시 차단한다.
+ */
+export function shouldRejectSplitPalmTouch(
+  pointerType: string,
+  localState: PalmRejectionState,
+  nowMs: number = Date.now(),
+  windowMs: number = PALM_REJECTION_WINDOW_MS,
+): boolean {
+  if (shouldRejectPalmTouch(pointerType, localState, nowMs, windowMs)) return true;
+  return shouldRejectPalmTouch(pointerType, globalPalmRejectionState, nowMs, windowMs);
 }
 
 /**

@@ -74,8 +74,14 @@ export const useSessions = create<SessionsState>((set) => ({
   sessions: {},
   patch: (id, p) =>
     set((st) => {
-      const cur = st.sessions[id] ?? emptySession();
+      const existing = st.sessions[id];
+      const cur = existing ?? emptySession();
       const delta = typeof p === 'function' ? p(cur) : p;
+      if (existing) {
+        const keys = Object.keys(delta) as Array<keyof SessionUI>;
+        const hasChange = keys.some((k) => !Object.is(cur[k], delta[k]));
+        if (!hasChange) return st;
+      }
       return { sessions: { ...st.sessions, [id]: { ...cur, ...delta } } };
     }),
   remove: (id) =>

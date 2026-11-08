@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { Copy, ClipboardPaste, MessageSquare, Link2, PenLine } from 'lucide-react';
+import { Copy, ClipboardPaste, MessageSquare, Link2 } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { useContextMenu, strokeClipboard } from '../store/contextMenuStore';
 import { getSession } from '../session/NoteSession';
@@ -9,6 +9,19 @@ import { toast } from '../store/uiStore';
 /** 롱프레스(500ms)/우클릭 커스텀 컨텍스트 메뉴 */
 export function ContextMenu() {
   const { open, x, y, noteId, pagePoint, hide } = useContextMenu();
+
+  // 키보드 에디터에서 네이티브 복사/잘라내기(Ctrl+C, Ctrl+X) 발생 시 텍스트 클립보드 우선권으로 전환
+  useEffect(() => {
+    const onNativeCopyOrCut = () => {
+      strokeClipboard.active = false;
+    };
+    window.addEventListener('copy', onNativeCopyOrCut);
+    window.addEventListener('cut', onNativeCopyOrCut);
+    return () => {
+      window.removeEventListener('copy', onNativeCopyOrCut);
+      window.removeEventListener('cut', onNativeCopyOrCut);
+    };
+  }, []);
 
   useEffect(() => {
     if (!open) return;
@@ -41,11 +54,16 @@ export function ContextMenu() {
     const { from, to } = session.editor.state.selection;
     const text = session.editor.state.doc.textBetween(from, to, '\n');
     if (!text) return toast.info('복사할 선택 영역이 없습니다.');
+    strokeClipboard.active = false;
     await navigator.clipboard.writeText(text).catch(() => document.execCommand('copy'));
     toast.success('복사했습니다.');
   };
 
   const paste = async () => {
+    if (strokeClipboard.active && strokeClipboard.strokes.length > 0 && !hasTextSel) {
+      pasteStrokes(session, pagePoint ?? { x: 80, y: 80 });
+      return;
+    }
     try {
       const text = await navigator.clipboard.readText();
       if (text) session.editor.chain().focus().insertContent(text).run();
@@ -73,11 +91,6 @@ export function ContextMenu() {
       <button className="menu-item" onClick={run(paste)}>
         <ClipboardPaste size={14} /> 붙여넣기
       </button>
-      {strokeClipboard.strokes.length > 0 && pagePoint && (
-        <button className="menu-item" onClick={run(() => pasteStrokes(session, pagePoint))}>
-          <PenLine size={14} /> 필기 붙여넣기 ({strokeClipboard.strokes.length})
-        </button>
-      )}
       <div className="my-1 border-t border-slate-100" />
       <button
         className="menu-item"

@@ -3,6 +3,8 @@ import { motion } from 'framer-motion';
 import { X, Check, Pipette } from 'lucide-react';
 import { useSettings } from '../store/settingsStore';
 import { toast } from '../store/uiStore';
+import { useTabs } from '../store/tabsStore';
+import { getSession } from '../session/NoteSession';
 
 export function hexToRgb(hex: string): [number, number, number] {
   const clean = hex.replace(/^#/, '');
@@ -92,6 +94,9 @@ export function RgbColorPickerModal({ open, onClose, initialColor, onApply }: Pr
     } else {
       setCustomColor(finalHex);
       selectCustomColor();
+      const activeId = useTabs.getState().activeTabId;
+      const s = getSession(activeId);
+      if (s) s.applyTextColor(finalHex);
     }
     toast.success(`사용자 지정 RGB 색상(${finalHex})이 적용되었습니다.`);
     onClose();
