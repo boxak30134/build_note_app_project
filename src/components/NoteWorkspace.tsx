@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import { AlertTriangle, RefreshCw, Lock, Plus, ArrowUp } from 'lucide-react';
+import { AlertTriangle, RefreshCw, Lock, Plus, ArrowUp, Trash2 } from 'lucide-react';
 import { openSession, type NoteSession } from '../session/NoteSession';
 import { useSessionUI } from '../store/sessionStore';
 import { useSettings } from '../store/settingsStore';
@@ -8,6 +8,7 @@ import { toast } from '../store/uiStore';
 import { InkCanvas } from '../canvas/InkCanvas';
 import { cachedBounds } from '../canvas/render';
 import { OverlayLayer } from './OverlayLayer';
+import { TextObjectLayer } from './TextObjectLayer';
 import { SelectionMenu } from './SelectionMenu';
 import { WikiPreview, openWikiTarget } from './WikiPreview';
 import {
@@ -763,11 +764,11 @@ function LoadedWorkspace({
                           <span>·</span>
                           <span>{PAGE_STYLE_LABELS[p.style]}</span>
                         </div>
-                        <div className="pointer-events-auto absolute bottom-2 right-3 z-20 flex items-center gap-1 opacity-75 transition hover:opacity-100">
+                        <div className="pointer-events-auto absolute bottom-2 right-3 z-20 flex items-center gap-1.5 opacity-80 transition hover:opacity-100">
                           <button
                             type="button"
                             data-testid={`add-page-below-${idx}`}
-                            className="flex items-center gap-1 rounded-md border border-indigo-200 bg-white/90 px-2 py-0.5 text-[11px] font-medium text-indigo-600 shadow-sm hover:bg-indigo-50"
+                            className="flex items-center gap-1 rounded-md border border-indigo-200 bg-white/95 px-2 py-0.5 text-[11px] font-medium text-indigo-600 shadow-sm hover:bg-indigo-50"
                             onClick={(e) => {
                               e.stopPropagation();
                               const created = session.addPageBelow(idx);
@@ -777,6 +778,24 @@ function LoadedWorkspace({
                           >
                             <Plus size={11} /> 아래에 페이지 추가
                           </button>
+                          {pages.length > 1 && (
+                            <button
+                              type="button"
+                              data-testid={`delete-page-sheet-${idx}`}
+                              className="flex items-center gap-1 rounded-md border border-rose-200 bg-white/95 px-2 py-0.5 text-[11px] font-medium text-rose-600 shadow-sm hover:bg-rose-50"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                const pageNum = idx + 1;
+                                const success = session.deletePage(idx);
+                                if (success) {
+                                  toast.success(`페이지 ${pageNum}을(를) 삭제했습니다.`);
+                                }
+                              }}
+                              title="이 페이지 삭제"
+                            >
+                              <Trash2 size={11} /> 삭제
+                            </button>
+                          )}
                         </div>
                       </div>
                     );
@@ -793,6 +812,7 @@ function LoadedWorkspace({
                 }}
               />
               <InkCanvas session={session} viewportRef={viewportRef} active={active} />
+              <TextObjectLayer session={session} activeTool={settings.tool} />
               <OverlayLayer session={session} />
             </div>
           </div>

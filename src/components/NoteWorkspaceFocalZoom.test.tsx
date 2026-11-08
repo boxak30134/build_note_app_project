@@ -120,6 +120,10 @@ describe('NoteWorkspace Pinch-to-Zoom Focal Point & Touch Scroll', () => {
       viewport.dispatchEvent(touchMoveEv);
     });
 
+    // 3. 확대 시 무조건 0으로 튀지 않고, 손가락 아래의 문서 내용(docY: 700)이 그대로 유지되도록
+    // scrollTop 이 (200 + 500) * 2 - 500 = 900 으로 증가하여 중심점을 유지한다
+    expect(viewport.scrollTop).toBeGreaterThan(200);
+
     // 핀치 줌 종료 (touchend): 스토어와 최종 scale/offset 동기화
     const touchEndEv = new Event('touchend', { bubbles: true, cancelable: true }) as TouchEvent;
     Object.defineProperty(touchEndEv, 'touches', { value: [] });
@@ -128,9 +132,6 @@ describe('NoteWorkspace Pinch-to-Zoom Focal Point & Touch Scroll', () => {
       viewport.dispatchEvent(touchEndEv);
     });
 
-    // 3. 확대 시 무조건 0으로 튀지 않고, 손가락 아래의 문서 내용(docY: 700)이 그대로 유지되도록
-    // scrollTop 이 (200 + 500) * 2 - 500 = 900 으로 증가하여 중심점을 유지한다
-    expect(viewport.scrollTop).toBeGreaterThan(200);
     expect(useSessions.getState().sessions[noteId]?.zoom).toBe(2);
   });
 });

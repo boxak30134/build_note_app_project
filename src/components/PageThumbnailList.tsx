@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
-import { ChevronLeft, ChevronRight, FileText, Layers } from 'lucide-react';
+import { ChevronLeft, ChevronRight, FileText, Layers, Plus, Trash2 } from 'lucide-react';
 import type { NoteSession } from '../session/NoteSession';
 import { useSessionUI } from '../store/sessionStore';
+import { toast } from '../store/uiStore';
 import { attachmentUrl } from '../storage/opfs';
 import { createPage, PAGE_STYLE_LABELS, type PageStyleId, type PaperSizeId } from '../core/page/pageTypes';
 
@@ -55,6 +56,7 @@ export function PageThumbnailList({ session }: { session: NoteSession | null }) 
   const storeUI = useSessionUI(session?.id ?? null);
   const ui = session?.ui ?? storeUI;
   const [thumbnailUrls, setThumbnailUrls] = useState<Record<number, string>>({});
+  const [confirmDeletePageNumber, setConfirmDeletePageNumber] = useState<number | null>(null);
 
   const items = extractPageItems(session);
   const totalPages = items.length;
@@ -96,16 +98,31 @@ export function PageThumbnailList({ session }: { session: NoteSession | null }) 
 
   return (
     <div data-testid="page-thumbnail-list" className="flex h-full min-h-0 flex-1 flex-col bg-slate-50">
-      {/* 헤더: 문서 제목 및 전체 페이지 카운터 & 퀵 내비게이션 */}
+      {/* 헤더: 문서 제목 및 전체 페이지 카운터 & 퀵 내비게이션 & 페이지 추가 버튼 */}
       <div className="border-b border-slate-200 bg-white px-3 py-2">
         <div className="flex items-center justify-between">
           <span className="flex items-center gap-1.5 text-xs font-semibold text-slate-800">
             <Layers size={13} className="text-indigo-600" />
             <span>페이지 목록</span>
           </span>
-          <span className="rounded bg-indigo-50 px-1.5 py-0.5 font-mono text-[11px] font-bold text-indigo-700">
-            총 {totalPages}페이지
-          </span>
+          <div className="flex items-center gap-1.5">
+            <span className="rounded bg-indigo-50 px-1.5 py-0.5 font-mono text-[11px] font-bold text-indigo-700">
+              총 {totalPages}페이지
+            </span>
+            <button
+              type="button"
+              data-testid="add-page-header-btn"
+              onClick={() => {
+                const created = session.addPageBelow(currentIdx);
+                toast.success(`새 페이지(${created.size})를 추가했습니다.`);
+              }}
+              className="flex items-center gap-1 rounded bg-indigo-600 px-2 py-0.5 text-[11px] font-medium text-white shadow-xs transition hover:bg-indigo-700 active:scale-95"
+              title="현재 페이지 아래에 새 페이지 추가"
+            >
+              <Plus size={12} />
+              <span>추가</span>
+            </button>
+          </div>
         </div>
 
         {totalPages > 1 && (
@@ -148,11 +165,10 @@ export function PageThumbnailList({ session }: { session: NoteSession | null }) 
                 data-testid={`page-thumbnail-${it.pageNumber}`}
                 data-active={isCurrent ? 'true' : 'false'}
                 onClick={() => session.scrollToPage(it.pageNumber - 1)}
-                className={`group relative flex cursor-pointer select-none flex-col overflow-hidden rounded-xl border transition-all ${
-                  isCurrent
+                className={`group relative flex cursor-pointer select-none flex-col overflow-hidden rounded-xl border transition-all ${isCurrent
                     ? 'border-indigo-500 bg-indigo-50/70 shadow-sm ring-2 ring-indigo-400'
                     : 'border-slate-200 bg-white hover:border-indigo-300 hover:shadow-xs'
-                }`}
+                  }`}
                 title={`클릭하여 ${it.pageNumber}페이지로 바로 이동`}
               >
                 {/* 썸네일 프리뷰 영역 */}
@@ -181,9 +197,88 @@ export function PageThumbnailList({ session }: { session: NoteSession | null }) 
                   {isCurrent && (
                     <span className="absolute left-1.5 top-1.5 flex h-2 w-2 items-center justify-center rounded-full bg-indigo-600 ring-2 ring-white" />
                   )}
+
+                  {/* 페이지 관리 퀵 액션 (추가 / 삭제 - 모바일/터치/데스크톱 상시 노출) */}
+                  <div
+                    className="absolute right-1 top-1 z-20 flex items-center gap-1 opacity-90 transition-opacity hover:opacity-100"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <button
+                      type="button"
+                      data-testid={`add-page-below-thumb-${it.pageNumber}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        const created = session.addPageBelow(it.pageNumber - 1);
+                        toast.success(`${it.pageNumber}쪽 아래에 새 페이지(${created.size})를 추가했습니다.`);
+                      }}
+                      className="rounded bg-white/90 p-1 text-slate-600 shadow-xs backdrop-blur-xs hover:bg-indigo-50 hover:text-indigo-600"
+                      title="이 페이지 아래에 새 페이지 추가"
+                    >
+                      <Plus size={11} />
+                    </button>
+                    <button
+                      type="button"
+                      disabled={totalPages <= 1}
+                      data-testid={`delete-page-${it.pageNumber}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (totalPages <= 1) {
+                          toast.error('문서에는 최소 1개의 페이지가 있어야 합니다.');
+                          return;
+                        }
+                        setConfirmDeletePageNumber(it.pageNumber);
+                      }}
+                      className="rounded bg-white/90 p-1 text-slate-600 shadow-xs backdrop-blur-xs hover:bg-rose-50 hover:text-rose-600 disabled:opacity-30 disabled:hover:bg-white/90 disabled:hover:text-slate-600"
+                      title={totalPages <= 1 ? '최소 1개 페이지는 유지되어야 합니다' : '이 페이지 삭제'}
+                    >
+                      <Trash2 size={11} />
+                    </button>
+                  </div>
+
+                  {/* 페이지 삭제 확인 인라인 오버레이 */}
+                  {confirmDeletePageNumber === it.pageNumber && (
+                    <div
+                      data-testid={`delete-confirm-overlay-${it.pageNumber}`}
+                      onClick={(e) => e.stopPropagation()}
+                      className="absolute inset-0 z-30 flex flex-col items-center justify-center bg-white/95 p-2 text-center backdrop-blur-xs"
+                    >
+                      <span className="text-[11px] font-semibold text-rose-600">
+                        {it.pageNumber}쪽을 삭제할까요?
+                      </span>
+                      <p className="mt-0.5 text-[9px] text-slate-500">필기 및 텍스트도 함께 삭제됩니다.</p>
+                      <div className="mt-2 flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          data-testid={`confirm-delete-page-${it.pageNumber}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            const success = session.deletePage(it.pageNumber - 1);
+                            setConfirmDeletePageNumber(null);
+                            if (success) {
+                              toast.success(`페이지 ${it.pageNumber}을(를) 삭제했습니다.`);
+                            }
+                          }}
+                          className="rounded bg-rose-600 px-2 py-0.5 text-[10px] font-bold text-white shadow-xs hover:bg-rose-700 active:scale-95"
+                        >
+                          삭제
+                        </button>
+                        <button
+                          type="button"
+                          data-testid={`cancel-delete-page-${it.pageNumber}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setConfirmDeletePageNumber(null);
+                          }}
+                          className="rounded border border-slate-200 bg-white px-2 py-0.5 text-[10px] font-medium text-slate-600 hover:bg-slate-50"
+                        >
+                          취소
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
 
-                {/* 하단 페이지 번호 바 */}
+                {/* 하단 페이지 번호 바 & 상시 삭제 버튼 */}
                 <div
                   className={`flex items-center justify-between border-t px-2 py-1 text-[11px] ${
                     isCurrent
@@ -191,8 +286,27 @@ export function PageThumbnailList({ session }: { session: NoteSession | null }) 
                       : 'border-slate-100 bg-slate-50 text-slate-600 group-hover:text-indigo-600'
                   }`}
                 >
-                  <span>{it.pageNumber}쪽</span>
-                  {it.size && <span className="font-mono text-[9px] text-slate-400">{it.size}</span>}
+                  <div className="flex items-center gap-1 truncate">
+                    <span>{it.pageNumber}쪽</span>
+                    {it.size && <span className="font-mono text-[9px] text-slate-400">· {it.size}</span>}
+                  </div>
+                  <button
+                    type="button"
+                    disabled={totalPages <= 1}
+                    data-testid={`delete-page-bar-${it.pageNumber}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (totalPages <= 1) {
+                        toast.error('문서에는 최소 1개의 페이지가 있어야 합니다.');
+                        return;
+                      }
+                      setConfirmDeletePageNumber(it.pageNumber);
+                    }}
+                    className="flex items-center justify-center rounded p-1 text-slate-400 hover:bg-rose-50 hover:text-rose-600 disabled:opacity-20"
+                    title={totalPages <= 1 ? '최소 1개 페이지는 유지되어야 합니다' : '이 페이지 삭제'}
+                  >
+                    <Trash2 size={12} />
+                  </button>
                 </div>
               </div>
             );

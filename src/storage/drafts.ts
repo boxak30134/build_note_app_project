@@ -2,12 +2,14 @@
 import type { Stroke } from '../core/strokes/StrokeStore';
 import type { Annotation } from '../features/annotations/types';
 import type { NotePage } from '../core/page/pageTypes';
+import type { NoteTextObject } from '../core/text/textObjects';
 
 export interface NoteDraft {
   doc: unknown;
   strokes: Stroke[];
   annotations: Annotation[];
   pages?: NotePage[];
+  textObjects?: NoteTextObject[];
   at: number;
 }
 

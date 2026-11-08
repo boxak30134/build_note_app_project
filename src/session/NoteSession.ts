@@ -1,7 +1,9 @@
 import { Editor } from '@tiptap/core';
 import type { Node as PMNode } from '@tiptap/pm/model';
-import { CompositeHistoryManager } from '../core/history/CompositeHistoryManager';
-import { StrokeStore, type Stroke } from '../core/strokes/StrokeStore';
+import { CompositeHistoryManager, newCommandId } from '../core/history/CompositeHistoryManager';
+import { StrokeStore, newStrokeId, type Stroke } from '../core/strokes/StrokeStore';
+import { translatePoints } from '../core/geometry/geometry';
+import { newTextObjectId, type NoteTextObject } from '../core/text/textObjects';
 import { UnencodableCharError } from '../core/codec/textCodec';
 import { validateImageFiles, sanitizeDocumentTitle } from '../core/files/validation';
 import { clampBubbleText } from '../core/bubble/limits';
@@ -30,6 +32,7 @@ import {
   insertPageBelow,
   normalizePdfNoteContent,
   NOTE_ZOOM_STEP,
+  PDF_PAGE_GAP_PX,
   type NotePage,
 } from '../core/page/pageTypes';
 
@@ -84,6 +87,7 @@ export class NoteSession {
   private cleanDoc: PMNode | null = null;
   private cleanStrokes = '[]';
   private cleanAnnotations = '[]';
+  private cleanTextObjects = '[]';
   private cleanPages = '[]';
   private dirtyTimer: ReturnType<typeof setTimeout> | null = null;
   private draftTimer: ReturnType<typeof setTimeout> | null = null;
@@ -111,6 +115,7 @@ export class NoteSession {
           ];
     this.patch({
       annotations: record.annotations ?? [],
+      textObjects: record.textObjects ?? [],
       pages: initialPages,
       currentPageIndex: 0,
       loaded: true,
@@ -165,6 +170,16 @@ export class NoteSession {
     this.unsubs.push(
       this.history.subscribe(() => this.patch({ canUndo: this.history.canUndo, canRedo: this.history.canRedo })),
     );
+    this.history.clear();
+    this.patch({ canUndo: false, canRedo: false });
+  }
+
+  get canUndo(): boolean {
+    return this.history.canUndo;
+  }
+
+  get canRedo(): boolean {
+    return this.history.canRedo;
   }
 
   get ui() {
@@ -180,6 +195,7 @@ export class NoteSession {
     this.cleanDoc = this.editor.state.doc;
     this.cleanStrokes = JSON.stringify(this.strokes.getAll());
     this.cleanAnnotations = JSON.stringify(this.ui.annotations);
+    this.cleanTextObjects = JSON.stringify(this.ui.textObjects ?? []);
     this.cleanPages = JSON.stringify(this.ui.pages);
     this.patch({ dirty: false });
   }
@@ -195,6 +211,7 @@ export class NoteSession {
       !this.editor.state.doc.eq(this.cleanDoc) ||
       JSON.stringify(this.strokes.getAll()) !== this.cleanStrokes ||
       JSON.stringify(this.ui.annotations) !== this.cleanAnnotations ||
+      JSON.stringify(this.ui.textObjects ?? []) !== this.cleanTextObjects ||
       JSON.stringify(this.ui.pages) !== this.cleanPages;
     if (dirty !== this.ui.dirty) this.patch({ dirty });
     if (dirty) this.scheduleDraft();
@@ -208,6 +225,7 @@ export class NoteSession {
         doc: this.editor.getJSON(),
         strokes: this.strokes.getAll(),
         annotations: this.ui.annotations,
+        textObjects: this.ui.textObjects ?? [],
         pages: this.ui.pages,
         at: Date.now(),
       });
@@ -229,6 +247,7 @@ export class NoteSession {
       this.strokes.reset(d.strokes ?? []);
       this.patch({
         annotations: d.annotations ?? [],
+        textObjects: (d as any).textObjects ?? [],
         ...(d.pages && d.pages.length > 0 ? { pages: d.pages } : {}),
       });
       this.history.clear();
@@ -246,7 +265,11 @@ export class NoteSession {
    * 현재 페이지 바로 밑에 새 페이지를 추가한다.
    * 현재 페이지와 동일한 규격(size, orientation) 및 동일한 스타일(style)로 생성된다.
    */
-  addPageBelow(fromPageIndex?: number, override?: Partial<Omit<NotePage, 'id'>>): NotePage {
+  addPageBelow(
+    fromPageIndex?: number,
+    override?: Partial<Omit<NotePage, 'id'>>,
+    recordHistory = true,
+  ): NotePage {
     const targetIdx = fromPageIndex ?? this.ui.currentPageIndex;
     const { pages, insertedIndex, insertedPage } = insertPageBelow(this.ui.pages, targetIdx, override);
 
@@ -307,7 +330,488 @@ export class NoteSession {
     if (this.scrollEl && this.pageEl) {
       setTimeout(() => this.scrollToPage(insertedIndex), 30);
     }
+
+    if (recordHistory) {
+      this.history.push({
+        id: newCommandId(),
+        type: 'page-add',
+        timestamp: Date.now(),
+        description: `페이지 ${insertedIndex + 1} 생성`,
+        undo: () => {
+          this.deletePage(insertedIndex, false);
+        },
+        redo: () => {
+          this.insertPageAt(insertedIndex, insertedPage);
+        },
+      });
+    }
+
     return insertedPage;
+  }
+
+  /** 지정한 인덱스에 특정 페이지 객체를 복원/삽입한다 (Undo/Redo 전용) */
+  insertPageAt(index: number, page: NotePage): void {
+    const nextPages = [...this.ui.pages];
+    const clampedIndex = Math.max(0, Math.min(nextPages.length, index));
+    nextPages.splice(clampedIndex, 0, page);
+
+    if (this.editor && !this.editor.isDestroyed) {
+      const templateNodes: Array<{ pos: number; node: PMNode }> = [];
+      this.editor.state.doc.descendants((node, pos) => {
+        if (node.type.name === 'inkTemplate') {
+          templateNodes.push({ pos, node });
+          return false;
+        }
+        return true;
+      });
+
+      const inkTemplateType = this.editor.schema.nodes.inkTemplate;
+      if (templateNodes.length > 0 && inkTemplateType) {
+        const insertTarget = Math.max(0, Math.min(templateNodes.length - 1, clampedIndex - 1));
+        const refEntry = templateNodes[insertTarget] ?? templateNodes[0];
+        const dims = getPageDimensions(page.size, page.orientation);
+        const newNode = inkTemplateType.create({
+          src: '',
+          width: dims.width,
+          height: dims.height,
+          page: clampedIndex + 1,
+          style: page.style,
+        });
+        const insertPos = clampedIndex === 0 || !refEntry ? 0 : refEntry.pos + refEntry.node.nodeSize;
+        let tr = this.editor.state.tr.insert(insertPos, newNode);
+        let seq = 0;
+        tr.doc.descendants((node, pos) => {
+          if (node.type.name === 'inkTemplate') {
+            seq += 1;
+            if (node.attrs.page !== seq) {
+              tr = tr.setNodeMarkup(pos, undefined, { ...node.attrs, page: seq });
+            }
+            return false;
+          }
+          return true;
+        });
+        this.editor.view.dispatch(tr);
+        this.record = { ...this.record, content: this.editor.getJSON(), pages: nextPages };
+      }
+    }
+
+    this.patch({ pages: nextPages, currentPageIndex: clampedIndex });
+    this.scheduleDirtyCheck();
+    if (this.scrollEl && this.pageEl) {
+      setTimeout(() => this.scrollToPage(clampedIndex), 30);
+    }
+  }
+
+  /**
+   * 지정한 인덱스의 페이지를 삭제한다 (원자적 트랜잭션).
+   * - 최소 1페이지 보장: 단 1개의 페이지만 남은 경우 삭제 불가 (toast 경고 및 false 반환).
+   * - Undo 시 삭제된 페이지, 소속 스트로크, 소속 텍스트 객체, 소속 주석, PDF 노드 및 스트로크 위치가 100% 완전 복원된다.
+   */
+  deletePage(pageIndex: number, recordHistory = true): boolean {
+    const totalPages = this.ui.pages.length;
+    if (totalPages <= 1) {
+      toast.error('문서에는 최소 1개의 페이지가 있어야 합니다.');
+      return false;
+    }
+    const clampedIndex = Math.max(0, Math.min(totalPages - 1, pageIndex));
+    const targetPage = this.ui.pages[clampedIndex];
+    if (!targetPage) return false;
+
+    // 1. PDF 문서 (`inkTemplate` 포함)인 경우 에디터 내 해당 노드를 삭제하고 쪽수를 재정렬한다.
+    let templateAttrs: Record<string, unknown> | null = null;
+    if (this.editor && !this.editor.isDestroyed) {
+      const templateNodes: Array<{ pos: number; node: PMNode }> = [];
+      this.editor.state.doc.descendants((node, pos) => {
+        if (node.type.name === 'inkTemplate') {
+          templateNodes.push({ pos, node });
+          return false;
+        }
+        return true;
+      });
+
+      if (templateNodes.length > clampedIndex) {
+        const targetEntry = templateNodes[clampedIndex];
+        templateAttrs = { ...targetEntry.node.attrs };
+        let tr = this.editor.state.tr.delete(targetEntry.pos, targetEntry.pos + targetEntry.node.nodeSize);
+        let seq = 0;
+        tr.doc.descendants((node, pos) => {
+          if (node.type.name === 'inkTemplate') {
+            seq += 1;
+            if (node.attrs.page !== seq) {
+              tr = tr.setNodeMarkup(pos, undefined, { ...node.attrs, page: seq });
+            }
+            return false;
+          }
+          return true;
+        });
+        this.editor.view.dispatch(tr);
+        this.record = { ...this.record, content: this.editor.getJSON() };
+      }
+    }
+
+    // 2. 페이지 배열 갱신
+    const nextPages = this.ui.pages.filter((_, idx) => idx !== clampedIndex);
+
+    // 3. 해당 페이지의 스트로크 및 텍스트 정리
+    const currentWidth = getPageDimensions(targetPage.size, targetPage.orientation).width;
+    const pageDimsInput = this.ui.pages.map((p) => {
+      const d = getPageDimensions(p.size, p.orientation);
+      return { width: d.width, height: d.height };
+    });
+    const layout = computePdfPageLayout(pageDimsInput, currentWidth);
+    const pageTop = layout.yOffsets[clampedIndex] ?? 0;
+    const pageHeight = layout.pageHeights[clampedIndex] ?? 0;
+    const pageBottom = pageTop + pageHeight + PDF_PAGE_GAP_PX;
+
+    // 삭제된 페이지 영역 내 스트로크 캡처 및 후속 페이지 스트로크 상단 이동
+    const allStrokes = this.strokes.getAll();
+    const deletedStrokes: Stroke[] = [];
+    const toDeleteStrokeIds: string[] = [];
+    const toShiftStrokeIds: string[] = [];
+    for (const s of allStrokes) {
+      const bounds = this.strokes.boundsOf([s.id]);
+      if (!bounds) continue;
+      if (bounds.minY >= pageTop - 4 && bounds.maxY <= pageBottom + 4) {
+        toDeleteStrokeIds.push(s.id);
+        deletedStrokes.push(s);
+      } else if (bounds.minY >= pageBottom) {
+        toShiftStrokeIds.push(s.id);
+      }
+    }
+
+    const shiftY = -(pageHeight + PDF_PAGE_GAP_PX);
+    if (toDeleteStrokeIds.length > 0) {
+      this.strokes.rawRemove(toDeleteStrokeIds);
+    }
+    if (toShiftStrokeIds.length > 0) {
+      this.strokes.rawTranslate(toShiftStrokeIds, 0, shiftY);
+    }
+
+    // 4. 해당 페이지에 속한 textObjects 캡처 및 제거
+    const deletedTextObjects = (this.ui.textObjects ?? []).filter((t) => t.pageId === targetPage.id);
+    const remainingTextObjects = (this.ui.textObjects ?? []).filter((t) => t.pageId !== targetPage.id);
+
+    // 5. 활성 페이지 인덱스 재설정
+    const nextCurrentIndex = Math.min(nextPages.length - 1, clampedIndex);
+    this.patch({
+      pages: nextPages,
+      textObjects: remainingTextObjects,
+      currentPageIndex: nextCurrentIndex,
+    });
+    this.scheduleDirtyCheck();
+    if (this.scrollEl && this.pageEl) {
+      setTimeout(() => this.scrollToPage(nextCurrentIndex), 30);
+    }
+
+    // 6. 단일 원자적 페이지 삭제 커맨드로 통합 히스토리에 기록
+    if (recordHistory) {
+      this.history.push({
+        id: newCommandId(),
+        type: 'page-delete',
+        timestamp: Date.now(),
+        description: `페이지 ${clampedIndex + 1} 삭제`,
+        undo: () => {
+          this.restoreDeletedPage({
+            targetPage,
+            pageIndex: clampedIndex,
+            deletedStrokes,
+            deletedTextObjects,
+            shiftStrokeIds: toShiftStrokeIds,
+            shiftY,
+            templateAttrs,
+          });
+        },
+        redo: () => {
+          this.deletePage(clampedIndex, false);
+        },
+      });
+    }
+
+    return true;
+  }
+
+  /** 삭제되었던 페이지와 그에 소속된 모든 스트로크, 텍스트, PDF 노드를 원자적으로 완전 복구한다 (Undo 전용) */
+  private restoreDeletedPage(snapshot: {
+    targetPage: NotePage;
+    pageIndex: number;
+    deletedStrokes: Stroke[];
+    deletedTextObjects: NoteTextObject[];
+    shiftStrokeIds: string[];
+    shiftY: number;
+    templateAttrs: Record<string, unknown> | null;
+  }) {
+    const { targetPage, pageIndex, deletedStrokes, deletedTextObjects, shiftStrokeIds, shiftY, templateAttrs } = snapshot;
+
+    // 1. pages 배열의 pageIndex 위치에 targetPage 복원
+    const nextPages = [...this.ui.pages];
+    nextPages.splice(pageIndex, 0, targetPage);
+
+    // 2. 에디터 inkTemplate 복원
+    if (this.editor && !this.editor.isDestroyed && templateAttrs) {
+      const templateNodes: Array<{ pos: number; node: PMNode }> = [];
+      this.editor.state.doc.descendants((node, pos) => {
+        if (node.type.name === 'inkTemplate') {
+          templateNodes.push({ pos, node });
+          return false;
+        }
+        return true;
+      });
+
+      const inkTemplateType = this.editor.schema.nodes.inkTemplate;
+      if (inkTemplateType) {
+        const insertTarget = Math.max(0, Math.min(templateNodes.length - 1, pageIndex - 1));
+        const refEntry = templateNodes[insertTarget] ?? templateNodes[0];
+        const newNode = inkTemplateType.create({
+          ...templateAttrs,
+          page: pageIndex + 1,
+        });
+        const insertPos = pageIndex === 0 || !refEntry ? 0 : refEntry.pos + refEntry.node.nodeSize;
+        let tr = this.editor.state.tr.insert(insertPos, newNode);
+        let seq = 0;
+        tr.doc.descendants((node, pos) => {
+          if (node.type.name === 'inkTemplate') {
+            seq += 1;
+            if (node.attrs.page !== seq) {
+              tr = tr.setNodeMarkup(pos, undefined, { ...node.attrs, page: seq });
+            }
+            return false;
+          }
+          return true;
+        });
+        this.editor.view.dispatch(tr);
+        this.record = { ...this.record, content: this.editor.getJSON(), pages: nextPages };
+      }
+    }
+
+    // 3. 후속 페이지 스트로크들의 Y좌표를 원래 위치로 복귀 (하향 시프트)
+    if (shiftStrokeIds.length > 0) {
+      this.strokes.rawTranslate(shiftStrokeIds, 0, -shiftY);
+    }
+
+    // 4. 삭제되었던 스트로크 원본 그대로 복원
+    if (deletedStrokes.length > 0) {
+      this.strokes.rawAdd(deletedStrokes.map((s, idx) => ({ stroke: s, index: idx })));
+    }
+
+    // 5. 삭제되었던 텍스트 객체 복원
+    const restoredTextObjects = [...(this.ui.textObjects ?? []), ...deletedTextObjects];
+
+    // 6. UI 상태 일괄 반영 및 스크롤
+    this.patch({
+      pages: nextPages,
+      textObjects: restoredTextObjects,
+      currentPageIndex: pageIndex,
+    });
+    this.scheduleDirtyCheck();
+    if (this.scrollEl && this.pageEl) {
+      setTimeout(() => this.scrollToPage(pageIndex), 30);
+    }
+  }
+
+  /**
+   * 지정한 인덱스의 페이지를 동일한 내용(스트로크, 텍스트)과 함께 복제한다.
+   */
+  duplicatePage(pageIndex: number, recordHistory = true): NotePage | null {
+    const totalPages = this.ui.pages.length;
+    if (pageIndex < 0 || pageIndex >= totalPages) return null;
+    const sourcePage = this.ui.pages[pageIndex];
+    if (!sourcePage) return null;
+
+    // 1. 새 페이지를 대상 페이지 바로 아래에 생성
+    const createdPage = this.addPageBelow(
+      pageIndex,
+      {
+        size: sourcePage.size,
+        orientation: sourcePage.orientation,
+        style: sourcePage.style,
+      },
+      false,
+    );
+
+    // 2. 원본 페이지의 스트로크 복제 (새로운 스트로크 ID 발급 및 Y좌표 오프셋 보정)
+    const currentWidth = getPageDimensions(sourcePage.size, sourcePage.orientation).width;
+    const pageDimsInput = this.ui.pages.map((p) => {
+      const d = getPageDimensions(p.size, p.orientation);
+      return { width: d.width, height: d.height };
+    });
+    const layout = computePdfPageLayout(pageDimsInput, currentWidth);
+    const sourceTop = layout.yOffsets[pageIndex] ?? 0;
+    const sourceBottom = sourceTop + (layout.pageHeights[pageIndex] ?? 0);
+    const targetTop = layout.yOffsets[pageIndex + 1] ?? (sourceBottom + PDF_PAGE_GAP_PX);
+    const deltaY = targetTop - sourceTop;
+
+    const sourceStrokes = this.strokes.getAll().filter((s) => {
+      const b = this.strokes.boundsOf([s.id]);
+      return b && b.minY >= sourceTop - 4 && b.maxY <= sourceBottom + 4;
+    });
+
+    const clonedStrokes: Stroke[] = sourceStrokes.map((s) => ({
+      ...s,
+      id: newStrokeId(),
+      points: translatePoints(s.points, 0, deltaY),
+    }));
+    if (clonedStrokes.length > 0) {
+      this.strokes.addStrokes(clonedStrokes, 'stroke-batch');
+    }
+
+    // 3. 원본 페이지의 텍스트 객체 복제
+    const sourceTexts = (this.ui.textObjects ?? []).filter((t) => t.pageId === sourcePage.id);
+    const clonedTexts: NoteTextObject[] = sourceTexts.map((t) => ({
+      ...t,
+      id: newTextObjectId(),
+      pageId: createdPage.id,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    }));
+    if (clonedTexts.length > 0) {
+      this.patch({ textObjects: [...(this.ui.textObjects ?? []), ...clonedTexts] });
+    }
+
+    // 4. 히스토리 기록
+    if (recordHistory) {
+      this.history.push({
+        id: newCommandId(),
+        type: 'page-duplicate',
+        timestamp: Date.now(),
+        description: `페이지 ${pageIndex + 1} 복제`,
+        undo: () => {
+          this.deletePage(pageIndex + 1, false);
+        },
+        redo: () => {
+          this.duplicatePage(pageIndex, false);
+        },
+      });
+    }
+
+    return createdPage;
+  }
+
+  /**
+   * 페이지 순서를 변경한다.
+   */
+  reorderPages(fromIndex: number, toIndex: number, recordHistory = true): boolean {
+    const pages = [...this.ui.pages];
+    if (fromIndex < 0 || fromIndex >= pages.length || toIndex < 0 || toIndex >= pages.length || fromIndex === toIndex) {
+      return false;
+    }
+    const [moved] = pages.splice(fromIndex, 1);
+    pages.splice(toIndex, 0, moved);
+    this.patch({ pages, currentPageIndex: toIndex });
+    this.scheduleDirtyCheck();
+    if (this.scrollEl && this.pageEl) {
+      setTimeout(() => this.scrollToPage(toIndex), 30);
+    }
+
+    if (recordHistory) {
+      this.history.push({
+        id: newCommandId(),
+        type: 'page-reorder',
+        timestamp: Date.now(),
+        description: `페이지 순서 변경 (${fromIndex + 1} -> ${toIndex + 1})`,
+        undo: () => {
+          this.reorderPages(toIndex, fromIndex, false);
+        },
+        redo: () => {
+          this.reorderPages(fromIndex, toIndex, false);
+        },
+      });
+    }
+
+    return true;
+  }
+
+  // ---------- Text Object Management ----------
+  addTextObject(obj: Omit<NoteTextObject, 'id' | 'createdAt' | 'updatedAt'>): NoteTextObject {
+    const fullObj: NoteTextObject = {
+      ...obj,
+      id: newTextObjectId(),
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    const next = [...(this.ui.textObjects ?? []), fullObj];
+    this.patch({ textObjects: next });
+    this.scheduleDirtyCheck();
+
+    this.history.push({
+      id: newCommandId(),
+      type: 'text-add',
+      timestamp: Date.now(),
+      undo: () => {
+        const remaining = (this.ui.textObjects ?? []).filter((t) => t.id !== fullObj.id);
+        this.patch({ textObjects: remaining });
+        this.scheduleDirtyCheck();
+      },
+      redo: () => {
+        const restored = [...(this.ui.textObjects ?? []), fullObj];
+        this.patch({ textObjects: restored });
+        this.scheduleDirtyCheck();
+      },
+    });
+
+    return fullObj;
+  }
+
+  updateTextObject(id: string, patch: Partial<NoteTextObject>) {
+    const list = this.ui.textObjects ?? [];
+    const idx = list.findIndex((t) => t.id === id);
+    if (idx === -1) return;
+    const prev = list[idx];
+    const updated: NoteTextObject = { ...prev, ...patch, updatedAt: Date.now() };
+    const next = [...list];
+    next[idx] = updated;
+    this.patch({ textObjects: next });
+    this.scheduleDirtyCheck();
+
+    this.history.push({
+      id: newCommandId(),
+      type: 'text-update',
+      timestamp: Date.now(),
+      undo: () => {
+        const cur = this.ui.textObjects ?? [];
+        const i = cur.findIndex((t) => t.id === id);
+        if (i !== -1) {
+          const revert = [...cur];
+          revert[i] = prev;
+          this.patch({ textObjects: revert });
+          this.scheduleDirtyCheck();
+        }
+      },
+      redo: () => {
+        const cur = this.ui.textObjects ?? [];
+        const i = cur.findIndex((t) => t.id === id);
+        if (i !== -1) {
+          const reapply = [...cur];
+          reapply[i] = updated;
+          this.patch({ textObjects: reapply });
+          this.scheduleDirtyCheck();
+        }
+      },
+    });
+  }
+
+  deleteTextObject(id: string) {
+    const list = this.ui.textObjects ?? [];
+    const target = list.find((t) => t.id === id);
+    if (!target) return;
+    const next = list.filter((t) => t.id !== id);
+    this.patch({ textObjects: next });
+    this.scheduleDirtyCheck();
+
+    this.history.push({
+      id: newCommandId(),
+      type: 'text-delete',
+      timestamp: Date.now(),
+      undo: () => {
+        const restored = [...(this.ui.textObjects ?? []), target];
+        this.patch({ textObjects: restored });
+        this.scheduleDirtyCheck();
+      },
+      redo: () => {
+        const removed = (this.ui.textObjects ?? []).filter((t) => t.id !== id);
+        this.patch({ textObjects: removed });
+        this.scheduleDirtyCheck();
+      },
+    });
   }
 
   setCurrentPageIndex(index: number) {
@@ -493,7 +997,10 @@ export class NoteSession {
     );
   }
 
-  deleteAnnotation(id: string) {
+  deleteAnnotation(id: string, recordHistory = true) {
+    const target = this.ui.annotations.find((a) => a.id === id);
+    if (!target) return;
+
     const { state } = this.editor;
     const type = state.schema.marks.annotation;
     const tr = state.tr;
@@ -505,10 +1012,27 @@ export class NoteSession {
     if (tr.docChanged) this.editor.view.dispatch(tr);
     this.setAnnotations((list) => list.filter((a) => a.id !== id));
     this.patch({ openAnnotationId: null });
+
+    if (recordHistory) {
+      this.history.push({
+        id: newCommandId(),
+        type: 'annotation-delete',
+        timestamp: Date.now(),
+        description: '말풍선 주석 삭제',
+        undo: () => {
+          this.setAnnotations((list) => [...list, target]);
+          this.patch({ openAnnotationId: id });
+          this.scheduleDirtyCheck();
+        },
+        redo: () => {
+          this.deleteAnnotation(id, false);
+        },
+      });
+    }
   }
 
   /** 텍스트 선택 → 텍스트 앵커, 올가미 선택 → 스트로크 앵커, 그 외 → 지점 앵커 */
-  createAnnotation(point?: { x: number; y: number }): string {
+  createAnnotation(point?: { x: number; y: number }, recordHistory = true): string {
     const id = uid('ann');
     const { selection } = this.editor.state;
     let anchor: AnnotationAnchor;
@@ -524,8 +1048,26 @@ export class NoteSession {
       const p = point ?? this.caretPoint();
       anchor = { type: 'point', x: p.x, y: p.y };
     }
-    this.setAnnotations((list) => [...list, { id, anchor, body: '', turns: [], createdAt: Date.now() }]);
+    const newAnn: Annotation = { id, anchor, body: '', turns: [], createdAt: Date.now() };
+    this.setAnnotations((list) => [...list, newAnn]);
     this.patch({ openAnnotationId: id });
+
+    if (recordHistory) {
+      this.history.push({
+        id: newCommandId(),
+        type: 'annotation-add',
+        timestamp: Date.now(),
+        description: '말풍선 주석 생성',
+        undo: () => {
+          this.deleteAnnotation(id, false);
+        },
+        redo: () => {
+          this.setAnnotations((list) => [...list, newAnn]);
+          this.patch({ openAnnotationId: id });
+          this.scheduleDirtyCheck();
+        },
+      });
+    }
     return id;
   }
 
@@ -877,6 +1419,7 @@ export class NoteSession {
         plainText: plainTextOf(content),
         strokes,
         annotations,
+        textObjects: this.ui.textObjects ?? [],
         pages,
         fileLastModified,
         updatedAt: Date.now(),

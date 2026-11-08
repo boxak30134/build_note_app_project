@@ -6,6 +6,7 @@ import * as noteSessionMod from '../session/NoteSession';
 import { useSessions } from '../store/sessionStore';
 import { useSettings } from '../store/settingsStore';
 import type { NoteRecord } from '../storage/db';
+import { resetGlobalPalmState } from '../core/android/androidDeployment';
 
 vi.mock('../search/searchClient', () => ({
   indexNote: vi.fn(),
@@ -56,6 +57,7 @@ describe('S-Pen 필기 ↔ 손가락 제스처 격리', () => {
 
   beforeEach(() => {
     cleanup();
+    resetGlobalPalmState();
     useSettings.setState({ docFormat: 'continuous', fontSize: 16, tool: 'pencil', mouseDraw: false });
     useSessions.getState().patch(noteId, {
       loaded: true,
@@ -71,6 +73,7 @@ describe('S-Pen 필기 ↔ 손가락 제스처 격리', () => {
   });
 
   afterEach(() => {
+    resetGlobalPalmState();
     cleanup();
     session?.destroy();
     vi.restoreAllMocks();

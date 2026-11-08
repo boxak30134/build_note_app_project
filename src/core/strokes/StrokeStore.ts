@@ -74,7 +74,7 @@ export class StrokeStore {
   };
 
   // ---- raw mutations (no history) ----
-  private rawAdd(list: Array<{ stroke: Stroke; index: number }>) {
+  rawAdd(list: Array<{ stroke: Stroke; index: number }>) {
     const next = this.strokes.slice();
     [...list].sort((a, b) => a.index - b.index).forEach(({ stroke, index }) => {
       next.splice(Math.min(index, next.length), 0, stroke);
@@ -83,7 +83,7 @@ export class StrokeStore {
     this.emit();
   }
 
-  private rawRemove(ids: string[]): Array<{ stroke: Stroke; index: number }> {
+  rawRemove(ids: string[]): Array<{ stroke: Stroke; index: number }> {
     const set = new Set(ids);
     const removed: Array<{ stroke: Stroke; index: number }> = [];
     this.strokes.forEach((s, index) => {
@@ -94,7 +94,7 @@ export class StrokeStore {
     return removed;
   }
 
-  private rawTranslate(ids: string[], dx: number, dy: number) {
+  rawTranslate(ids: string[], dx: number, dy: number) {
     const set = new Set(ids);
     this.strokes = this.strokes.map((s) => (set.has(s.id) ? { ...s, points: translatePoints(s.points, dx, dy) } : s));
     this.emit();

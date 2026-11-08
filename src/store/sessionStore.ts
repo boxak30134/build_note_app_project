@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import type { Annotation } from '../features/annotations/types';
+import type { NoteTextObject } from '../core/text/textObjects';
 import { createPage, DEFAULT_NOTE_ZOOM, type NotePage } from '../core/page/pageTypes';
 import type { LinkRecommendation } from '../services/offlineDocumentLinker';
 
@@ -29,6 +30,9 @@ export interface SessionUI {
   external: null | 'modified' | 'deleted';
   annotations: Annotation[];
   openAnnotationId: string | null;
+  /** 페이지 앵커 기반 독립형 텍스트 객체 목록 및 현재 편집 중인 텍스트 객체 ID */
+  textObjects: NoteTextObject[];
+  editingTextObjectId: string | null;
   lassoIds: string[];
   moveMode: boolean;
   citations: PendingCitation[];
@@ -52,6 +56,8 @@ const emptySession = (): SessionUI => ({
   external: null,
   annotations: [],
   openAnnotationId: null,
+  textObjects: [],
+  editingTextObjectId: null,
   lassoIds: [],
   moveMode: false,
   citations: [],

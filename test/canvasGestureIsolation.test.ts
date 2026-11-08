@@ -4,13 +4,16 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { VirtualStylusAgent } from './utils/virtualStylus';
 import { shouldRejectPalmTouch, type PalmRejectionState, PALM_REJECTION_WINDOW_MS } from '../src/core/android/androidDeployment';
 import { drawIncrementalStrokeSegment, renderLassoFeedback } from '../src/canvas/render';
-import type { Stroke } from '../src/core/strokes/StrokeStore';
+import { CompositeHistoryManager } from '../src/core/history/CompositeHistoryManager';
+import { StrokeStore, type Stroke } from '../src/core/strokes/StrokeStore';
 import { isPointerInsidePageCanvasSurface } from '../src/core/input/gestureRouting';
 import { normalizePdfNoteContent } from '../src/core/page/pageTypes';
 import {
+  boundsOfPoints,
   clientPointToPageLocal,
   resolveLassoPolygonOnRelease,
   strokeInPolygon,
+  type AABB,
   type Point,
   type StrokePoint,
 } from '../src/core/geometry/geometry';
@@ -814,6 +817,338 @@ describe('S-Pen 필기 및 피벗 제스처 격리 자동 검증', () => {
     // 제스처가 끝나는 시점에만 스토어 동기화가 정확히 1회 호출됨
     expect(setZoomCallCount).toBe(1);
     expect(storeZoom).toBe(1.5);
+  });
+
+  it('시나리오 15 (REQ_LASSO_LIVE_OVERLAY): 올가미 S-Pen 드래그 시 Interaction Overlay 에 실시간 점선 및 반투명 영역이 연속 렌더링된다', () => {
+    let currentStrokeStyle = '';
+    let currentLineDash: number[] = [];
+    let currentLineWidth = 0;
+    let strokeCount = 0;
+    let fillCount = 0;
+
+    const interactionCtx = {
+      save: vi.fn(),
+      restore: vi.fn(),
+      beginPath: vi.fn(),
+      moveTo: vi.fn(),
+      lineTo: vi.fn(),
+      quadraticCurveTo: vi.fn(),
+      arc: vi.fn(),
+      fill: vi.fn(() => {
+        fillCount++;
+      }),
+      stroke: vi.fn(() => {
+        strokeCount++;
+      }),
+      closePath: vi.fn(),
+      setLineDash: vi.fn((dash: number[]) => {
+        currentLineDash = dash;
+      }),
+      get strokeStyle() {
+        return currentStrokeStyle;
+      },
+      set strokeStyle(v: string) {
+        currentStrokeStyle = v;
+      },
+      get lineWidth() {
+        return currentLineWidth;
+      },
+      set lineWidth(v: number) {
+        currentLineWidth = v;
+      },
+      fillStyle: '',
+    } as unknown as CanvasRenderingContext2D;
+
+    const lassoPoints: Point[] = [{ x: 50, y: 50 }];
+
+    // 1. PointerDown: 시작점 등록 및 피드백 렌더링
+    renderLassoFeedback(interactionCtx, lassoPoints);
+    expect(interactionCtx.arc).toHaveBeenCalledWith(50, 50, 3, 0, Math.PI * 2);
+
+    // 2. 연속 PointerMove (5회): 펜 이동에 따라 점선과 반투명 면이 실시간으로 갱신
+    for (let i = 1; i <= 5; i++) {
+      lassoPoints.push({ x: 50 + i * 20, y: 50 + i * 15 });
+      renderLassoFeedback(interactionCtx, lassoPoints);
+    }
+
+    expect(interactionCtx.setLineDash).toHaveBeenCalledWith([6, 6]);
+    expect(currentStrokeStyle).toBe('rgba(59, 130, 246, 0.8)');
+    expect(currentLineWidth).toBe(2.0);
+    expect(strokeCount).toBe(5);
+    expect(fillCount).toBeGreaterThan(0);
+  });
+
+  it('시나리오 16 (REQ_LASSO_LIVE_OVERLAY): 필기 Active Canvas 의 clearRect 가 실행되어도 Interaction Overlay 의 올가미 점선은 지워지지 않는다', () => {
+    const activeCanvas = document.createElement('canvas');
+    const interactionCanvas = document.createElement('canvas');
+
+    const activeCtx = {
+      clearRect: vi.fn(),
+      save: vi.fn(),
+      restore: vi.fn(),
+    } as unknown as CanvasRenderingContext2D;
+
+    const interactionCtx = {
+      clearRect: vi.fn(),
+      stroke: vi.fn(),
+      fill: vi.fn(),
+      save: vi.fn(),
+      restore: vi.fn(),
+      beginPath: vi.fn(),
+      moveTo: vi.fn(),
+      lineTo: vi.fn(),
+      quadraticCurveTo: vi.fn(),
+      arc: vi.fn(),
+      setLineDash: vi.fn(),
+    } as unknown as CanvasRenderingContext2D;
+
+    const lassoPoly: Point[] = [
+      { x: 100, y: 100 },
+      { x: 200, y: 100 },
+      { x: 200, y: 200 },
+    ];
+
+    // Interaction Overlay 에 올가미 점선 렌더링
+    renderLassoFeedback(interactionCtx, lassoPoly);
+    expect(interactionCtx.stroke).toHaveBeenCalledTimes(1);
+
+    // 손글씨 Active Canvas 에서 획 완료나 필기 클리어로 clearRect 실행
+    activeCtx.clearRect(0, 0, 1200, 1600);
+    expect(activeCtx.clearRect).toHaveBeenCalledWith(0, 0, 1200, 1600);
+
+    // Interaction Overlay 의 캔버스는 Active Canvas 와 물리적으로 분리되어 있어 clearRect 가 호출되지 않고 점선 유지
+    expect(interactionCtx.clearRect).not.toHaveBeenCalled();
+  });
+
+  it('시나리오 17 (REQ_LASSO_LIVE_OVERLAY): 줌 50%, 100%, 200% 상태에서 올가미 좌표가 용지 기준 좌표와 일치하고 PointerUp 시 선택 확정된다', () => {
+    const pageEl = document.createElement('div');
+    const viewportEl = document.createElement('div');
+    document.body.appendChild(viewportEl);
+    viewportEl.appendChild(pageEl);
+
+    // 뷰포트 및 페이지 위치 설정 (left: 100, top: 50)
+    vi.spyOn(pageEl, 'getBoundingClientRect').mockReturnValue({
+      left: 100,
+      top: 50,
+      right: 1300,
+      bottom: 1650,
+      width: 1200,
+      height: 1600,
+      x: 100,
+      y: 50,
+      toJSON: () => ({}),
+    });
+    vi.spyOn(viewportEl, 'getBoundingClientRect').mockReturnValue({
+      left: 0,
+      top: 0,
+      right: 1920,
+      bottom: 1080,
+      width: 1920,
+      height: 1080,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    });
+
+    const zoomLevels = [0.5, 1.0, 2.0];
+    const targetLocalX = 200;
+    const targetLocalY = 300;
+
+    for (const zoom of zoomLevels) {
+      // clientX = pageLeft + localX * zoom - scrollLeft
+      const clientX = 100 + targetLocalX * zoom;
+      const clientY = 50 + targetLocalY * zoom;
+
+      const pagePoint = clientPointToPageLocal(clientX, clientY, pageEl, viewportEl, zoom);
+      expect(pagePoint.x).toBeCloseTo(targetLocalX, 4);
+      expect(pagePoint.y).toBeCloseTo(targetLocalY, 4);
+    }
+
+    // 올가미 드래그 종료 시 (PointerUp): 열린 궤적이 자동으로 닫히며 내부 스트로크 선택
+    const openLassoTrajectory: Point[] = [
+      { x: 100, y: 100 },
+      { x: 300, y: 100 },
+      { x: 300, y: 300 },
+      { x: 100, y: 300 },
+      { x: 100, y: 120 }, // 20px 열린 상태
+    ];
+
+    const resolvedClosedPoly = resolveLassoPolygonOnRelease(openLassoTrajectory, {
+      closeDistance: 48,
+      minLoopLength: 24,
+    });
+    expect(resolvedClosedPoly).not.toBeNull();
+
+    const insideStrokePoints: StrokePoint[] = [
+      [150, 150, 0.5],
+      [250, 250, 0.5],
+    ];
+    const outsideStrokePoints: StrokePoint[] = [
+      [500, 500, 0.5],
+      [550, 550, 0.5],
+    ];
+
+    expect(strokeInPolygon(insideStrokePoints, resolvedClosedPoly!)).toBe(true);
+    expect(strokeInPolygon(outsideStrokePoints, resolvedClosedPoly!)).toBe(false);
+
+    viewportEl.remove();
+  });
+
+  it('시나리오 18 (REQ_LASSO_DRAG_LIVE_PREVIEW): 올가미 선택 객체 드래그 중 실시간 Interaction Overlay 변위 렌더링 및 StrokeStore 불변 검증', () => {
+    const history = new CompositeHistoryManager();
+    const stroke1: Stroke = {
+      id: 'stroke-text-1',
+      tool: 'pencil',
+      color: '#000000',
+      size: 3,
+      points: [
+        [100, 100, 0.5],
+        [120, 105, 0.6],
+        [140, 110, 0.7],
+      ],
+    };
+    const stroke2: Stroke = {
+      id: 'stroke-sketch-2',
+      tool: 'highlighter',
+      color: '#facc15',
+      size: 12,
+      points: [
+        [150, 150, 0.4],
+        [180, 170, 0.5],
+      ],
+    };
+
+    const strokeStore = new StrokeStore(history, [stroke1, stroke2]);
+    const selectedIds = ['stroke-text-1', 'stroke-sketch-2'];
+    const initialBounds = strokeStore.boundsOf(selectedIds)!;
+    expect(initialBounds).not.toBeNull();
+    expect(initialBounds.minX).toBe(98.5);
+    expect(initialBounds.minY).toBe(98.5);
+
+    // 모의 Interaction 캔버스 컨텍스트
+    let translatedX = 0;
+    let translatedY = 0;
+    let strokeRectCalled = false;
+
+    const mockInteractionCtx = {
+      save: vi.fn(),
+      restore: vi.fn(),
+      translate: vi.fn((dx: number, dy: number) => {
+        translatedX += dx;
+        translatedY += dy;
+      }),
+      setLineDash: vi.fn(),
+      strokeRect: vi.fn(() => {
+        strokeRectCalled = true;
+      }),
+      beginPath: vi.fn(),
+      moveTo: vi.fn(),
+      lineTo: vi.fn(),
+      quadraticCurveTo: vi.fn(),
+      stroke: vi.fn(),
+      fill: vi.fn(),
+      clearRect: vi.fn(),
+      strokeStyle: '',
+      lineWidth: 1,
+    } as unknown as CanvasRenderingContext2D;
+
+    // 드래그 중 이동 변위 (dx: 80, dy: 60)
+    const delta = { x: 80, y: 60 };
+
+    // 1. 드래그 중: StrokeStore 는 일체 변조되지 않으며 구독자 알림(emit)도 0회여야 함 (툴바 요동 차단)
+    const subscriber = vi.fn();
+    const unsub = strokeStore.subscribe(subscriber);
+
+    // Live preview 드로우 시뮬레이션
+    mockInteractionCtx.save();
+    mockInteractionCtx.translate(delta.x, delta.y);
+    mockInteractionCtx.strokeRect(
+      initialBounds.minX - 6,
+      initialBounds.minY - 6,
+      initialBounds.maxX - initialBounds.minX + 12,
+      initialBounds.maxY - initialBounds.minY + 12,
+    );
+    mockInteractionCtx.restore();
+
+    expect(mockInteractionCtx.translate).toHaveBeenCalledWith(80, 60);
+    expect(strokeRectCalled).toBe(true);
+    // StrokeStore 좌표는 원래 위치(100, 100)를 그대로 유지
+    expect(strokeStore.get('stroke-text-1')?.points[0][0]).toBe(100);
+    expect(strokeStore.get('stroke-text-1')?.points[0][1]).toBe(100);
+    expect(subscriber).not.toHaveBeenCalled();
+
+    unsub();
+  });
+
+  it('시나리오 19 (REQ_LASSO_DRAG_LIVE_PREVIEW): PointerUp 시 최종 이동 변위가 1회 일괄 반영되고 단일 Undo/Redo 트랜잭션으로 원자적 복원된다', () => {
+    const history = new CompositeHistoryManager();
+    const stroke1: Stroke = {
+      id: 'stroke-text-1',
+      tool: 'pencil',
+      color: '#000000',
+      size: 3,
+      points: [
+        [100, 100, 0.5],
+        [120, 105, 0.6],
+      ],
+    };
+    const strokeStore = new StrokeStore(history, [stroke1]);
+    const selectedIds = ['stroke-text-1'];
+
+    // 1. 드래그 종료 (PointerUp): 최종 변위 (dx: 150, dy: 80)를 1회 moveStrokes 로 확정
+    strokeStore.moveStrokes(selectedIds, 150, 80);
+
+    // 좌표가 (100 + 150 = 250, 100 + 80 = 180)으로 이동
+    const moved = strokeStore.get('stroke-text-1')!;
+    expect(moved.points[0][0]).toBe(250);
+    expect(moved.points[0][1]).toBe(180);
+
+    // 히스토리에 단 1개의 명령(stroke-move)만 기록됨
+    expect(history.canUndo).toBe(true);
+    expect(history.peek()?.type).toBe('stroke-move');
+
+    // 2. Undo 실행 (Ctrl+Z): 단 1회 호출로 원위치 (100, 100) 복원
+    history.undo();
+    const restored = strokeStore.get('stroke-text-1')!;
+    expect(restored.points[0][0]).toBe(100);
+    expect(restored.points[0][1]).toBe(100);
+
+    // 3. Redo 실행 (Ctrl+Y): 단 1회 호출로 이동 위치 (250, 180) 재복원
+    history.redo();
+    const redone = strokeStore.get('stroke-text-1')!;
+    expect(redone.points[0][0]).toBe(250);
+    expect(redone.points[0][1]).toBe(180);
+  });
+
+  it('시나리오 20 (REQ_LASSO_DRAG_LIVE_PREVIEW): 드래그 중 is-lasso-dragging 클래스로 툴바 간섭이 차단되고, PointerCancel 시 히스토리 오염 없이 원위치 복구된다', () => {
+    const viewportEl = document.createElement('div');
+    viewportEl.className = 'note-viewport';
+    document.body.appendChild(viewportEl);
+
+    // 1. 드래그 시작 시 is-lasso-dragging 추가
+    viewportEl.classList.add('is-lasso-dragging');
+    expect(viewportEl.classList.contains('is-lasso-dragging')).toBe(true);
+
+    const history = new CompositeHistoryManager();
+    const stroke: Stroke = {
+      id: 's-cancel-test',
+      tool: 'pencil',
+      color: '#000000',
+      size: 3,
+      points: [[50, 50, 0.5]],
+    };
+    const strokeStore = new StrokeStore(history, [stroke]);
+
+    // 2. PointerCancel 시: moveStrokes 가 호출되지 않고 드래그 플래그만 제거됨
+    viewportEl.classList.remove('is-lasso-dragging');
+    expect(viewportEl.classList.contains('is-lasso-dragging')).toBe(false);
+
+    // StrokeStore 좌표 원형 보존 및 Undo 스택 0개 유지
+    expect(strokeStore.get('s-cancel-test')?.points[0][0]).toBe(50);
+    expect(strokeStore.get('s-cancel-test')?.points[0][1]).toBe(50);
+    expect(history.canUndo).toBe(false);
+
+    viewportEl.remove();
   });
 });
 

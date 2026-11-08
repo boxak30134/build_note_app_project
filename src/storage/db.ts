@@ -2,6 +2,7 @@ import Dexie, { type EntityTable } from 'dexie';
 import type { Stroke } from '../core/strokes/StrokeStore';
 import type { EolKind, TextEncodingKind } from '../core/codec/textCodec';
 import type { Annotation } from '../features/annotations/types';
+import type { NoteTextObject } from '../core/text/textObjects';
 import { createPage, type NotePage } from '../core/page/pageTypes';
 import type { CustomFontRecord } from '../core/font/fontManager';
 import type { UserWordStat } from '../types/adaptiveGlossary';
@@ -31,6 +32,7 @@ export interface NoteRecord {
   plainText: string;
   strokes: Stroke[];
   annotations: Annotation[];
+  textObjects?: NoteTextObject[];
   /** 문서 페이지 목록 (규격·스타일·방향 보존, 기본 A4) */
   pages?: NotePage[];
   encoding: TextEncodingKind;
@@ -95,6 +97,7 @@ export function emptyNote(partial: Partial<NoteRecord> = {}): NoteRecord {
     plainText: '',
     strokes: [],
     annotations: [],
+    textObjects: [],
     pages: [createPage()],
     encoding: 'utf-8',
     eol: 'lf',

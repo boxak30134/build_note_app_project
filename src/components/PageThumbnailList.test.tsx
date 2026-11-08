@@ -126,4 +126,106 @@ describe('PageThumbnailList & Page Navigation', () => {
     fireEvent.click(thumb25);
     expect(scrollToPageMock).toHaveBeenCalledWith(24);
   });
+
+  it('헤더의 [+ 추가] 버튼 클릭 시 현재 페이지 아래에 새 페이지를 추가한다', () => {
+    const addPageBelowMock = vi.fn().mockReturnValue({ size: 'A4' });
+    const mockSession = {
+      id: 'note-regular',
+      record: {
+        id: 'note-regular',
+        title: '테스트 노트',
+        content: { type: 'doc', content: [] },
+      },
+      ui: {
+        pages: [createPage(), createPage()],
+        currentPageIndex: 0,
+      },
+      addPageBelow: addPageBelowMock,
+    } as unknown as NoteSession;
+
+    render(<PageThumbnailList session={mockSession} />);
+    const addHeaderBtn = screen.getByTestId('add-page-header-btn');
+    fireEvent.click(addHeaderBtn);
+    expect(addPageBelowMock).toHaveBeenCalledWith(0);
+  });
+
+  it('썸네일 카드의 [+ 아래에 추가] 및 [삭제] 확인 오버레이를 통해 페이지를 생성/삭제할 수 있다', () => {
+    const addPageBelowMock = vi.fn().mockReturnValue({ size: 'A4' });
+    const deletePageMock = vi.fn().mockReturnValue(true);
+    const mockSession = {
+      id: 'note-multi',
+      record: {
+        id: 'note-multi',
+        title: '다중 페이지 노트',
+        content: { type: 'doc', content: [] },
+      },
+      ui: {
+        pages: [createPage(), createPage(), createPage()],
+        currentPageIndex: 1,
+      },
+      addPageBelow: addPageBelowMock,
+      deletePage: deletePageMock,
+    } as unknown as NoteSession;
+
+    render(<PageThumbnailList session={mockSession} />);
+
+    // 2쪽 아래에 페이지 추가 버튼 클릭
+    const addBtn2 = screen.getByTestId('add-page-below-thumb-2');
+    fireEvent.click(addBtn2);
+    expect(addPageBelowMock).toHaveBeenCalledWith(1);
+
+    // 2쪽 삭제 버튼 클릭 -> 확인 오버레이 노출
+    const deleteBtn2 = screen.getByTestId('delete-page-2');
+    fireEvent.click(deleteBtn2);
+    const confirmOverlay = screen.getByTestId('delete-confirm-overlay-2');
+    expect(confirmOverlay).toBeDefined();
+
+    // 확인 오버레이에서 삭제 확정
+    const confirmBtn = screen.getByTestId('confirm-delete-page-2');
+    fireEvent.click(confirmBtn);
+    expect(deletePageMock).toHaveBeenCalledWith(1);
+  });
+
+  it('단 1개의 페이지만 있는 경우 삭제 버튼이 비활성화(disabled)된다', () => {
+    const mockSession = {
+      id: 'note-single',
+      record: {
+        id: 'note-single',
+        title: '단일 페이지 노트',
+        content: { type: 'doc', content: [] },
+      },
+      ui: {
+        pages: [createPage()],
+        currentPageIndex: 0,
+      },
+    } as unknown as NoteSession;
+
+    render(<PageThumbnailList session={mockSession} />);
+    const deleteBtn1 = screen.getByTestId('delete-page-1') as HTMLButtonElement;
+    const deleteBarBtn1 = screen.getByTestId('delete-page-bar-1') as HTMLButtonElement;
+    expect(deleteBtn1.disabled).toBe(true);
+    expect(deleteBarBtn1.disabled).toBe(true);
+  });
+
+  it('하단 페이지 번호 바의 상시 삭제 버튼 클릭 시에도 삭제 확인 오버레이가 정상 노출된다', () => {
+    const mockSession = {
+      id: 'note-multi-bar',
+      record: {
+        id: 'note-multi-bar',
+        title: '다중 페이지 노트',
+        content: { type: 'doc', content: [] },
+      },
+      ui: {
+        pages: [createPage(), createPage()],
+        currentPageIndex: 0,
+      },
+      deletePage: vi.fn(),
+    } as unknown as NoteSession;
+
+    render(<PageThumbnailList session={mockSession} />);
+    const deleteBarBtn2 = screen.getByTestId('delete-page-bar-2');
+    fireEvent.click(deleteBarBtn2);
+
+    expect(screen.getByTestId('delete-confirm-overlay-2')).toBeDefined();
+  });
 });

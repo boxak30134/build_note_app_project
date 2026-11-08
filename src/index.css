@@ -107,10 +107,24 @@ body,
 .ink-canvas-wet {
   z-index: 31;
 }
+/* [Layer 3] 올가미 및 인터랙션 시각화 전용 오버레이: 필기 캔버스(z-30, z-31) 최상단(z-32)에 위치 */
+.ink-canvas-interaction {
+  z-index: 32;
+  touch-action: none;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
 .note-viewport.is-inking {
   user-select: none;
   -webkit-user-select: none;
   overscroll-behavior: none;
+}
+/* 올가미 필기 객체 드래그 중에는 툴바를 일시 페이드아웃하여 S-Pen 궤적 시야 확보 및 터치 간섭 차단 */
+.is-lasso-dragging [data-testid="lasso-action-bar"] {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.1s ease;
 }
 
 .prose-note {

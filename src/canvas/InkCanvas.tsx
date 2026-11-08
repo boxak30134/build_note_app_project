@@ -9,6 +9,7 @@ import {
   resolveLassoPolygonOnRelease,
   straightenStrokePoints,
   strokeInPolygon,
+  type AABB,
   type Point,
   type StrokePoint,
 } from '../core/geometry/geometry';
@@ -40,7 +41,15 @@ type Live =
   | { kind: 'draw'; pointerId: number; stroke: Stroke; lastRenderedIndex: number }
   | { kind: 'erase'; pointerId: number; commandId?: string; trail: Point[] }
   | { kind: 'lasso'; pointerId: number; poly: Point[]; closedPoly: Point[] | null }
-  | { kind: 'move'; pointerId: number; ids: string[]; start: Point; applied: Point; target: Point }
+  | {
+      kind: 'move';
+      pointerId: number;
+      ids: string[];
+      start: Point;
+      initialBounds: AABB;
+      selectedStrokes: Stroke[];
+      offset: Point;
+    }
   | null;
 
 interface Props {
@@ -62,10 +71,12 @@ export const CHUNK_HEIGHT = 1600;
  * - Active Canvas (`wetRef`, `desynchronized: true`): 진행 중인 활성 획 전용 저지연 캔버스.
  */
 export function InkCanvas({ session, viewportRef, active }: Props) {
-  /** Committed Canvas (Dry ink): 첫 번째 청크(chunk 0) 바인딩 및 기존 테스트 호환용 ref */
+  /** [Layer 1] Committed Canvas (Dry ink): 확정된 누적 필기 보관용 정적 비트맵 버퍼 */
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  /** Active Canvas (Wet ink): 진행 중인 획/올가미/지우개 커서 전용 저지연(desynchronized) 캔버스 */
+  /** [Layer 2] Active Canvas (Wet ink): 진행 중인 펜 필기 전용 저지연(desynchronized) 캔버스 */
   const wetRef = useRef<HTMLCanvasElement>(null);
+  /** [Layer 3] Interaction Overlay: 올가미(Lasso) 실시간 점선/반투명 면 전용 표준 더블 버퍼링 캔버스 */
+  const interactionRef = useRef<HTMLCanvasElement>(null);
   /** 긴 다중 페이지 문서를 분할 렌더링하기 위한 청크 캔버스 맵 (chunkIndex -> HTMLCanvasElement) */
   const chunkCanvasesRef = useRef<Map<number, HTMLCanvasElement>>(new Map());
   const [chunkCount, setChunkCount] = useState<number>(() => {
@@ -202,16 +213,95 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
     [getPageDimensions],
   );
 
+  /** [Layer 3] Interaction Overlay 캔버스 준비 (desynchronized: false, 표준 더블 버퍼링) */
+  const prepareInteraction = useCallback(
+    (shouldClear = true) => {
+      const canvas = interactionRef.current;
+      const dims = getPageDimensions();
+      if (!canvas || !dims) return null;
+      const { pageW, pageH, dpr, viewport } = dims;
+
+      let overlayTop = 0;
+      let overlayHeight = pageH;
+      if (pageH > CHUNK_HEIGHT * 2) {
+        const vTop = viewport.scrollTop;
+        overlayTop = Math.max(0, Math.floor(vTop / CHUNK_HEIGHT) * CHUNK_HEIGHT);
+        overlayHeight = Math.min(pageH - overlayTop, CHUNK_HEIGHT * 2);
+      }
+
+      const w = Math.max(1, Math.round(pageW * dpr));
+      const h = Math.max(1, Math.round(overlayHeight * dpr));
+      if (canvas.width !== w || canvas.height !== h) {
+        canvas.width = w;
+        canvas.height = h;
+      }
+      canvas.style.top = `${overlayTop}px`;
+      canvas.style.height = `${overlayHeight}px`;
+
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return null;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, -overlayTop * dpr);
+      if (shouldClear) {
+        ctx.clearRect(0, overlayTop, pageW, overlayHeight);
+      }
+      return { ctx, overlayTop, overlayHeight, pageW, dpr };
+    },
+    [getPageDimensions],
+  );
+
+  /** 올가미 드래그 시 Interaction Overlay 상에 실시간 파란 점선 및 반투명 면 렌더링 */
+  const drawLassoInteraction = useCallback(() => {
+    const l = live.current;
+    const r = prepareInteraction(true);
+    if (!r) return;
+    if (l?.kind === 'lasso' && l.poly.length > 0) {
+      renderLassoFeedback(r.ctx, l.poly, l.closedPoly);
+    }
+  }, [prepareInteraction]);
+
+  /** 올가미 선택 객체 실시간 드래그 시 Interaction Overlay 상에 획과 점선 Bounding Box 렌더링 */
+  const drawMoveInteraction = useCallback(
+    (selectedStrokes: Stroke[], bounds: AABB, offset: Point) => {
+      const r = prepareInteraction(true);
+      if (!r) return;
+      const { ctx } = r;
+      ctx.save();
+      ctx.translate(offset.x, offset.y);
+      for (const s of selectedStrokes) {
+        drawStroke(ctx, s);
+      }
+      ctx.setLineDash([5, 4]);
+      ctx.strokeStyle = '#6366f1';
+      ctx.lineWidth = 1.2;
+      ctx.strokeRect(
+        bounds.minX - 6,
+        bounds.minY - 6,
+        bounds.maxX - bounds.minX + 12,
+        bounds.maxY - bounds.minY + 12,
+      );
+      ctx.restore();
+    },
+    [prepareInteraction],
+  );
+
+  /** 올가미 종료 또는 취소 시 Interaction Overlay 깨끗이 초기화 */
+  const clearInteraction = useCallback(() => {
+    prepareInteraction(true);
+  }, [prepareInteraction]);
+
   /** 기존 코드 및 테스트 호환용 prepare */
   const prepare = useCallback(
     (canvas: HTMLCanvasElement | null, shouldClear = true) => {
       if (!canvas) return null;
+      if (canvas === interactionRef.current) {
+        return prepareInteraction(shouldClear);
+      }
       if (canvas === wetRef.current) {
         return prepareWet(shouldClear);
       }
       return prepareChunk(0, canvas, shouldClear);
     },
-    [prepareWet, prepareChunk],
+    [prepareInteraction, prepareWet, prepareChunk],
   );
 
   /**
@@ -263,58 +353,63 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
     }
   }, [prepareWet, drawWetIncremental]);
 
-  const draw = useCallback(() => {
-    updateChunkCount();
-    const allStrokes = session.strokes.getAll();
-    const sel = useSessions.getState().sessions[session.id]?.lassoIds ?? [];
-    const b = sel.length ? session.strokes.boundsOf(sel) : null;
+  const draw = useCallback(
+    (excludedIds?: Set<string>) => {
+      updateChunkCount();
+      const allStrokes = session.strokes.getAll();
+      const sel = useSessions.getState().sessions[session.id]?.lassoIds ?? [];
+      const b = sel.length ? session.strokes.boundsOf(sel) : null;
 
-    if (chunkCanvasesRef.current.size > 0) {
-      chunkCanvasesRef.current.forEach((canvas, chunkIdx) => {
-        const r = prepareChunk(chunkIdx, canvas, true);
-        if (!r) return;
-        const { ctx, view } = r;
-        for (const s of allStrokes) {
-          if (!intersects(cachedBounds(s), view)) continue;
-          drawStroke(ctx, s);
-        }
-        if (b && intersects(b, view)) {
-          ctx.save();
-          ctx.setLineDash([5, 4]);
-          ctx.strokeStyle = '#6366f1';
-          ctx.lineWidth = 1.2;
-          ctx.strokeRect(b.minX - 6, b.minY - 6, b.maxX - b.minX + 12, b.maxY - b.minY + 12);
-          ctx.restore();
-        }
-      });
-    } else if (canvasRef.current) {
-      const r = prepareChunk(0, canvasRef.current, true);
-      if (r) {
-        const { ctx, view } = r;
-        for (const s of allStrokes) {
-          if (!intersects(cachedBounds(s), view)) continue;
-          drawStroke(ctx, s);
-        }
-        if (b && intersects(b, view)) {
-          ctx.save();
-          ctx.setLineDash([5, 4]);
-          ctx.strokeStyle = '#6366f1';
-          ctx.lineWidth = 1.2;
-          ctx.strokeRect(b.minX - 6, b.minY - 6, b.maxX - b.minX + 12, b.maxY - b.minY + 12);
-          ctx.restore();
+      if (chunkCanvasesRef.current.size > 0) {
+        chunkCanvasesRef.current.forEach((canvas, chunkIdx) => {
+          const r = prepareChunk(chunkIdx, canvas, true);
+          if (!r) return;
+          const { ctx, view } = r;
+          for (const s of allStrokes) {
+            if (excludedIds && excludedIds.has(s.id)) continue;
+            if (!intersects(cachedBounds(s), view)) continue;
+            drawStroke(ctx, s);
+          }
+          if (!excludedIds && b && intersects(b, view)) {
+            ctx.save();
+            ctx.setLineDash([5, 4]);
+            ctx.strokeStyle = '#6366f1';
+            ctx.lineWidth = 1.2;
+            ctx.strokeRect(b.minX - 6, b.minY - 6, b.maxX - b.minX + 12, b.maxY - b.minY + 12);
+            ctx.restore();
+          }
+        });
+      } else if (canvasRef.current) {
+        const r = prepareChunk(0, canvasRef.current, true);
+        if (r) {
+          const { ctx, view } = r;
+          for (const s of allStrokes) {
+            if (excludedIds && excludedIds.has(s.id)) continue;
+            if (!intersects(cachedBounds(s), view)) continue;
+            drawStroke(ctx, s);
+          }
+          if (!excludedIds && b && intersects(b, view)) {
+            ctx.save();
+            ctx.setLineDash([5, 4]);
+            ctx.strokeStyle = '#6366f1';
+            ctx.lineWidth = 1.2;
+            ctx.strokeRect(b.minX - 6, b.minY - 6, b.maxX - b.minX + 12, b.maxY - b.minY + 12);
+            ctx.restore();
+          }
         }
       }
-    }
 
-    // 같은 프레임에서 wet 레이어도 갱신 → 펜을 뗄 때 dry 전환 깜빡임 없음
-    drawWet();
-  }, [session, prepareChunk, drawWet, updateChunkCount]);
+      // 같은 프레임에서 wet 레이어도 갱신 → 펜을 뗄 때 dry 전환 깜빡임 없음
+      drawWet();
+    },
+    [session, prepareChunk, drawWet, updateChunkCount],
+  );
 
   const requestDraw = useCallback(() => {
     cancelAnimationFrame(frame.current);
     cancelAnimationFrame(wetFrame.current);
     wetFrame.current = 0;
-    frame.current = requestAnimationFrame(draw);
+    frame.current = requestAnimationFrame(() => draw());
   }, [draw]);
 
   /** 필기 중에는 wet 레이어만 다시 그린다 (확정 스트로크 전체 재렌더 없음) */
@@ -339,6 +434,8 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
         latestId === lastBakedStrokeId.current
       ) {
         // pointerup 시 이미 drawImage 로 Committed Canvas 에 직접 베이크 완료된 획이므로 중복 Full Redraw 생략
+        lastBakedStrokeCount.current = -1;
+        lastBakedStrokeId.current = null;
         return;
       }
       lastBakedStrokeCount.current = allStrokes.length;
@@ -548,10 +645,24 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
         const box = ui.lassoIds.length ? session.strokes.boundsOf(ui.lassoIds) : null;
         const inBox = box && p.x >= box.minX - 8 && p.x <= box.maxX + 8 && p.y >= box.minY - 8 && p.y <= box.maxY + 8;
         if (box && inBox) {
-          live.current = { kind: 'move', pointerId: e.pointerId, ids: ui.lassoIds.slice(), start: p, applied: { x: 0, y: 0 }, target: { x: 0, y: 0 } };
+          const ids = ui.lassoIds.slice();
+          const selectedStrokes = session.strokes.getMany(ids);
+          live.current = {
+            kind: 'move',
+            pointerId: e.pointerId,
+            ids,
+            start: p,
+            initialBounds: box,
+            selectedStrokes,
+            offset: { x: 0, y: 0 },
+          };
+          viewport.classList.add('is-lasso-dragging');
+          draw(new Set(ids));
+          drawMoveInteraction(selectedStrokes, box, { x: 0, y: 0 });
         } else {
           session.patch({ lassoIds: [], moveMode: false });
           live.current = { kind: 'lasso', pointerId: e.pointerId, poly: [p], closedPoly: null };
+          drawLassoInteraction();
           drawWet();
         }
         return;
@@ -635,6 +746,7 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
         } else if (l.closedPoly) {
           l.closedPoly = null;
         }
+        drawLassoInteraction();
         drawWet();
         return;
       } else if (l.kind === 'erase') {
@@ -646,19 +758,15 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
         }
       } else if (l.kind === 'move') {
         const p = toPage(e);
-        l.target = { x: p.x - l.start.x, y: p.y - l.start.y };
-        // requestAnimationFrame 으로 변위를 실시간 가산
+        const dx = p.x - l.start.x;
+        const dy = p.y - l.start.y;
+        l.offset = { x: dx, y: dy };
         if (!moveRaf) {
           moveRaf = requestAnimationFrame(() => {
             moveRaf = 0;
             const cur = live.current;
             if (cur?.kind !== 'move') return;
-            const dx = cur.target.x - cur.applied.x;
-            const dy = cur.target.y - cur.applied.y;
-            if (dx || dy) {
-              session.strokes.previewTranslate(cur.ids, dx, dy);
-              cur.applied = { ...cur.target };
-            }
+            drawMoveInteraction(cur.selectedStrokes, cur.initialBounds, cur.offset);
           });
         }
         return;
@@ -823,6 +931,7 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
         }
         return;
       } else if (l.kind === 'lasso') {
+        clearInteraction();
         if (cancelled) {
           session.patch({ lassoIds: [], moveMode: false });
         } else {
@@ -842,10 +951,16 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
       } else if (l.kind === 'move') {
         cancelAnimationFrame(moveRaf);
         moveRaf = 0;
-        const dx = l.target.x - l.applied.x;
-        const dy = l.target.y - l.applied.y;
-        if (dx || dy) session.strokes.previewTranslate(l.ids, dx, dy);
-        session.strokes.commitMove(l.ids, l.target.x, l.target.y);
+        viewport.classList.remove('is-lasso-dragging');
+        clearInteraction();
+        if (!cancelled) {
+          const p = toPage(e);
+          const dx = p.x - l.start.x;
+          const dy = p.y - l.start.y;
+          if (dx !== 0 || dy !== 0) {
+            session.strokes.moveStrokes(l.ids, dx, dy);
+          }
+        }
       }
       // 지연(RAF) 없이 즉시 dry 캔버스에 렌더링하고 wet 레이어를 비워 전환 시 깜빡임/소실을 0ms 로 차단
       draw();
@@ -877,6 +992,8 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
     window.addEventListener('pointercancel', onCancel);
     return () => {
       cancelLongPress();
+      cancelAnimationFrame(moveRaf);
+      viewport.classList.remove('is-lasso-dragging');
       viewport.removeEventListener('pointerdown', onPointerDown, { capture: true });
       viewport.removeEventListener('pointermove', onPointerMove, { capture: true });
       viewport.removeEventListener('pointerup', onUp, { capture: true });
@@ -886,7 +1003,7 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
       window.removeEventListener('pointerup', onUp);
       window.removeEventListener('pointercancel', onCancel);
     };
-  }, [session, viewportRef, prepare, prepareChunk, prepareWet, drawWetIncremental, requestDraw, requestWet, draw]);
+  }, [session, viewportRef, prepare, prepareChunk, prepareWet, drawWetIncremental, requestDraw, requestWet, draw, drawMoveInteraction]);
 
   const initializedChunkCanvases = useRef<WeakSet<HTMLCanvasElement>>(new WeakSet());
   const chunkRefCallbacks = useRef<Map<number, (el: HTMLCanvasElement | null) => void>>(new Map());
@@ -946,6 +1063,12 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
         ref={wetRef}
         data-testid="ink-canvas-wet"
         className="ink-canvas-wet pointer-events-none absolute inset-x-0 w-full"
+        aria-hidden
+      />
+      <canvas
+        ref={interactionRef}
+        data-testid="ink-canvas-interaction"
+        className="ink-canvas-interaction pointer-events-none absolute inset-x-0 w-full"
         aria-hidden
       />
     </>

@@ -52,7 +52,7 @@ export const InkTemplate = Node.create<NoteImageOptions>({
   name: 'inkTemplate',
   group: 'block',
   atom: true,
-  selectable: true,
+  selectable: false,
 
   addOptions() {
     return { noteId: '' };
