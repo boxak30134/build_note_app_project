@@ -61,15 +61,42 @@ export function getStandardContext(canvas: HTMLCanvasElement): CanvasRenderingCo
 
 /** 2.2: 화면 주사율에 맞춰 병합된 원시 디지타이저 샘플(240Hz) 전수 복원 */
 export function coalescedEventsOf(e: PointerEvent): PointerEvent[] {
-  if (typeof e.getCoalescedEvents === 'function') {
+  // 네이티브 PointerEvent 또는 React SyntheticEvent 래퍼 모두 지원
+  const target = (e as any).nativeEvent || e;
+  if (typeof target.getCoalescedEvents === 'function') {
     try {
-      const list = e.getCoalescedEvents();
-      if (list.length) return list;
+      const list = target.getCoalescedEvents();
+      if (list && list.length) return list;
     } catch {
       /* 일부 WebView 는 신뢰되지 않은 이벤트에서 예외 */
     }
   }
   return [e];
+}
+
+/**
+ * 2계층 캔버스 버퍼링: 완성된 활성(Active) 획을 누적(Committed) 캔버스에 1:1 디바이스 픽셀로 베이크하고 활성 캔버스를 초기화
+ */
+export function bakeActiveToCommitted(
+  activeCanvas: HTMLCanvasElement,
+  committedCanvas: HTMLCanvasElement,
+): void {
+  const committedCtx = committedCanvas.getContext('2d');
+  const activeCtx = activeCanvas.getContext('2d');
+
+  if (committedCtx && activeCanvas.width > 0 && activeCanvas.height > 0) {
+    committedCtx.save();
+    committedCtx.setTransform(1, 0, 0, 1, 0, 0); // DPR 스케일 왜곡 차단
+    committedCtx.drawImage(activeCanvas, 0, 0);
+    committedCtx.restore();
+  }
+
+  if (activeCtx && activeCanvas.width > 0 && activeCanvas.height > 0) {
+    activeCtx.save();
+    activeCtx.setTransform(1, 0, 0, 1, 0, 0);
+    activeCtx.clearRect(0, 0, activeCanvas.width, activeCanvas.height);
+    activeCtx.restore();
+  }
 }
 
 /** 예측 이벤트(다음 1~2 프레임 펜 위치). 렌더링 전용이며 저장하지 않는다 */

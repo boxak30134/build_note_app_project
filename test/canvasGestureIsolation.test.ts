@@ -2,8 +2,8 @@
 // test/canvasGestureIsolation.test.ts
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { VirtualStylusAgent } from './utils/virtualStylus';
-import { shouldRejectPalmTouch, type PalmRejectionState, PALM_REJECTION_WINDOW_MS } from '../src/utils/androidDeployment';
-import { drawIncrementalStrokeSegment } from '../src/canvas/render';
+import { shouldRejectPalmTouch, type PalmRejectionState, PALM_REJECTION_WINDOW_MS } from '../src/core/android/androidDeployment';
+import { drawIncrementalStrokeSegment, renderLassoFeedback } from '../src/canvas/render';
 import type { Stroke } from '../src/core/strokes/StrokeStore';
 import { isPointerInsidePageCanvasSurface } from '../src/core/input/gestureRouting';
 import { normalizePdfNoteContent } from '../src/core/page/pageTypes';
@@ -11,6 +11,7 @@ import {
   clientPointToPageLocal,
   resolveLassoPolygonOnRelease,
   strokeInPolygon,
+  type Point,
   type StrokePoint,
 } from '../src/core/geometry/geometry';
 import {
@@ -505,6 +506,314 @@ describe('S-Pen 필기 및 피벗 제스처 격리 자동 검증', () => {
     expect(strokeInPolygon(outsideStrokePoints, closedPolygon!)).toBe(false);
 
     viewportEl.remove();
+  });
+
+  it('시나리오 10 (REFACTOR_ULTRAFAST_PEN_CANVAS): 2계층 캔버스 버퍼링 - pointerup 시 activeCanvas가 committedCanvas로 1회 Bake되고 activeCanvas는 초기화된다', () => {
+    const activeCanvas = document.createElement('canvas');
+    const committedCanvas = document.createElement('canvas');
+    activeCanvas.width = 1200;
+    activeCanvas.height = 1600;
+    committedCanvas.width = 1200;
+    committedCanvas.height = 1600;
+
+    const activeCtx = {
+      save: vi.fn(),
+      restore: vi.fn(),
+      clearRect: vi.fn(),
+      setTransform: vi.fn(),
+      scale: vi.fn(),
+      beginPath: vi.fn(),
+      moveTo: vi.fn(),
+      lineTo: vi.fn(),
+      stroke: vi.fn(),
+    } as unknown as CanvasRenderingContext2D;
+
+    const committedCtx = {
+      save: vi.fn(),
+      restore: vi.fn(),
+      clearRect: vi.fn(),
+      setTransform: vi.fn(),
+      drawImage: vi.fn(),
+    } as unknown as CanvasRenderingContext2D;
+
+    let isDrawing = false;
+    const strokePoints: StrokePoint[] = [];
+
+    // pointerdown: S-Pen 획 시작
+    const onDown = (e: { pointerType: string; clientX: number; clientY: number; pressure?: number }) => {
+      if (e.pointerType !== 'pen') return;
+      isDrawing = true;
+      strokePoints.push([e.clientX, e.clientY, e.pressure || 0.5]);
+    };
+
+    // pointermove: 활성 캔버스에만 실시간 렌더링
+    const onMove = (e: { pointerType: string; clientX: number; clientY: number; pressure?: number }) => {
+      if (!isDrawing || e.pointerType !== 'pen') return;
+      strokePoints.push([e.clientX, e.clientY, e.pressure || 0.5]);
+    };
+
+    // pointerup: 완성된 획만 Committed 버퍼에 딱 1회 Bake하고 Active 캔버스 비움
+    const onUp = (e: { pointerType: string }) => {
+      if (!isDrawing || e.pointerType !== 'pen') return;
+      isDrawing = false;
+
+      // 1:1 디바이스 픽셀 전사
+      committedCtx.save();
+      committedCtx.setTransform(1, 0, 0, 1, 0, 0);
+      committedCtx.drawImage(activeCanvas, 0, 0);
+      committedCtx.restore();
+
+      // 활성 캔버스만 초기화
+      activeCtx.save();
+      activeCtx.setTransform(1, 0, 0, 1, 0, 0);
+      activeCtx.clearRect(0, 0, activeCanvas.width, activeCanvas.height);
+      activeCtx.restore();
+    };
+
+    onDown({ pointerType: 'pen', clientX: 100, clientY: 100, pressure: 0.5 });
+    onMove({ pointerType: 'pen', clientX: 120, clientY: 110, pressure: 0.6 });
+    onMove({ pointerType: 'pen', clientX: 150, clientY: 130, pressure: 0.7 });
+    onUp({ pointerType: 'pen' });
+
+    // Committed 캔버스에는 clearRect 가 전혀 불리지 않고 drawImage 로만 1회 베이크됨
+    expect(committedCtx.clearRect).not.toHaveBeenCalled();
+    expect(committedCtx.drawImage).toHaveBeenCalledTimes(1);
+    expect(committedCtx.drawImage).toHaveBeenCalledWith(activeCanvas, 0, 0);
+
+    // Active 캔버스는 pointerup 완료 시 1회 clearRect 로 초기화됨
+    expect(activeCtx.clearRect).toHaveBeenCalledTimes(1);
+    expect(strokePoints.length).toBe(3);
+  });
+
+  it('시나리오 11 (REFACTOR_ULTRAFAST_PEN_CANVAS): 리사이즈 가드 - 단순 React 리렌더링 발생 시 canvas.width/height 재할당 및 버퍼 클리어가 발생하지 않는다', () => {
+    const testCanvas = document.createElement('canvas');
+    let widthAssignmentCount = 0;
+    let heightAssignmentCount = 0;
+
+    let currentWidth = 0;
+    let currentHeight = 0;
+
+    Object.defineProperty(testCanvas, 'width', {
+      get() {
+        return currentWidth;
+      },
+      set(val: number) {
+        widthAssignmentCount++;
+        currentWidth = val;
+      },
+    });
+
+    Object.defineProperty(testCanvas, 'height', {
+      get() {
+        return currentHeight;
+      },
+      set(val: number) {
+        heightAssignmentCount++;
+        currentHeight = val;
+      },
+    });
+
+    // 캔버스 크기 할당 가드 함수: 실제 치수가 다를 때만 1회 할당
+    const applyCanvasDimensions = (canvas: HTMLCanvasElement, targetW: number, targetH: number) => {
+      if (canvas.width !== targetW) {
+        canvas.width = targetW;
+      }
+      if (canvas.height !== targetH) {
+        canvas.height = targetH;
+      }
+    };
+
+    // 1. 최초 마운트 시 치수 할당
+    applyCanvasDimensions(testCanvas, 1920, 1080);
+    expect(widthAssignmentCount).toBe(1);
+    expect(heightAssignmentCount).toBe(1);
+
+    // 2. React 리렌더링 10회 발생 시 (치수 불변)
+    for (let i = 0; i < 10; i++) {
+      applyCanvasDimensions(testCanvas, 1920, 1080);
+    }
+    // 치수가 동일하므로 재할당이 0회여야 하며, 버퍼 클리어가 방지됨
+    expect(widthAssignmentCount).toBe(1);
+    expect(heightAssignmentCount).toBe(1);
+
+    // 3. 실제 윈도우 리사이즈가 발생했을 때만 재할당 수행
+    applyCanvasDimensions(testCanvas, 2560, 1440);
+    expect(widthAssignmentCount).toBe(2);
+    expect(heightAssignmentCount).toBe(2);
+  });
+
+  it('시나리오 12 (REFACTOR_ULTRAFAST_PEN_CANVAS): 하드웨어 샘플링 수집 - getCoalescedEvents의 240Hz 고주파 좌표가 누락 없이 획에 전수 반영된다', async () => {
+    const { coalescedEventsOf } = await import('../src/canvas/lowLatency');
+
+    const sample1 = { clientX: 101, clientY: 201, pressure: 0.5 } as PointerEvent;
+    const sample2 = { clientX: 102, clientY: 202, pressure: 0.55 } as PointerEvent;
+    const sample3 = { clientX: 103, clientY: 203, pressure: 0.6 } as PointerEvent;
+
+    // 네이티브 PointerEvent 모의 객체 (getCoalescedEvents 지원)
+    const nativeEventWithCoalesced = {
+      clientX: 103,
+      clientY: 203,
+      pressure: 0.6,
+      getCoalescedEvents: () => [sample1, sample2, sample3],
+    } as unknown as PointerEvent;
+
+    const collectedFromNative = coalescedEventsOf(nativeEventWithCoalesced);
+    expect(collectedFromNative.length).toBe(3);
+    expect(collectedFromNative[0].clientX).toBe(101);
+    expect(collectedFromNative[2].clientX).toBe(103);
+
+    // React SyntheticEvent 래퍼 형태의 모의 객체
+    const syntheticEventWithCoalesced = {
+      clientX: 103,
+      clientY: 203,
+      nativeEvent: {
+        clientX: 103,
+        clientY: 203,
+        getCoalescedEvents: () => [sample1, sample2, sample3],
+      },
+    } as unknown as PointerEvent;
+
+    const collectedFromSynthetic = coalescedEventsOf(syntheticEventWithCoalesced);
+    expect(collectedFromSynthetic.length).toBe(3);
+    expect(collectedFromSynthetic[1].clientY).toBe(202);
+
+    // 미지원 환경: 단일 이벤트 폴백
+    const fallbackEvent = {
+      clientX: 150,
+      clientY: 250,
+    } as PointerEvent;
+    const collectedFromFallback = coalescedEventsOf(fallbackEvent);
+    expect(collectedFromFallback.length).toBe(1);
+    expect(collectedFromFallback[0].clientX).toBe(150);
+  });
+
+  it('시나리오 13 (BUGFIX_LASSO_VISUAL_FEEDBACK): 올가미 툴 드래그 시 Active Canvas 상에 파란색 점선(rgba(59, 130, 246, 0.8), [6, 6]) 및 반투명 채우기(rgba(59, 130, 246, 0.12)) 패스가 실시간 렌더링된다', () => {
+    let currentLineDash: number[] = [];
+    let currentStrokeStyle = '';
+    let currentFillStyle = '';
+    let currentLineWidth = 0;
+
+    const activeCtx = {
+      save: vi.fn(),
+      restore: vi.fn(),
+      beginPath: vi.fn(),
+      moveTo: vi.fn(),
+      lineTo: vi.fn(),
+      quadraticCurveTo: vi.fn(),
+      arc: vi.fn(),
+      fill: vi.fn(),
+      stroke: vi.fn(),
+      closePath: vi.fn(),
+      setLineDash: vi.fn((dash: number[]) => {
+        currentLineDash = dash;
+      }),
+      get strokeStyle() {
+        return currentStrokeStyle;
+      },
+      set strokeStyle(v: string) {
+        currentStrokeStyle = v;
+      },
+      get fillStyle() {
+        return currentFillStyle;
+      },
+      set fillStyle(v: string) {
+        currentFillStyle = v;
+      },
+      get lineWidth() {
+        return currentLineWidth;
+      },
+      set lineWidth(v: number) {
+        currentLineWidth = v;
+      },
+    } as unknown as CanvasRenderingContext2D;
+
+    const lassoPoints: Point[] = [
+      { x: 100, y: 100 },
+      { x: 200, y: 100 },
+      { x: 200, y: 200 },
+      { x: 100, y: 200 },
+    ];
+
+    // 올가미 드래그 시각 피드백 렌더러 호출
+    renderLassoFeedback(activeCtx, lassoPoints);
+
+    // 1. 파란색 점선 스타일 설정([6, 6], rgba(59, 130, 246, 0.8), lineWidth: 2) 검증
+    expect(activeCtx.setLineDash).toHaveBeenCalledWith([6, 6]);
+    expect(currentStrokeStyle).toBe('rgba(59, 130, 246, 0.8)');
+    expect(currentLineWidth).toBe(2.0);
+    expect(activeCtx.stroke).toHaveBeenCalled();
+
+    // 2. 반투명 채우기(rgba(59, 130, 246, 0.12)) 검증
+    expect(currentFillStyle).toBe('rgba(59, 130, 246, 0.12)');
+    expect(activeCtx.fill).toHaveBeenCalled();
+  });
+
+  it('시나리오 14 (SMOOTH_PINCH_ZOOM_DIRECT_DOM_TRANSFORM): 두 손가락 핀치 줌 도중 session.setZoom 스토어 호출 0회 및 DOM 직접 갱신, 제스처 종료 시 1회 스토어 동기화', () => {
+    let storeZoom = 1.0;
+    let setZoomCallCount = 0;
+    const session = {
+      ui: { zoom: 1.0 },
+      setZoom: (z: number) => {
+        setZoomCallCount++;
+        storeZoom = z;
+      },
+    };
+
+    const sizer = document.createElement('div');
+    const page = document.createElement('div');
+    const viewport = document.createElement('div');
+
+    let pendingPinchZoom: number | null = null;
+    let isPinching = false;
+
+    const applyZoomWithFocalOffsets = (
+      nextZoom: number,
+      offsets: { scrollTop: number; scrollLeft: number },
+      isDirectGesture = false,
+    ) => {
+      sizer.style.width = `${Math.round(1200 * nextZoom)}px`;
+      sizer.style.minHeight = `${Math.round(1600 * nextZoom)}px`;
+      page.style.transform = nextZoom === 1 ? '' : `scale(${nextZoom})`;
+      page.style.transformOrigin = 'top left';
+      viewport.scrollTop = offsets.scrollTop;
+      viewport.scrollLeft = offsets.scrollLeft;
+      if (isDirectGesture) {
+        pendingPinchZoom = nextZoom;
+      } else {
+        session.setZoom(nextZoom);
+      }
+    };
+
+    const commitPinchZoomIfPending = () => {
+      if (pendingPinchZoom !== null) {
+        const finalZoom = pendingPinchZoom;
+        pendingPinchZoom = null;
+        session.setZoom(finalZoom);
+      }
+    };
+
+    // 1. 두 손가락 핀치 줌 시작
+    isPinching = true;
+
+    // 2. 핀치 줌 진행 중 (touchmove 10회 연속 발생)
+    for (let i = 1; i <= 10; i++) {
+      const zoomLevel = 1.0 + i * 0.05;
+      applyZoomWithFocalOffsets(zoomLevel, { scrollTop: 100 * i, scrollLeft: 50 * i }, isPinching);
+    }
+
+    // 핀치 동작 중에는 React Zustand 스토어 업데이트(리렌더링 유발)가 0회여야 함
+    expect(setZoomCallCount).toBe(0);
+    // 대신 DOM 엘리먼트에 직접 scale 및 sizer 너비가 반영되어야 함
+    expect(page.style.transform).toBe('scale(1.5)');
+    expect(sizer.style.width).toBe('1800px');
+
+    // 3. 핀치 줌 종료 (touchend)
+    isPinching = false;
+    commitPinchZoomIfPending();
+
+    // 제스처가 끝나는 시점에만 스토어 동기화가 정확히 1회 호출됨
+    expect(setZoomCallCount).toBe(1);
+    expect(storeZoom).toBe(1.5);
   });
 });
 

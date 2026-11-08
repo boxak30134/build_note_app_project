@@ -243,6 +243,7 @@ function LoadedWorkspace({
     let gesture: { startY: number; lastY: number; atBottom: boolean; pageIndex: number } | null = null;
     let touchPinch: PinchSession | null = null;
     let pointerPinch: PinchSession | null = null;
+    let pendingPinchZoom: number | null = null;
     const activeTouchPointers = new Map<number, { x: number; y: number }>();
     const palmState: PalmRejectionState = { isPenDrawing: false, lastPenTimestamp: 0 };
     // 뷰포트는 touch-action:none 이므로 1손가락 패닝(+관성)을 JS 로 직접 처리한다 (S-Pen 은 절대 진입 불가)
@@ -253,6 +254,15 @@ function LoadedWorkspace({
     const stopInertia = () => {
       if (inertiaRaf) cancelAnimationFrame(inertiaRaf);
       inertiaRaf = 0;
+    };
+
+    const commitPinchZoomIfPending = () => {
+      if (pendingPinchZoom !== null) {
+        const finalZoom = pendingPinchZoom;
+        pendingPinchZoom = null;
+        session.setZoom(finalZoom);
+        panVelocity = { x: 0, y: 0 };
+      }
     };
 
     const startInertia = () => {
@@ -271,7 +281,11 @@ function LoadedWorkspace({
       inertiaRaf = requestAnimationFrame(step);
     };
 
-    const applyZoomWithFocalOffsets = (nextZoom: number, offsets: { scrollTop: number; scrollLeft: number }) => {
+    const applyZoomWithFocalOffsets = (
+      nextZoom: number,
+      offsets: { scrollTop: number; scrollLeft: number },
+      isDirectGesture = false,
+    ) => {
       const sizer = sizerRef.current;
       const page = pageRef.current;
       if (sizer) {
@@ -284,7 +298,11 @@ function LoadedWorkspace({
       }
       viewport.scrollTop = offsets.scrollTop;
       viewport.scrollLeft = offsets.scrollLeft;
-      session.setZoom(nextZoom);
+      if (isDirectGesture) {
+        pendingPinchZoom = nextZoom;
+      } else {
+        session.setZoom(nextZoom);
+      }
     };
 
     const buildPinchSession = (p1: { x: number; y: number }, p2: { x: number; y: number }, d: number): PinchSession => {
@@ -401,7 +419,7 @@ function LoadedWorkspace({
           const focal = touchMidpoint(t1, t2);
           const vRect = viewport.getBoundingClientRect();
           const offsets = computeFocalZoomScrollOffsets(touchPinch.anchor, nextZoom, focal, vRect);
-          applyZoomWithFocalOffsets(nextZoom, offsets);
+          applyZoomWithFocalOffsets(nextZoom, offsets, true);
         }
         return;
       }
@@ -413,11 +431,13 @@ function LoadedWorkspace({
       if (palmState.isPenDrawing || globalPalmRejectionState.isPenDrawing) {
         cancelPullUp();
         touchPinch = null;
+        commitPinchZoomIfPending();
         return;
       }
       if (touchPinch) {
         if (fingerTouchesOf(e.touches).length < 2) {
           touchPinch = null;
+          commitPinchZoomIfPending();
         }
         cancelPullUp();
         return;
@@ -428,6 +448,7 @@ function LoadedWorkspace({
 
     const onTouchCancel = () => {
       touchPinch = null;
+      commitPinchZoomIfPending();
       cancelPullUp();
     };
 
@@ -490,7 +511,7 @@ function LoadedWorkspace({
           const focal = touchMidpoint(p1, p2);
           const vRect = viewport.getBoundingClientRect();
           const offsets = computeFocalZoomScrollOffsets(pointerPinch.anchor, nextZoom, focal, vRect);
-          applyZoomWithFocalOffsets(nextZoom, offsets);
+          applyZoomWithFocalOffsets(nextZoom, offsets, true);
         }
         return;
       }
@@ -521,6 +542,7 @@ function LoadedWorkspace({
       if (pointerPinch) {
         if (activeTouchPointers.size < 2) {
           pointerPinch = null;
+          commitPinchZoomIfPending();
         }
         cancelPullUp();
         return;
@@ -538,7 +560,10 @@ function LoadedWorkspace({
         recordGlobalPenUp(Date.now());
       }
       activeTouchPointers.delete(e.pointerId);
-      if (activeTouchPointers.size < 2) pointerPinch = null;
+      if (activeTouchPointers.size < 2) {
+        pointerPinch = null;
+        commitPinchZoomIfPending();
+      }
       cancelPullUp();
     };
 

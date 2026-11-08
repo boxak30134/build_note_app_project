@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { NoteSession } from '../session/NoteSession';
 import { newStrokeId, type Stroke } from '../core/strokes/StrokeStore';
 import {
@@ -15,14 +15,13 @@ import {
 import { useSettings, activeColor } from '../store/settingsStore';
 import { useSessions } from '../store/sessionStore';
 import { useContextMenu } from '../store/contextMenuStore';
-import { cachedBounds, drawIncrementalStrokeSegment, drawStroke, intersects } from './render';
+import { cachedBounds, drawIncrementalStrokeSegment, drawStroke, intersects, renderLassoFeedback } from './render';
 import {
   appendStrokePoint,
   coalescedEventsOf,
   getLowLatencyContext,
   getStandardContext,
   predictedEventsOf,
-  traceMidpointQuadratic,
 } from './lowLatency';
 import {
   globalPalmRejectionState,
@@ -84,7 +83,6 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
   const lastBakedStrokeId = useRef<string | null>(null);
   const lastBakedStrokeCount = useRef<number>(-1);
   const prevViewState = useRef<{ lassoIds: unknown; zoom: number; active: boolean; sessionId: string } | null>(null);
-  const strokes = useSyncExternalStore(session.strokes.subscribe, session.strokes.getAll);
   const lassoIds = useSessions((s) => s.sessions[session.id]?.lassoIds);
   const zoom = useSessions((s) => s.sessions[session.id]?.zoom ?? 1);
 
@@ -252,37 +250,7 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
     if (!r) return;
     const { ctx } = r;
     if (l?.kind === 'lasso' && l.poly.length > 0) {
-      ctx.save();
-      // 시작점 앵커(루프 폐쇄 시작점 가이드) 시각화
-      const start = l.poly[0];
-      ctx.fillStyle = '#4f46e5';
-      ctx.beginPath();
-      ctx.arc(start.x, start.y, 3, 0, Math.PI * 2);
-      ctx.fill();
-
-      if (l.poly.length > 1) {
-        ctx.setLineDash([6, 4]);
-        ctx.strokeStyle = '#4f46e5';
-        ctx.lineWidth = 2.0;
-        ctx.lineCap = 'round';
-        ctx.lineJoin = 'round';
-        // 올가미는 무조건 스타일러스 펜 궤적(l.poly)을 따라가되 마지막 점까지 선명히 연결
-        ctx.beginPath();
-        traceMidpointQuadratic(ctx, l.poly);
-        const last = l.poly[l.poly.length - 1];
-        ctx.lineTo(last.x, last.y);
-        ctx.stroke();
-
-        // 폐곡선(closed curve)이 형성된 경우에만 해당 closure 내부 영역을 반투명하게 채운다
-        if (l.closedPoly && l.closedPoly.length > 2) {
-          ctx.fillStyle = 'rgba(79, 70, 229, 0.12)';
-          ctx.beginPath();
-          l.closedPoly.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
-          ctx.closePath();
-          ctx.fill();
-        }
-      }
-      ctx.restore();
+      renderLassoFeedback(ctx, l.poly, l.closedPoly);
     }
     if (l?.kind === 'erase' && l.trail.length) {
       const p = l.trail[l.trail.length - 1];
@@ -358,6 +326,29 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
     });
   }, [drawWet]);
 
+  // 1. 외부 스트로크 변경(Undo/Redo, 다른 모듈의 획 갱신) 구독: 필기 중이 아닐 때만 Committed Canvas 재렌더
+  useEffect(() => {
+    const unsubscribe = session.strokes.subscribe(() => {
+      // 펜 필기 중(live kind === 'draw')에는 실시간 획을 방해하지 않음
+      if (live.current !== null && live.current.kind === 'draw') return;
+      const allStrokes = session.strokes.getAll();
+      const latestId = allStrokes.length > 0 ? allStrokes[allStrokes.length - 1].id : null;
+      if (
+        allStrokes.length > 0 &&
+        allStrokes.length === lastBakedStrokeCount.current &&
+        latestId === lastBakedStrokeId.current
+      ) {
+        // pointerup 시 이미 drawImage 로 Committed Canvas 에 직접 베이크 완료된 획이므로 중복 Full Redraw 생략
+        return;
+      }
+      lastBakedStrokeCount.current = allStrokes.length;
+      lastBakedStrokeId.current = latestId;
+      requestDraw();
+    });
+    return unsubscribe;
+  }, [session, requestDraw]);
+
+  // 2. 뷰 상태 변경(올가미 선택, 줌, 탭 활성화) 시에만 캔버스 재렌더
   useEffect(() => {
     const prev = prevViewState.current;
     const viewChanged =
@@ -368,20 +359,10 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
       prev.sessionId !== session.id;
     prevViewState.current = { lassoIds, zoom, active, sessionId: session.id };
 
-    const latestId = strokes.length > 0 ? strokes[strokes.length - 1].id : null;
-    if (
-      !viewChanged &&
-      strokes.length > 0 &&
-      strokes.length === lastBakedStrokeCount.current &&
-      latestId === lastBakedStrokeId.current
-    ) {
-      // pointerup 시 이미 drawImage 로 Committed Canvas 에 직접 베이크 완료된 획이므로 중복 Full Redraw 생략
-      return;
+    if (viewChanged) {
+      requestDraw();
     }
-    lastBakedStrokeCount.current = strokes.length;
-    lastBakedStrokeId.current = latestId;
-    requestDraw();
-  }, [strokes, lassoIds, zoom, active, session.id, requestDraw]);
+  }, [lassoIds, zoom, active, session.id, requestDraw]);
 
   useEffect(() => {
     const viewport = viewportRef.current;
@@ -651,13 +632,8 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
         const closed = extractClosedLassoPolygon(l.poly, { closeDistance: 24, minLoopLength: 36 });
         if (closed) {
           l.closedPoly = closed;
-          const ids = session.strokes.getAll().filter((s) => strokeInPolygon(s.points, closed)).map((s) => s.id);
-          session.patch({ lassoIds: ids, moveMode: ids.length > 0 });
         } else if (l.closedPoly) {
           l.closedPoly = null;
-          if (session.ui.lassoIds.length > 0) {
-            session.patch({ lassoIds: [], moveMode: false });
-          }
         }
         drawWet();
         return;

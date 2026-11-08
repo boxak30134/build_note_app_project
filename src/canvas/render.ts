@@ -1,8 +1,9 @@
 import { getStroke } from 'perfect-freehand';
 import type { Stroke } from '../core/strokes/StrokeStore';
 import { strokeBounds } from '../core/strokes/StrokeStore';
-import type { AABB } from '../core/geometry/geometry';
+import type { AABB, Point } from '../core/geometry/geometry';
 import { unionBounds } from '../core/geometry/geometry';
+import { traceMidpointQuadratic } from './lowLatency';
 
 const pathCache = new WeakMap<Stroke, Path2D>();
 
@@ -271,4 +272,52 @@ export function renderStrokesToDataUrl(strokes: Stroke[], pad = 16): string | nu
   ctx.translate(pad - box.minX, pad - box.minY);
   strokes.forEach((s) => drawStroke(ctx, s));
   return canvas.toDataURL('image/png');
+}
+
+/**
+ * 올가미(Lasso) 드래그 시각 피드백 렌더링:
+ * 파란색 점선(rgba(59, 130, 246, 0.8), [6, 6]) 및 반투명 채우기 면(rgba(59, 130, 246, 0.12))
+ */
+export function renderLassoFeedback(
+  ctx: CanvasRenderingContext2D,
+  poly: Point[],
+  closedPoly?: Point[] | null,
+): void {
+  if (poly.length === 0) return;
+  ctx.save();
+  ctx.globalCompositeOperation = 'source-over';
+
+  const start = poly[0];
+  ctx.fillStyle = '#3b82f6';
+  ctx.beginPath();
+  ctx.arc(start.x, start.y, 3, 0, Math.PI * 2);
+  ctx.fill();
+
+  if (poly.length > 1) {
+    ctx.setLineDash([6, 6]);
+    ctx.strokeStyle = 'rgba(59, 130, 246, 0.8)';
+    ctx.lineWidth = 2.0;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    // 궤적 외곽선 점선
+    ctx.beginPath();
+    traceMidpointQuadratic(ctx, poly);
+    const last = poly[poly.length - 1];
+    ctx.lineTo(last.x, last.y);
+    ctx.stroke();
+
+    // 반투명 면 채우기 (폐곡선 또는 3개 이상의 드래그 궤적 패스)
+    const fillPoly = closedPoly && closedPoly.length > 2 ? closedPoly : poly.length > 2 ? poly : null;
+    if (fillPoly) {
+      ctx.fillStyle = 'rgba(59, 130, 246, 0.12)';
+      ctx.beginPath();
+      fillPoly.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
+      if (typeof ctx.closePath === 'function') {
+        ctx.closePath();
+      }
+      ctx.fill();
+    }
+  }
+  ctx.restore();
 }

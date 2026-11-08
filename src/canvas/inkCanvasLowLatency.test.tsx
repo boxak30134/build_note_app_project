@@ -707,8 +707,8 @@ describe('InkCanvas 저지연 필기 파이프라인', () => {
 
     act(() => pen(pageEl, 'pointermove', { clientX: 70, clientY: 70 }));
 
-    expect(wetCtx.setLineDash).toHaveBeenCalledWith([6, 4]);
-    expect(wetCtx.strokeStyle).toBe('#4f46e5');
+    expect(wetCtx.setLineDash).toHaveBeenCalledWith([6, 6]);
+    expect(wetCtx.strokeStyle).toBe('rgba(59, 130, 246, 0.8)');
     expect(wetCtx.lineWidth).toBe(2.0);
     expect(wetCtx.stroke).toHaveBeenCalled();
     // 마지막 펜촉 위치(70, 70)까지 lineTo 가 호출되어 끝점이 잘리지 않는지 검증
