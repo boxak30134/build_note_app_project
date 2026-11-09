@@ -166,8 +166,8 @@ export function PageThumbnailList({ session }: { session: NoteSession | null }) 
                 data-active={isCurrent ? 'true' : 'false'}
                 onClick={() => session.scrollToPage(it.pageNumber - 1)}
                 className={`group relative flex cursor-pointer select-none flex-col overflow-hidden rounded-xl border transition-all ${isCurrent
-                    ? 'border-indigo-500 bg-indigo-50/70 shadow-sm ring-2 ring-indigo-400'
-                    : 'border-slate-200 bg-white hover:border-indigo-300 hover:shadow-xs'
+                  ? 'border-indigo-500 bg-indigo-50/70 shadow-sm ring-2 ring-indigo-400'
+                  : 'border-slate-200 bg-white hover:border-indigo-300 hover:shadow-xs'
                   }`}
                 title={`클릭하여 ${it.pageNumber}페이지로 바로 이동`}
               >
@@ -280,11 +280,10 @@ export function PageThumbnailList({ session }: { session: NoteSession | null }) 
 
                 {/* 하단 페이지 번호 바 & 상시 삭제 버튼 */}
                 <div
-                  className={`flex items-center justify-between border-t px-2 py-1 text-[11px] ${
-                    isCurrent
+                  className={`flex items-center justify-between border-t px-2 py-1 text-[11px] ${isCurrent
                       ? 'border-indigo-200 bg-indigo-100/60 font-bold text-indigo-900'
                       : 'border-slate-100 bg-slate-50 text-slate-600 group-hover:text-indigo-600'
-                  }`}
+                    }`}
                 >
                   <div className="flex items-center gap-1 truncate">
                     <span>{it.pageNumber}쪽</span>
@@ -292,18 +291,15 @@ export function PageThumbnailList({ session }: { session: NoteSession | null }) 
                   </div>
                   <button
                     type="button"
-                    disabled={totalPages <= 1}
                     data-testid={`delete-page-bar-${it.pageNumber}`}
+                    disabled={totalPages <= 1}
+                    title={totalPages <= 1 ? '최소 1페이지가 필요합니다' : `${it.pageNumber}쪽 삭제`}
                     onClick={(e) => {
                       e.stopPropagation();
-                      if (totalPages <= 1) {
-                        toast.error('문서에는 최소 1개의 페이지가 있어야 합니다.');
-                        return;
-                      }
+                      if (totalPages <= 1) return;
                       setConfirmDeletePageNumber(it.pageNumber);
                     }}
-                    className="flex items-center justify-center rounded p-1 text-slate-400 hover:bg-rose-50 hover:text-rose-600 disabled:opacity-20"
-                    title={totalPages <= 1 ? '최소 1개 페이지는 유지되어야 합니다' : '이 페이지 삭제'}
+                    className="ml-auto rounded p-0.5 text-slate-400 transition hover:bg-red-50 hover:text-red-600 disabled:opacity-20 disabled:hover:bg-transparent disabled:hover:text-slate-400"
                   >
                     <Trash2 size={12} />
                   </button>

@@ -29,6 +29,7 @@ const PROVIDERS: Array<{ id: AiProviderId; emoji: string; desc: string; color: s
 interface ChatMsg {
   role: 'user' | 'assistant';
   content: string;
+  model?: string;
 }
 
 /** 오른쪽 사이드바: 생성형 AI 허브 & BYOK 온보딩 */
@@ -418,6 +419,12 @@ function Chat({ connected }: { connected: AiProviderId[] }) {
   const [busy, setBusy] = useState(false);
   const abortControllerRef = useRef<AbortController | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
+  const lastQuestionRef = useRef<string>('');
+  const [statusInfo, setStatusInfo] = useState<{
+    status: 'idle' | 'connecting' | 'retrying' | 'fallback' | 'streaming' | 'done' | 'error' | 'cancelled';
+    message?: string;
+    model?: string;
+  }>({ status: 'idle' });
 
   // 컴포넌트 언마운트(unmount) 시점에만 진행 중인 요청을 abort 하도록 격리
   useEffect(() => {
@@ -441,6 +448,7 @@ function Chat({ connected }: { connected: AiProviderId[] }) {
 
     const q = (overrideText ?? input).trim();
     if (!q || busy) return;
+    lastQuestionRef.current = q;
 
     const s = getSession(activeId);
     // 토큰 최적화(token_optimization_guide.md §2.1~2.2): 전체 문서 통째 주입 대신 핵심 청크(최대 2,000자) 및 최근 4턴 슬라이딩 윈도우 전송
@@ -459,6 +467,13 @@ function Chat({ connected }: { connected: AiProviderId[] }) {
     const controller = new AbortController();
     abortControllerRef.current = controller;
 
+    let resolvedModelName = provider === 'google' ? GEMINI_PRIMARY_MODEL : PROVIDER_LABEL[provider];
+    setStatusInfo({
+      status: 'connecting',
+      message: `연결 중… (${resolvedModelName})`,
+      model: resolvedModelName,
+    });
+
     try {
       const prunedHistory = history.slice(-8);
       const messages: ModelMessage[] = prunedHistory.map((m) => ({ role: m.role, content: m.content }));
@@ -472,10 +487,33 @@ function Chat({ connected }: { connected: AiProviderId[] }) {
           maxOutputTokens: SIDEBAR_MAX_OUTPUT_TOKENS,
           model: modelId,
           signal: controller.signal,
+          onModelResolved: (model) => {
+            resolvedModelName = model;
+            setStatusInfo({
+              status: 'streaming',
+              message: `${model} 응답 중`,
+              model,
+            });
+          },
+          onRetry: (model, attempt, delayMs) => {
+            setStatusInfo({
+              status: 'retrying',
+              message: `서버 혼잡(503). ${Math.max(1, Math.round(delayMs / 1000))}초 후 재시도 (${attempt}/3)`,
+              model,
+            });
+          },
+          onFallback: (fromModel, toModel) => {
+            setStatusInfo({
+              status: 'fallback',
+              message: `${fromModel} 응답 없음. ${toModel}로 전환 중…`,
+              model: toModel,
+            });
+          },
         })) {
           acc += delta;
-          setMsgs([...history, { role: 'assistant', content: acc }]);
+          setMsgs([...history, { role: 'assistant', content: acc, model: resolvedModelName }]);
         }
+        setStatusInfo({ status: 'done', model: resolvedModelName });
       } else {
         for await (const delta of streamAi({
           provider,
@@ -486,14 +524,18 @@ function Chat({ connected }: { connected: AiProviderId[] }) {
           signal: controller.signal,
         })) {
           acc += delta;
-          setMsgs([...history, { role: 'assistant', content: acc }]);
+          setMsgs([...history, { role: 'assistant', content: acc, model: resolvedModelName }]);
         }
+        setStatusInfo({ status: 'done', model: resolvedModelName });
       }
     } catch (err) {
       if (!controller.signal.aborted) {
         const errMsg = (err as Error)?.message || 'AI 호출 중 알 수 없는 오류가 발생했습니다.';
         toast.error(errMsg, 'AI 호출 실패');
+        setStatusInfo({ status: 'error', message: errMsg });
         setMsgs([...history, { role: 'assistant', content: `⚠️ 오류로 답변을 받지 못했습니다.\n${errMsg}` }]);
+      } else {
+        setStatusInfo({ status: 'cancelled', message: '취소됨' });
       }
     } finally {
       setBusy(false);
@@ -526,6 +568,36 @@ function Chat({ connected }: { connected: AiProviderId[] }) {
           <Trash2 size={13} />
         </button>
       </div>
+      {statusInfo.status !== 'idle' && statusInfo.status !== 'done' && (
+        <div className="flex items-center justify-between border-b border-indigo-100 bg-indigo-50/90 px-2.5 py-1 text-[11px] text-indigo-800">
+          <div className="flex items-center gap-1.5 truncate">
+            {statusInfo.status === 'connecting' || statusInfo.status === 'retrying' || statusInfo.status === 'fallback' ? (
+              <Loader2 size={11} className="animate-spin text-indigo-600 shrink-0" />
+            ) : null}
+            <span className="truncate">{statusInfo.message}</span>
+          </div>
+          {statusInfo.status === 'error' ? (
+            <button
+              type="button"
+              className="ml-2 font-semibold text-indigo-700 underline hover:text-indigo-900 shrink-0"
+              onClick={(e) => void handleSendMessage(e, lastQuestionRef.current)}
+            >
+              다시 시도
+            </button>
+          ) : busy ? (
+            <button
+              type="button"
+              className="ml-2 font-medium text-red-600 hover:text-red-800 shrink-0"
+              onClick={() => {
+                abortControllerRef.current?.abort();
+                setStatusInfo({ status: 'cancelled', message: '취소됨' });
+              }}
+            >
+              취소
+            </button>
+          ) : null}
+        </div>
+      )}
       <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-2">
         {msgs.length === 0 && <p className="mt-6 text-center text-xs text-slate-400">현재 노트 전체 문맥을 바탕으로 학술 정의·정리·증명·수식에 대해 질문하세요.</p>}
         {msgs.map((m, i) => (
@@ -548,6 +620,9 @@ function Chat({ connected }: { connected: AiProviderId[] }) {
               <Loader2 size={12} className="animate-spin" />
             ) : (
               ''
+            )}
+            {m.role === 'assistant' && m.model && m.content && (
+              <div className="mt-1 text-[10px] text-slate-400 font-mono">{m.model}</div>
             )}
           </div>
         ))}

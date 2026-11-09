@@ -48,6 +48,14 @@ export default defineConfig(({ mode }) => {
     resolve: {
       alias: [
         {
+          find: /^stream$/,
+          replacement: fileURLToPath(new URL('./src/utils/emptyStreamStub.ts', import.meta.url)),
+        },
+        {
+          find: /^node:stream$/,
+          replacement: fileURLToPath(new URL('./src/utils/emptyStreamStub.ts', import.meta.url)),
+        },
+        {
           find: /.*\/src\/utils\/androidDeployment$/,
           replacement: fileURLToPath(new URL('./src/core/android/androidDeployment.ts', import.meta.url)),
         },

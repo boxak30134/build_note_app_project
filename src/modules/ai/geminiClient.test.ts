@@ -129,11 +129,14 @@ describe('Gemini 기반 학술 튜터 및 AI 연계 모듈 (CLAUDE.md §9)', () 
     }
   });
 
-  it('기본 모델(gemini-3.8-flash)이 503/404 에러를 반환하면 대안 모델 체인으로 자동 폴백한다', async () => {
+  it('비재시도(404 Not Found) 에러 발생 시 즉시 대안 모델 체인으로 자동 폴백한다', async () => {
+    const err404Primary = Object.assign(new Error('404 Model models/gemini-3.8-flash is not found'), { status: 404 });
+    const err404Fallback = Object.assign(new Error('404 Model models/gemini-3.6-flash is not found'), { status: 404 });
+
     const generateContentStream = vi
       .fn()
-      .mockRejectedValueOnce(new Error('503 This model is currently experiencing high demand'))
-      .mockRejectedValueOnce(new Error('404 Model models/gemini-2.5-flash is not found'))
+      .mockRejectedValueOnce(err404Primary)
+      .mockRejectedValueOnce(err404Fallback)
       .mockResolvedValueOnce(createAsyncStream([{ text: '대안 모델 응답: $\\forall \\epsilon > 0$' }]));
 
     const mockClient: GeminiClientLike = {
@@ -153,8 +156,59 @@ describe('Gemini 기반 학술 튜터 및 AI 연계 모듈 (CLAUDE.md §9)', () 
     expect(generateContentStream).toHaveBeenCalledTimes(3);
     expect(generateContentStream.mock.calls[0][0].model).toBe(GEMINI_PRIMARY_MODEL);
     expect(generateContentStream.mock.calls[1][0].model).toBe(GEMINI_FALLBACK_MODEL);
-    expect(generateContentStream.mock.calls[2][0].model).toBe('gemini-3.6-flash');
+    expect(generateContentStream.mock.calls[2][0].model).toBe('gemini-flash-lite-latest');
     expect(chunks.join('')).toBe('대안 모델 응답: $\\forall \\epsilon > 0$');
+  });
+
+  it('503 오류 발생 시 동일 모델에 대해 지수 백오프로 재시도하고, 소진 시 Fallback 모델로 전환한다', async () => {
+    // 3.8-flash: 1회차 503, 2회차 성공
+    const err503 = Object.assign(new Error('503 This model is currently experiencing high demand'), { status: 503 });
+
+    const generateContentStream = vi
+      .fn()
+      .mockRejectedValueOnce(err503)
+      .mockResolvedValueOnce(createAsyncStream([{ text: '재시도 성공 응답' }]));
+
+    const mockClient: GeminiClientLike = {
+      models: { generateContentStream },
+    };
+
+    const chunks: string[] = [];
+    for await (const chunk of streamGeminiTutor({
+      apiKey: 'test-gemini-key',
+      client: mockClient,
+      prompt: '질문',
+      target: 'sidebar',
+      retryDelayMs: 1,
+    })) {
+      chunks.push(chunk);
+    }
+
+    // 동일 모델(gemini-3.8-flash)로 2번 호출되어 2번째에 성공해야 함
+    expect(generateContentStream).toHaveBeenCalledTimes(2);
+    expect(generateContentStream.mock.calls[0][0].model).toBe('gemini-3.8-flash');
+    expect(generateContentStream.mock.calls[1][0].model).toBe('gemini-3.8-flash');
+    expect(chunks.join('')).toBe('재시도 성공 응답');
+  });
+
+  it('모든 모델과 재시도가 소진되면 최종 오류를 명확히 안내한다', async () => {
+    const err503 = Object.assign(new Error('503 This model is currently experiencing high demand'), { status: 503 });
+    const generateContentStream = vi.fn().mockRejectedValue(err503);
+
+    const mockClient: GeminiClientLike = {
+      models: { generateContentStream },
+    };
+
+    await expect(
+      askGeminiTutor({
+        apiKey: 'test-gemini-key',
+        client: mockClient,
+        prompt: '질문',
+        target: 'sidebar',
+        enableFallback: false,
+        retryDelayMs: 1,
+      }),
+    ).rejects.toThrow(/503/);
   });
 
   it('thinkingConfig가 400 Invalid Argument 에러를 유발하면 기본값(thinkingConfig 제거)으로 안전하게 폴백한다', async () => {

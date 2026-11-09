@@ -721,7 +721,7 @@ export class NoteSession {
   }
 
   // ---------- Text Object Management ----------
-  addTextObject(obj: Omit<NoteTextObject, 'id' | 'createdAt' | 'updatedAt'>): NoteTextObject {
+  addTextObject(obj: Omit<NoteTextObject, 'id' | 'createdAt' | 'updatedAt'>, recordHistory = true): NoteTextObject {
     const fullObj: NoteTextObject = {
       ...obj,
       id: newTextObjectId(),
@@ -732,26 +732,32 @@ export class NoteSession {
     this.patch({ textObjects: next });
     this.scheduleDirtyCheck();
 
+    if (recordHistory) {
+      this.recordTextAdd(fullObj);
+    }
+
+    return fullObj;
+  }
+
+  recordTextAdd(obj: NoteTextObject) {
     this.history.push({
       id: newCommandId(),
       type: 'text-add',
       timestamp: Date.now(),
       undo: () => {
-        const remaining = (this.ui.textObjects ?? []).filter((t) => t.id !== fullObj.id);
+        const remaining = (this.ui.textObjects ?? []).filter((t) => t.id !== obj.id);
         this.patch({ textObjects: remaining });
         this.scheduleDirtyCheck();
       },
       redo: () => {
-        const restored = [...(this.ui.textObjects ?? []), fullObj];
+        const restored = [...(this.ui.textObjects ?? []), obj];
         this.patch({ textObjects: restored });
         this.scheduleDirtyCheck();
       },
     });
-
-    return fullObj;
   }
 
-  updateTextObject(id: string, patch: Partial<NoteTextObject>) {
+  updateTextObject(id: string, patch: Partial<NoteTextObject>, recordHistory = true) {
     const list = this.ui.textObjects ?? [];
     const idx = list.findIndex((t) => t.id === id);
     if (idx === -1) return;
@@ -762,34 +768,36 @@ export class NoteSession {
     this.patch({ textObjects: next });
     this.scheduleDirtyCheck();
 
-    this.history.push({
-      id: newCommandId(),
-      type: 'text-update',
-      timestamp: Date.now(),
-      undo: () => {
-        const cur = this.ui.textObjects ?? [];
-        const i = cur.findIndex((t) => t.id === id);
-        if (i !== -1) {
-          const revert = [...cur];
-          revert[i] = prev;
-          this.patch({ textObjects: revert });
-          this.scheduleDirtyCheck();
-        }
-      },
-      redo: () => {
-        const cur = this.ui.textObjects ?? [];
-        const i = cur.findIndex((t) => t.id === id);
-        if (i !== -1) {
-          const reapply = [...cur];
-          reapply[i] = updated;
-          this.patch({ textObjects: reapply });
-          this.scheduleDirtyCheck();
-        }
-      },
-    });
+    if (recordHistory) {
+      this.history.push({
+        id: newCommandId(),
+        type: 'text-update',
+        timestamp: Date.now(),
+        undo: () => {
+          const cur = this.ui.textObjects ?? [];
+          const i = cur.findIndex((t) => t.id === id);
+          if (i !== -1) {
+            const revert = [...cur];
+            revert[i] = prev;
+            this.patch({ textObjects: revert });
+            this.scheduleDirtyCheck();
+          }
+        },
+        redo: () => {
+          const cur = this.ui.textObjects ?? [];
+          const i = cur.findIndex((t) => t.id === id);
+          if (i !== -1) {
+            const reapply = [...cur];
+            reapply[i] = updated;
+            this.patch({ textObjects: reapply });
+            this.scheduleDirtyCheck();
+          }
+        },
+      });
+    }
   }
 
-  deleteTextObject(id: string) {
+  deleteTextObject(id: string, recordHistory = true) {
     const list = this.ui.textObjects ?? [];
     const target = list.find((t) => t.id === id);
     if (!target) return;
@@ -797,21 +805,23 @@ export class NoteSession {
     this.patch({ textObjects: next });
     this.scheduleDirtyCheck();
 
-    this.history.push({
-      id: newCommandId(),
-      type: 'text-delete',
-      timestamp: Date.now(),
-      undo: () => {
-        const restored = [...(this.ui.textObjects ?? []), target];
-        this.patch({ textObjects: restored });
-        this.scheduleDirtyCheck();
-      },
-      redo: () => {
-        const removed = (this.ui.textObjects ?? []).filter((t) => t.id !== id);
-        this.patch({ textObjects: removed });
-        this.scheduleDirtyCheck();
-      },
-    });
+    if (recordHistory) {
+      this.history.push({
+        id: newCommandId(),
+        type: 'text-delete',
+        timestamp: Date.now(),
+        undo: () => {
+          const restored = [...(this.ui.textObjects ?? []), target];
+          this.patch({ textObjects: restored });
+          this.scheduleDirtyCheck();
+        },
+        redo: () => {
+          const removed = (this.ui.textObjects ?? []).filter((t) => t.id !== id);
+          this.patch({ textObjects: removed });
+          this.scheduleDirtyCheck();
+        },
+      });
+    }
   }
 
   setCurrentPageIndex(index: number) {

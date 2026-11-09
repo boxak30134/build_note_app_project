@@ -6,12 +6,22 @@ export type GeminiTutorTarget = 'bubble' | 'sidebar';
 
 /** 기본 모델 ID 및 폴백 대안 모델 ID (§6.1) */
 export const GEMINI_PRIMARY_MODEL = 'gemini-3.8-flash';
-export const GEMINI_FALLBACK_MODEL = 'gemini-2.5-flash';
+export const GEMINI_FALLBACK_MODEL = 'gemini-3.6-flash';
 export const GEMINI_FALLBACK_CHAIN = [
   GEMINI_FALLBACK_MODEL,
-  'gemini-3.6-flash',
+  'gemini-flash-lite-latest',
   'gemini-3.5-flash-lite',
 ] as const;
+
+/** 503 및 429 일시적 오류에 대한 지수형 Backoff + Jitter 재시도 설정 */
+export const MAX_RETRY_ATTEMPTS = 3;
+export const RETRY_BASE_DELAY_MS = 1000;
+export const RETRY_JITTER_RATIO = 0.2; // ±20%
+
+/** 타임아웃 제한 상수 */
+export const FIRST_CHUNK_TIMEOUT_MS = 12000; // 첫 청크(thought 포함) 도착 제한 (12초)
+export const CHUNK_GAP_TIMEOUT_MS = 20000; // 청크 간 무응답 제한 (20초)
+export const TOTAL_REQUEST_BUDGET_MS = 90000; // 전체 재시도·폴백 합산 상한 (90초)
 
 /** 3.x 세대 기본값 유지, 임의 감소 금지 (§6.1) */
 export const GEMINI_TEMPERATURE = 1.0;
