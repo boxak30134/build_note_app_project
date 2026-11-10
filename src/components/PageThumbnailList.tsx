@@ -164,7 +164,13 @@ export function PageThumbnailList({ session }: { session: NoteSession | null }) 
                 key={it.pageNumber}
                 data-testid={`page-thumbnail-${it.pageNumber}`}
                 data-active={isCurrent ? 'true' : 'false'}
-                onClick={() => session.scrollToPage(it.pageNumber - 1)}
+                onClick={() => {
+                  if (typeof session.navigateToPage === 'function') {
+                    session.navigateToPage(it.pageNumber - 1);
+                  } else if (typeof session.scrollToPage === 'function') {
+                    session.scrollToPage(it.pageNumber - 1);
+                  }
+                }}
                 className={`group relative flex cursor-pointer select-none flex-col overflow-hidden rounded-xl border transition-all ${isCurrent
                   ? 'border-indigo-500 bg-indigo-50/70 shadow-sm ring-2 ring-indigo-400'
                   : 'border-slate-200 bg-white hover:border-indigo-300 hover:shadow-xs'
@@ -278,7 +284,7 @@ export function PageThumbnailList({ session }: { session: NoteSession | null }) 
                   )}
                 </div>
 
-                {/* 하단 페이지 번호 바 & 상시 삭제 버튼 */}
+                {/* 하단 페이지 번호 바 */}
                 <div
                   className={`flex items-center justify-between border-t px-2 py-1 text-[11px] ${isCurrent
                       ? 'border-indigo-200 bg-indigo-100/60 font-bold text-indigo-900'
@@ -289,20 +295,6 @@ export function PageThumbnailList({ session }: { session: NoteSession | null }) 
                     <span>{it.pageNumber}쪽</span>
                     {it.size && <span className="font-mono text-[9px] text-slate-400">· {it.size}</span>}
                   </div>
-                  <button
-                    type="button"
-                    data-testid={`delete-page-bar-${it.pageNumber}`}
-                    disabled={totalPages <= 1}
-                    title={totalPages <= 1 ? '최소 1페이지가 필요합니다' : `${it.pageNumber}쪽 삭제`}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      if (totalPages <= 1) return;
-                      setConfirmDeletePageNumber(it.pageNumber);
-                    }}
-                    className="ml-auto rounded p-0.5 text-slate-400 transition hover:bg-red-50 hover:text-red-600 disabled:opacity-20 disabled:hover:bg-transparent disabled:hover:text-slate-400"
-                  >
-                    <Trash2 size={12} />
-                  </button>
                 </div>
               </div>
             );

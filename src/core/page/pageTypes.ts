@@ -347,14 +347,19 @@ export function extractInkTemplateDimensions(
       }
     }
   }
+  // PDF inkTemplate 노드가 하나 이상 존재하면 실제 inkTemplate의 치수만 반환한다.
+  // fallbackPages를 이용해 존재하지 않는 가상 PDF 페이지를 만들어 내지 않는다.
   if (dims.length > 0) {
-    // 만약 pages 배열에 추가된 페이지가 더 많다면 부족분도 함께 반영
-    for (let i = dims.length; i < fallbackPages.length; i++) {
-      const d = getPageDimensions(fallbackPages[i].size, fallbackPages[i].orientation);
-      dims.push({ width: d.width, height: d.height });
+    if (fallbackPages.length > 0 && dims.length !== fallbackPages.length) {
+      console.error('[PDF_PAGE_COUNT_MISMATCH]', {
+        templateCount: dims.length,
+        fallbackCount: fallbackPages.length,
+      });
     }
     return dims;
   }
+
+  // PDF 템플릿 노드가 없는 일반 노트에서만 fallbackPages를 사용한다.
   return fallbackPages.map((p) => {
     const d = getPageDimensions(p.size, p.orientation);
     return { width: d.width, height: d.height };
@@ -400,6 +405,7 @@ export function insertBlankInkTemplateBelow<
       width: newWidth,
       height: newHeight,
       page: clampedTarget + 2,
+      pageId: insertedPage.id,
       style: insertedPage.style,
     },
   });
@@ -428,31 +434,36 @@ export function insertBlankInkTemplateBelow<
 /**
  * PDF 임포트 문서(내부에 `inkTemplate` 노드가 존재하는 문서)에서
  * 구버전 임포터로 인해 혼입된 중복 OCR 단락(`paragraph`/`heading`) 및
- * 중복 XObject 조각 이미지(`*-p1-img1.png`)를 제거하여
- * 각 페이지가 단일 `inkTemplate` 1:1 컨테이너로만 격리되도록 정규화한다.
+ * 중복 XObject 조각 이미지(`*-p1-img1.png`)를 제거하고,
+ * 문서 내 실제 inkTemplate 순서를 기준으로 page를 1..N으로 연속 재정렬한다.
+ * 단, pageId는 기존 값을 보존하고 누락된 경우에만 마이그레이션한다.
  */
 export function normalizePdfNoteContent<
   T extends { type?: string; content?: Array<{ type?: string; attrs?: Record<string, unknown> }> },
->(docContent: T): T {
+>(docContent: T, fallbackPages?: readonly NotePage[]): T {
   if (!docContent || !Array.isArray(docContent.content)) return docContent;
-  const hasPdfTemplate = docContent.content.some(
-    (node) => node?.type === 'inkTemplate' && typeof node.attrs?.src === 'string' && node.attrs.src.length > 0,
-  );
+  const hasPdfTemplate = docContent.content.some((node) => node?.type === 'inkTemplate');
   if (!hasPdfTemplate) return docContent;
 
   const onlyTemplates = docContent.content.filter((node) => node?.type === 'inkTemplate');
-  if (onlyTemplates.length === 0 || onlyTemplates.length === docContent.content.length) {
+  if (onlyTemplates.length === 0) {
     return docContent;
   }
 
   let seq = 0;
   const cleaned = onlyTemplates.map((node) => {
     seq += 1;
+    const existingPageId =
+      typeof node.attrs?.pageId === 'string' && node.attrs.pageId.trim().length > 0
+        ? node.attrs.pageId
+        : fallbackPages?.[seq - 1]?.id ?? `page-pdf-${seq}`;
+
     return {
       ...node,
       attrs: {
         ...node.attrs,
-        page: Number(node.attrs?.page) || seq,
+        page: seq,
+        pageId: existingPageId,
       },
     };
   });

@@ -202,12 +202,12 @@ describe('PageThumbnailList & Page Navigation', () => {
 
     render(<PageThumbnailList session={mockSession} />);
     const deleteBtn1 = screen.getByTestId('delete-page-1') as HTMLButtonElement;
-    const deleteBarBtn1 = screen.getByTestId('delete-page-bar-1') as HTMLButtonElement;
     expect(deleteBtn1.disabled).toBe(true);
-    expect(deleteBarBtn1.disabled).toBe(true);
+    // 하단 바의 중복 휴지통 버튼은 완전히 제거되었음을 검증
+    expect(screen.queryByTestId('delete-page-bar-1')).toBeNull();
   });
 
-  it('하단 페이지 번호 바의 상시 삭제 버튼 클릭 시에도 삭제 확인 오버레이가 정상 노출된다', () => {
+  it('상단 퀵 액션 삭제 버튼 클릭 시 삭제 확인 오버레이가 정상 노출되고 하단 바에는 중복 삭제 버튼이 없다', () => {
     const mockSession = {
       id: 'note-multi-bar',
       record: {
@@ -223,9 +223,38 @@ describe('PageThumbnailList & Page Navigation', () => {
     } as unknown as NoteSession;
 
     render(<PageThumbnailList session={mockSession} />);
-    const deleteBarBtn2 = screen.getByTestId('delete-page-bar-2');
-    fireEvent.click(deleteBarBtn2);
+    // 하단 바에는 휴지통이 존재하지 않음
+    expect(screen.queryByTestId('delete-page-bar-2')).toBeNull();
+
+    // 상단 퀵 액션 삭제 버튼 클릭
+    const deleteBtn2 = screen.getByTestId('delete-page-2');
+    fireEvent.click(deleteBtn2);
 
     expect(screen.getByTestId('delete-confirm-overlay-2')).toBeDefined();
+  });
+
+  it('3쪽 클릭 시 navigateToPage(2)를 1회 호출하고 하이라이트가 즉시 3쪽으로 반영된다', () => {
+    const navigateToPageMock = vi.fn();
+    const mockSession = {
+      id: 'note-nav-test',
+      record: {
+        id: 'note-nav-test',
+        title: '3페이지 테스트',
+        content: { type: 'doc', content: [] },
+      },
+      ui: {
+        pages: [createPage(), createPage(), createPage()],
+        currentPageIndex: 2, // navigateToPage 호출 시 2로 변경
+      },
+      navigateToPage: navigateToPageMock,
+    } as unknown as NoteSession;
+
+    render(<PageThumbnailList session={mockSession} />);
+    const thumb3 = screen.getByTestId('page-thumbnail-3');
+    fireEvent.click(thumb3);
+
+    expect(navigateToPageMock).toHaveBeenCalledTimes(1);
+    expect(navigateToPageMock).toHaveBeenCalledWith(2);
+    expect(thumb3.getAttribute('data-active')).toBe('true');
   });
 });

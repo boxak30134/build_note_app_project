@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import { AlertTriangle, RefreshCw, Lock, Plus, ArrowUp, Trash2 } from 'lucide-react';
+import { AlertTriangle, RefreshCw, Lock, Plus, Trash2 } from 'lucide-react';
 import { openSession, type NoteSession } from '../session/NoteSession';
 import { useSessionUI } from '../store/sessionStore';
 import { useSettings } from '../store/settingsStore';
@@ -21,12 +21,17 @@ import {
   extractInkTemplateDimensions,
   getPageDimensions,
   PAGE_STYLE_LABELS,
-  PULL_UP_THRESHOLD_PX,
-  shouldCreatePageOnPullUp,
   touchDistance,
   touchMidpoint,
   type FocalZoomAnchor,
 } from '../core/page/pageTypes';
+import { getMeasuredPageLayout, type PageLayout } from '../core/layout/pageLayout';
+import {
+  getCurrentPageIndex,
+  onScrollSample,
+  onScrollSettled,
+  onUserScrollIntent,
+} from '../core/navigation/pageNavigation';
 import { resolveFontById } from '../core/font/fontManager';
 import {
   globalPalmRejectionState,
@@ -117,7 +122,6 @@ function LoadedWorkspace({
     return m > 0 ? Math.ceil(m / 200) * 200 : 0;
   });
   const [hoverLink, setHoverLink] = useState<HTMLElement | null>(null);
-  const [pullUpDelta, setPullUpDelta] = useState(0);
   const pendingScroll = useTabs((s) => s.pendingScroll[session.id]);
 
   const activeFont = resolveFontById(selectedFontId, customFonts);
@@ -137,18 +141,82 @@ function LoadedWorkspace({
   const currentPage = pages[currentPageIndex] ?? pages[0];
   const currentDims = getPageDimensions(currentPage.size, currentPage.orientation);
 
+  // PDF 문서 전용 고정 컨테이너 너비: 현재 활성 페이지의 용지 규격/방향에 의존하지 않고
+  // 첫 페이지/대표 규격으로 고정하여 페이지 이동 시 전체 레이아웃 폭 및 높이 출렁임 원천 방지
+  const pdfContainerWidth = useMemo(() => {
+    if (!isPdfDoc) return currentDims.width;
+    const dims = extractInkTemplateDimensions(liveContent, pages);
+    if (dims.length > 0 && dims[0].width > 0) {
+      return dims[0].width;
+    }
+    const firstPage = pages[0];
+    return firstPage ? getPageDimensions(firstPage.size, firstPage.orientation).width : 840;
+  }, [isPdfDoc, liveContent, pages, currentDims.width]);
+
+  const effectiveDocWidth = isPdfDoc ? pdfContainerWidth : currentDims.width;
+
   const paginatedTotalHeight = pages.reduce((acc, p) => acc + getPageDimensions(p.size, p.orientation).height, 0);
   const pdfLayout = useMemo(
     () =>
       isPdfDoc
-        ? computePdfPageLayout(extractInkTemplateDimensions(liveContent, pages), currentDims.width)
+        ? computePdfPageLayout(extractInkTemplateDimensions(liveContent, pages), pdfContainerWidth)
         : null,
-    [isPdfDoc, liveContent, pages, currentDims.width],
+    [isPdfDoc, liveContent, pages, pdfContainerWidth],
   );
-  const minHeight = isPdfDoc && pdfLayout && pdfLayout.totalHeight > 0
-    ? Math.max(pdfLayout.totalHeight, maxY > pdfLayout.totalHeight ? maxY + 48 : 0)
+
+  const [measuredLayout, setMeasuredLayout] = useState<PageLayout>({
+    offsets: [],
+    heights: [],
+    totalHeight: 0,
+    count: 0,
+  });
+
+  // DOM 실측 기반 페이지 높이 및 오프셋 동기화 (ResizeObserver 16ms 디바운스)
+  useEffect(() => {
+    const page = pageRef.current;
+    if (!page) return;
+
+    let rafId = 0;
+    const measure = () => {
+      cancelAnimationFrame(rafId);
+      rafId = requestAnimationFrame(() => {
+        if (!pageRef.current) return;
+        const layout = getMeasuredPageLayout(pageRef.current, ui.zoom || 1);
+        setMeasuredLayout(layout);
+      });
+    };
+
+    measure();
+
+    let ro: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver(() => {
+        measure();
+      });
+      ro.observe(page);
+      const childPages = page.querySelectorAll('[data-ink-template], .ink-template, [data-page-index], .page-sheet');
+      childPages.forEach((cp) => ro?.observe(cp));
+    }
+
+    return () => {
+      cancelAnimationFrame(rafId);
+      if (ro) ro.disconnect();
+    };
+  }, [session, pages, isPdfDoc, ui.zoom]);
+
+  const measuredTotal = measuredLayout.totalHeight;
+  const minHeight = isPdfDoc
+    ? Math.max(
+        measuredTotal > 0 ? measuredTotal : (pdfLayout?.totalHeight ?? 0),
+        pdfLayout?.totalHeight ?? 0,
+        maxY > (pdfLayout?.totalHeight ?? 0) ? maxY + 48 : 0,
+      )
     : docFormat === 'paginated'
-      ? Math.max(paginatedTotalHeight, maxY + 400)
+      ? Math.max(
+          measuredTotal > 0 ? measuredTotal : paginatedTotalHeight,
+          paginatedTotalHeight,
+          maxY + 400,
+        )
       : Math.max(currentDims.height, 1400, maxY + 600);
 
   // 에디터 DOM 호스트 부착 (탭 전환 시에도 동일 인스턴스 유지)
@@ -228,9 +296,7 @@ function LoadedWorkspace({
     session.editor.setEditable(!ui.readOnly);
   }, [ui.readOnly, session]);
 
-  // 터치 제스처:
-  // 1) 두 손가락 핀치(확대/축소) 터치 무브먼트 → 노트 영역 실시간 확대/축소
-  // 2) 한 손가락 위로 밀어 올리기(Pull-up) 제스처 → 현재 페이지 바로 밑에 동일 규격·동일 스타일 페이지 자동 생성
+  // 터치 제스처: 두 손가락 핀치(확대/축소) 터치 무브먼트 및 1손가락 패닝(+관성) 스크롤 (Pull-up 자동 생성 제거됨)
   useEffect(() => {
     const viewport = viewportRef.current;
     if (!viewport) return;
@@ -241,7 +307,6 @@ function LoadedWorkspace({
       anchor: FocalZoomAnchor;
     }
 
-    let gesture: { startY: number; lastY: number; atBottom: boolean; pageIndex: number } | null = null;
     let touchPinch: PinchSession | null = null;
     let pointerPinch: PinchSession | null = null;
     let pendingPinchZoom: number | null = null;
@@ -290,7 +355,7 @@ function LoadedWorkspace({
       const sizer = sizerRef.current;
       const page = pageRef.current;
       if (sizer) {
-        sizer.style.width = `${Math.round(currentDims.width * nextZoom)}px`;
+        sizer.style.width = `${Math.round(effectiveDocWidth * nextZoom)}px`;
         sizer.style.minHeight = `${Math.round(minHeight * nextZoom)}px`;
       }
       if (page) {
@@ -327,62 +392,11 @@ function LoadedWorkspace({
       };
     };
 
-    const isAtBottom = () => {
-      const remaining = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
-      return remaining <= 80;
-    };
-
-    const cancelPullUp = () => {
-      if (gesture) {
-        gesture = null;
-        setPullUpDelta(0);
-      }
-    };
-
-    const startGesture = (clientY: number, target: EventTarget | null) => {
-      if (useSettings.getState().docFormat !== 'paginated') return;
-      const sheetEl = (target as HTMLElement | null)?.closest?.('[data-page-index]') as HTMLElement | null;
-      const pageIdx = sheetEl ? Number(sheetEl.dataset.pageIndex ?? session.ui.currentPageIndex) : session.ui.currentPageIndex;
-      if (!Number.isNaN(pageIdx)) session.setCurrentPageIndex(pageIdx);
-      gesture = {
-        startY: clientY,
-        lastY: clientY,
-        atBottom: isAtBottom() || Boolean(sheetEl),
-        pageIndex: Number.isNaN(pageIdx) ? session.ui.currentPageIndex : pageIdx,
-      };
-    };
-
-    const moveGesture = (clientY: number) => {
-      if (!gesture) return;
-      gesture.lastY = clientY;
-      const deltaUp = Math.max(0, gesture.startY - clientY);
-      setPullUpDelta(deltaUp);
-    };
-
-    const endGesture = (clientY?: number) => {
-      if (!gesture) return;
-      const endY = clientY ?? gesture.lastY;
-      const shouldAdd = shouldCreatePageOnPullUp({
-        startY: gesture.startY,
-        endY,
-        pointerType: 'touch',
-        atBottom: gesture.atBottom,
-      });
-      const targetIdx = gesture.pageIndex;
-      gesture = null;
-      setPullUpDelta(0);
-      if (shouldAdd && (useSettings.getState().docFormat === 'paginated' || isPdfDoc)) {
-        const created = session.addPageBelow(targetIdx);
-        toast.success(`현재 페이지 아래에 동일한 규격(${created.size} · ${PAGE_STYLE_LABELS[created.style]})의 새 페이지가 생성되었습니다.`);
-      }
-    };
-
     const onTouchStart = (e: TouchEvent) => {
       if (palmState.isPenDrawing || globalPalmRejectionState.isPenDrawing) return;
       // S-Pen(stylus) 터치는 핀치/패닝 판정에서 배제 — 펜 + 손바닥이 2-터치 줌으로 오인되지 않도록 한다
       const fingers = fingerTouchesOf(e.touches);
       if (fingers.length >= 2) {
-        cancelPullUp();
         const t1 = { x: fingers[0].clientX, y: fingers[0].clientY };
         const t2 = { x: fingers[1].clientX, y: fingers[1].clientY };
         const d0 = touchDistance(t1, t2);
@@ -391,20 +405,15 @@ function LoadedWorkspace({
         }
         return;
       }
-      if (fingers.length === 1 && e.touches.length === 1 && !touchPinch) {
-        startGesture(fingers[0].clientY, e.target);
-      }
     };
 
     const onTouchMove = (e: TouchEvent) => {
       if (palmState.isPenDrawing || globalPalmRejectionState.isPenDrawing) {
-        cancelPullUp();
         touchPinch = null;
         return;
       }
       const fingers = fingerTouchesOf(e.touches);
       if (fingers.length >= 2) {
-        cancelPullUp();
         const t1 = { x: fingers[0].clientX, y: fingers[0].clientY };
         const t2 = { x: fingers[1].clientX, y: fingers[1].clientY };
         const d = touchDistance(t1, t2);
@@ -424,13 +433,10 @@ function LoadedWorkspace({
         }
         return;
       }
-      if (!gesture || fingers.length !== 1 || e.touches.length !== 1 || touchPinch) return;
-      moveGesture(fingers[0].clientY);
     };
 
     const onTouchEnd = (e: TouchEvent) => {
       if (palmState.isPenDrawing || globalPalmRejectionState.isPenDrawing) {
-        cancelPullUp();
         touchPinch = null;
         commitPinchZoomIfPending();
         return;
@@ -440,17 +446,13 @@ function LoadedWorkspace({
           touchPinch = null;
           commitPinchZoomIfPending();
         }
-        cancelPullUp();
         return;
       }
-      const touch = e.changedTouches[0];
-      endGesture(touch ? touch.clientY : undefined);
     };
 
     const onTouchCancel = () => {
       touchPinch = null;
       commitPinchZoomIfPending();
-      cancelPullUp();
     };
 
     const onPointerDown = (e: PointerEvent) => {
@@ -463,7 +465,6 @@ function LoadedWorkspace({
         palmState.isPenDrawing = true;
         palmState.lastPenTimestamp = Date.now();
         recordGlobalPenDown(palmState.lastPenTimestamp);
-        cancelPullUp();
         activeTouchPointers.clear();
         pointerPinch = null;
         return;
@@ -474,7 +475,6 @@ function LoadedWorkspace({
       panVelocity = { x: 0, y: 0 };
       lastPanTime = e.timeStamp || performance.now();
       if (activeTouchPointers.size >= 2) {
-        cancelPullUp();
         const [p1, p2] = [...activeTouchPointers.values()];
         const d0 = touchDistance(p1, p2);
         if (d0 > 0) {
@@ -482,7 +482,6 @@ function LoadedWorkspace({
         }
         return;
       }
-      startGesture(e.clientY, e.target);
     };
 
     const onPointerMove = (e: PointerEvent) => {
@@ -498,7 +497,6 @@ function LoadedWorkspace({
       if (!prev) return;
       activeTouchPointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
       if (activeTouchPointers.size >= 2) {
-        cancelPullUp();
         const [p1, p2] = [...activeTouchPointers.values()];
         const d = touchDistance(p1, p2);
         if (!pointerPinch && d > 0) {
@@ -527,8 +525,6 @@ function LoadedWorkspace({
       const now = e.timeStamp || performance.now();
       panVelocity = updatePanVelocity(panVelocity, { x: e.clientX - prev.x, y: e.clientY - prev.y }, now - lastPanTime);
       lastPanTime = now;
-      if (!gesture) return;
-      moveGesture(e.clientY);
     };
 
     const onPointerUp = (e: PointerEvent) => {
@@ -545,13 +541,10 @@ function LoadedWorkspace({
           pointerPinch = null;
           commitPinchZoomIfPending();
         }
-        cancelPullUp();
         return;
       }
       // 손가락을 떼기 직전 100ms 이상 정지했다면 관성 없음
       if (activeTouchPointers.size === 0 && (e.timeStamp || performance.now()) - lastPanTime < 100) startInertia();
-      if (!gesture) return;
-      endGesture(e.clientY);
     };
 
     const onPointerCancel = (e: PointerEvent) => {
@@ -565,7 +558,6 @@ function LoadedWorkspace({
         pointerPinch = null;
         commitPinchZoomIfPending();
       }
-      cancelPullUp();
     };
 
     const onWheel = (e: WheelEvent) => {
@@ -615,59 +607,98 @@ function LoadedWorkspace({
       viewport.removeEventListener('pointercancel', onPointerCancel);
       viewport.removeEventListener('wheel', onWheel);
     };
-  }, [session, currentDims.width, minHeight]);
+  }, [session, effectiveDocWidth, minHeight]);
 
-  // 뷰포트 스크롤 시 현재 화면에 보이는 페이지를 실시간 감지하여 currentPageIndex 동기화
+  // 뷰포트 스크롤 시 현재 화면에 보이는 페이지를 실시간 감지하여 currentPageIndex 동기화 (내비게이션-스파이 비경합 분리)
   useEffect(() => {
     const viewport = viewportRef.current;
     if (!viewport) return;
 
     let scrollRaf = 0;
-    const onScroll = () => {
+    let settleTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const sampleScroll = () => {
       cancelAnimationFrame(scrollRaf);
       scrollRaf = requestAnimationFrame(() => {
         const page = pageRef.current;
         if (!viewport || !page) return;
-        const viewTop = viewport.scrollTop + 100;
 
-        // 1. PDF 템플릿 페이지 감지
-        const pdfPages = page.querySelectorAll<HTMLElement>('[data-ink-template]');
-        if (pdfPages.length > 0) {
-          for (let i = 0; i < pdfPages.length; i++) {
-            const el = pdfPages[i];
-            const top = el.offsetTop;
-            const bottom = top + el.offsetHeight;
-            if (viewTop >= top && viewTop <= bottom) {
-              const pNum = Number(el.dataset.page || i + 1);
-              session.setCurrentPageIndex(pNum - 1);
-              return;
-            }
-          }
-          return;
-        }
+        const zoom = ui.zoom || 1;
+        const layout = measuredLayout.count > 0 ? measuredLayout : getMeasuredPageLayout(page, zoom);
+        const scrollTop = viewport.scrollTop / zoom;
+        const viewportH = viewport.clientHeight / zoom;
 
-        // 2. 분리형 페이지 시트 감지
-        const sheets = page.querySelectorAll<HTMLElement>('[data-page-index]');
-        if (sheets.length > 0) {
-          for (let i = 0; i < sheets.length; i++) {
-            const el = sheets[i];
-            const top = el.offsetTop;
-            const bottom = top + el.offsetHeight;
-            if (viewTop >= top && viewTop <= bottom) {
-              session.setCurrentPageIndex(i);
-              return;
-            }
+        // 순수 상태 기계로 스크롤 샘플 처리
+        session.navState = onScrollSample(session.navState, scrollTop, viewportH, layout);
+
+        // 프로그램 스크롤 중이 아닐 때만 외부 currentPageIndex를 갱신
+        if (!session.navState.programmatic) {
+          const visibleIdx = session.navState.visible;
+          if (visibleIdx !== session.ui.currentPageIndex) {
+            session.setCurrentPageIndex(visibleIdx);
           }
         }
       });
+
+      // 150ms 디바운스로 settle 처리 (scrollend 이벤트가 없거나 미발생 환경 보완)
+      if (settleTimer) clearTimeout(settleTimer);
+      settleTimer = setTimeout(() => {
+        const page = pageRef.current;
+        if (!viewport || !page) return;
+        const zoom = ui.zoom || 1;
+        const layout = measuredLayout.count > 0 ? measuredLayout : getMeasuredPageLayout(page, zoom);
+        session.navState = onScrollSettled(
+          session.navState,
+          viewport.scrollTop / zoom,
+          viewport.clientHeight / zoom,
+          layout,
+        );
+        const settledIndex = getCurrentPageIndex(session.navState);
+        if (settledIndex !== session.ui.currentPageIndex) {
+          session.setCurrentPageIndex(settledIndex);
+        }
+      }, 150);
     };
 
-    viewport.addEventListener('scroll', onScroll, { passive: true });
+    const onScrollEnd = () => {
+      if (settleTimer) clearTimeout(settleTimer);
+      const page = pageRef.current;
+      if (!viewport || !page) return;
+      const zoom = ui.zoom || 1;
+      const layout = measuredLayout.count > 0 ? measuredLayout : getMeasuredPageLayout(page, zoom);
+      session.navState = onScrollSettled(
+        session.navState,
+        viewport.scrollTop / zoom,
+        viewport.clientHeight / zoom,
+        layout,
+      );
+      const settledIndex = getCurrentPageIndex(session.navState);
+      if (settledIndex !== session.ui.currentPageIndex) {
+        session.setCurrentPageIndex(settledIndex);
+      }
+    };
+
+    // 프로그램 스크롤 중 사용자의 직접적인 조작(휠, 터치) 감지 시 즉시 settle
+    const onUserIntent = () => {
+      session.navState = onUserScrollIntent(session.navState);
+    };
+
+    viewport.addEventListener('scroll', sampleScroll, { passive: true });
+    viewport.addEventListener('scrollend', onScrollEnd, { passive: true });
+    viewport.addEventListener('wheel', onUserIntent, { passive: true });
+    viewport.addEventListener('touchmove', onUserIntent, { passive: true });
+    viewport.addEventListener('pointerdown', onUserIntent, { passive: true });
+
     return () => {
       cancelAnimationFrame(scrollRaf);
-      viewport.removeEventListener('scroll', onScroll);
+      if (settleTimer) clearTimeout(settleTimer);
+      viewport.removeEventListener('scroll', sampleScroll);
+      viewport.removeEventListener('scrollend', onScrollEnd);
+      viewport.removeEventListener('wheel', onUserIntent);
+      viewport.removeEventListener('touchmove', onUserIntent);
+      viewport.removeEventListener('pointerdown', onUserIntent);
     };
-  }, [session]);
+  }, [session, measuredLayout, ui.zoom]);
 
   const zoom = ui.zoom || DEFAULT_NOTE_ZOOM;
 
@@ -711,7 +742,7 @@ function LoadedWorkspace({
             data-testid="note-zoom-sizer"
             className="mx-auto"
             style={{
-              width: Math.round(currentDims.width * zoom),
+              width: Math.round(effectiveDocWidth * zoom),
               minHeight: Math.round(minHeight * zoom),
             }}
           >
@@ -726,7 +757,7 @@ function LoadedWorkspace({
               data-zoom={zoom}
               className={`note-page page-canvas-surface relative ${docFormat === 'continuous' ? `page-style-${currentPage.style}` : 'note-page-paginated'} ${isPdfDoc ? 'note-page-pdf' : ''}`}
               style={{
-                width: currentDims.width,
+                width: effectiveDocWidth,
                 minHeight,
                 fontFamily: activeFont.family,
                 fontSize: `${fontSize}px`,
@@ -816,17 +847,6 @@ function LoadedWorkspace({
               <OverlayLayer session={session} />
             </div>
           </div>
-          {(docFormat === 'paginated' || isPdfDoc) && pullUpDelta > 15 && (
-            <div
-              data-testid="pull-up-indicator"
-              className="mx-auto mb-6 flex w-fit items-center gap-1.5 rounded-full border border-indigo-200 bg-indigo-50 px-3 py-1 text-xs font-medium text-indigo-700 shadow-sm"
-            >
-              <ArrowUp size={13} className={pullUpDelta >= PULL_UP_THRESHOLD_PX ? 'animate-bounce text-indigo-600' : 'text-slate-400'} />
-              {pullUpDelta >= PULL_UP_THRESHOLD_PX
-                ? `손을 떼면 동일한 규격(${currentPage.size})의 새 페이지가 아래에 생성됩니다`
-                : `위로 밀어 올려 새 페이지(${currentPage.size}) 추가`}
-            </div>
-          )}
         </div>
       </div>
       {active && <SelectionMenu session={session} />}

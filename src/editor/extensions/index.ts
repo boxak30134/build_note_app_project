@@ -13,6 +13,7 @@ import { TextColorMark } from './textColor';
 import { BlockId } from './blockId';
 import { NoteImage, PdfEmbed, InkTemplate } from './media';
 import { RubyText } from './rubyText';
+import { TabletMarkdownImeFix } from './tabletMarkdownImeFix';
 import { HistoryBridge } from './historyBridge';
 import type { CompositeHistoryManager } from '../../core/history/CompositeHistoryManager';
 
@@ -45,6 +46,7 @@ export function schemaExtensions(noteId: string): AnyExtension[] {
     FontSizeMark,
     TextColorMark,
     BlockId,
+    TabletMarkdownImeFix,
   ];
 }
 

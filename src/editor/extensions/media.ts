@@ -1,6 +1,7 @@
 import Image from '@tiptap/extension-image';
 import { Node, mergeAttributes } from '@tiptap/core';
 import { attachmentUrl } from '../../storage/opfs';
+import { useSettings } from '../../store/settingsStore';
 
 function isRelative(src: string) {
   return !!src && !/^(https?:|data:|blob:)/i.test(src);
@@ -64,6 +65,7 @@ export const InkTemplate = Node.create<NoteImageOptions>({
       width: { default: 595 },
       height: { default: 842 },
       page: { default: 1 },
+      pageId: { default: null },
       style: { default: 'plain' },
     };
   },
@@ -79,6 +81,7 @@ export const InkTemplate = Node.create<NoteImageOptions>({
             width: Number(e.getAttribute('data-width')) || 595,
             height: Number(e.getAttribute('data-height')) || 842,
             page: Number(e.getAttribute('data-page')) || 1,
+            pageId: e.getAttribute('data-page-id') || null,
             style: e.getAttribute('data-style') || 'plain',
           };
         },
@@ -95,6 +98,7 @@ export const InkTemplate = Node.create<NoteImageOptions>({
         'data-width': node.attrs.width,
         'data-height': node.attrs.height,
         'data-page': node.attrs.page,
+        'data-page-id': node.attrs.pageId ?? '',
         'data-style': node.attrs.style ?? 'plain',
       }),
       `손글씨 페이지 ${node.attrs.page}`,
@@ -102,7 +106,7 @@ export const InkTemplate = Node.create<NoteImageOptions>({
   },
 
   addNodeView() {
-    const noteId = this.options.noteId;
+    const noteId = (this.options as { noteId?: string })?.noteId ?? '';
     return ({ node }) => {
       const dom = document.createElement('div');
       dom.contentEditable = 'false';
@@ -117,6 +121,7 @@ export const InkTemplate = Node.create<NoteImageOptions>({
 
       const applyAttrs = (attrs: Record<string, unknown>) => {
         const pageNum = Number(attrs.page) || 1;
+        const pageId = typeof attrs.pageId === 'string' && attrs.pageId ? attrs.pageId : '';
         const width = Number(attrs.width) || 595;
         const height = Number(attrs.height) || 842;
         const style = String(attrs.style || 'plain');
@@ -127,6 +132,11 @@ export const InkTemplate = Node.create<NoteImageOptions>({
         dom.style.width = '100%';
         dom.id = `pdf-page-${pageNum}`;
         dom.dataset.page = String(pageNum);
+        if (pageId) {
+          dom.dataset.pageId = pageId;
+        } else {
+          delete dom.dataset.pageId;
+        }
         dom.dataset.src = src;
         dom.dataset.width = String(width);
         dom.dataset.height = String(height);
@@ -166,6 +176,18 @@ export const InkTemplate = Node.create<NoteImageOptions>({
           applyAttrs(updatedNode.attrs as Record<string, unknown>);
           return true;
         },
+        stopEvent: (event) => {
+          // REQPDFTEXTCURSORJUMPROOTCAUSE: 텍스트 모드(activeTool === 'none')일 때 ProseMirror selection jump 원천 차단
+          const type = event.type;
+          if (type === 'pointerdown' || type === 'mousedown' || type === 'touchstart' || type === 'click') {
+            const currentTool = useSettings.getState().tool;
+            if (currentTool === 'none') {
+              return true;
+            }
+          }
+          return false;
+        },
+        ignoreMutation: () => true,
       };
     };
   },
@@ -197,7 +219,7 @@ export const PdfEmbed = Node.create<NoteImageOptions>({
   },
 
   addNodeView() {
-    const noteId = this.options.noteId;
+    const noteId = (this.options as { noteId?: string })?.noteId ?? '';
     return ({ node }) => {
       const dom = document.createElement('div');
       dom.className = 'pdf-embed';

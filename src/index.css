@@ -137,59 +137,105 @@ body,
   word-break: keep-all;
   overflow-wrap: anywhere;
 }
-.prose-note > * + * {
+.prose-note > * + *,
+.ProseMirror > * + * {
   margin-top: 0.6em;
 }
-.prose-note h1 {
+.prose-note h1,
+.ProseMirror h1 {
   font-size: 1.9em;
   font-weight: 800;
   line-height: 1.3;
 }
-.prose-note h2 {
+.prose-note h2,
+.ProseMirror h2 {
   font-size: 1.5em;
   font-weight: 700;
 }
-.prose-note h3 {
+.prose-note h3,
+.ProseMirror h3 {
   font-size: 1.25em;
   font-weight: 700;
 }
-.prose-note ul {
+.prose-note h4,
+.ProseMirror h4 {
+  font-size: 1.1em;
+  font-weight: 700;
+}
+.prose-note h5,
+.ProseMirror h5 {
+  font-size: 1.0em;
+  font-weight: 700;
+}
+.prose-note h6,
+.ProseMirror h6 {
+  font-size: 0.9em;
+  font-weight: 700;
+  color: #64748b;
+}
+.prose-note strong,
+.ProseMirror strong,
+.prose-note b,
+.ProseMirror b {
+  font-weight: 700;
+}
+.prose-note em,
+.ProseMirror em,
+.prose-note i,
+.ProseMirror i {
+  font-style: italic;
+}
+.prose-note s,
+.ProseMirror s,
+.prose-note del,
+.ProseMirror del {
+  text-decoration: line-through;
+}
+.prose-note ul,
+.ProseMirror ul {
   list-style: disc;
   padding-left: 1.5em;
 }
-.prose-note ol {
+.prose-note ol,
+.ProseMirror ol {
   list-style: decimal;
   padding-left: 1.5em;
 }
-.prose-note blockquote {
+.prose-note blockquote,
+.ProseMirror blockquote {
   border-left: 4px solid #a7f3d0;
   background: #f0fdf4;
   padding: 0.4em 1em;
   border-radius: 0 8px 8px 0;
   color: #334155;
 }
-.prose-note code {
+.prose-note code,
+.ProseMirror code {
   background: #f1f5f9;
   padding: 0.1em 0.35em;
   border-radius: 4px;
   font-size: 0.9em;
 }
-.prose-note pre {
+.prose-note pre,
+.ProseMirror pre {
   background: #0f172a;
   color: #e2e8f0;
   padding: 0.8em 1em;
   border-radius: 8px;
   overflow-x: auto;
 }
-.prose-note pre code {
+.prose-note pre code,
+.ProseMirror pre code {
   background: none;
   color: inherit;
 }
-.prose-note a {
+.prose-note a,
+.ProseMirror a {
   color: #4f46e5;
   text-decoration: underline;
 }
-.prose-note hr {
+.prose-note hr,
+.ProseMirror hr {
   border-color: #e2e8f0;
 }
 .prose-note table {

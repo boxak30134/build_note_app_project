@@ -8,7 +8,7 @@ import { UnencodableCharError } from '../core/codec/textCodec';
 import { validateImageFiles, sanitizeDocumentTitle } from '../core/files/validation';
 import { clampBubbleText } from '../core/bubble/limits';
 import { plainTextOf } from '../core/doc/blocks';
-import { buildExtensions } from '../editor/extensions';
+import { buildExtensions, markdownToJson } from '../editor/extensions';
 import { ASSIGN_IDS_META } from '../editor/extensions/blockId';
 import { db, uid, type NoteRecord } from '../storage/db';
 import { drafts } from '../storage/drafts';
@@ -35,6 +35,12 @@ import {
   PDF_PAGE_GAP_PX,
   type NotePage,
 } from '../core/page/pageTypes';
+import { getMeasuredPageLayout } from '../core/layout/pageLayout';
+import {
+  createInitialNavState,
+  onNavigateRequest,
+  type NavState,
+} from '../core/navigation/pageNavigation';
 
 const sessions = new Map<string, NoteSession>();
 
@@ -83,6 +89,7 @@ export class NoteSession {
   record: NoteRecord;
   pageEl: HTMLElement | null = null;
   scrollEl: HTMLElement | null = null;
+  navState: NavState = createInitialNavState(0);
 
   private cleanDoc: PMNode | null = null;
   private cleanStrokes = '[]';
@@ -123,8 +130,16 @@ export class NoteSession {
       external: null,
     });
 
+    let rawContent = record.content;
+    if (typeof rawContent === 'string') {
+      rawContent = markdownToJson(rawContent);
+    } else if (!rawContent && record.markdown) {
+      rawContent = markdownToJson(record.markdown);
+    }
+
     const normalizedInitialContent = normalizePdfNoteContent(
-      record.content as { type?: string; content?: Array<{ type?: string; attrs?: Record<string, unknown> }> },
+      rawContent as { type?: string; content?: Array<{ type?: string; attrs?: Record<string, unknown> }> },
+      initialPages,
     );
     this.host.className = 'editor-host';
     this.editor = new Editor({
@@ -262,6 +277,59 @@ export class NoteSession {
 
   // ---------- pages & fonts ----------
   /**
+   * PDF 문서 및 일반 문서의 페이지 수 및 순서 불변식 검사
+   */
+  assertPageInvariant(): boolean {
+    const isDev = Boolean(import.meta.env?.DEV || import.meta.env?.MODE === 'test');
+    if (!isDev) return true;
+
+    if (!this.editor || this.editor.isDestroyed) return true;
+
+    const templateNodes: PMNode[] = [];
+    this.editor.state.doc.descendants((node) => {
+      if (node.type.name === 'inkTemplate') {
+        templateNodes.push(node);
+        return false;
+      }
+      return true;
+    });
+
+    if (templateNodes.length === 0) return true;
+
+    const uiCount = this.ui.pages.length;
+    const docCount = templateNodes.length;
+
+    let hasOrderViolation = false;
+    let hasIdViolation = false;
+    for (let i = 0; i < docCount; i++) {
+      if (templateNodes[i].attrs.page !== i + 1) {
+        hasOrderViolation = true;
+        break;
+      }
+      const nodePageId = templateNodes[i].attrs.pageId;
+      if (nodePageId && this.ui.pages[i] && this.ui.pages[i].id !== nodePageId) {
+        hasIdViolation = true;
+        break;
+      }
+    }
+
+    if (uiCount !== docCount || hasOrderViolation || hasIdViolation) {
+      console.error('[PAGE_INVARIANT_VIOLATION]', {
+        uiPagesLength: uiCount,
+        docTemplateCount: docCount,
+        hasOrderViolation,
+        hasIdViolation,
+        pages: this.ui.pages,
+        templates: templateNodes.map((n) => n.attrs),
+        stack: new Error().stack,
+      });
+      return false;
+    }
+
+    return true;
+  }
+
+  /**
    * 현재 페이지 바로 밑에 새 페이지를 추가한다.
    * 현재 페이지와 동일한 규격(size, orientation) 및 동일한 스타일(style)로 생성된다.
    */
@@ -302,6 +370,7 @@ export class NoteSession {
           width: newWidth,
           height: newHeight,
           page: clampedTarget + 2,
+          pageId: insertedPage.id,
           style: insertedPage.style,
         });
 
@@ -321,14 +390,24 @@ export class NoteSession {
         });
 
         this.editor.view.dispatch(tr);
-        this.record = { ...this.record, content: this.editor.getJSON(), pages };
+        this.record = {
+          ...this.record,
+          content: this.editor.view.state.doc.toJSON(),
+          pages,
+        };
+      } else {
+        this.record = { ...this.record, pages };
       }
+    } else {
+      this.record = { ...this.record, pages };
     }
 
     this.patch({ pages, currentPageIndex: insertedIndex });
     this.scheduleDirtyCheck();
-    if (this.scrollEl && this.pageEl) {
-      setTimeout(() => this.scrollToPage(insertedIndex), 30);
+    this.assertPageInvariant();
+
+    if (this.scrollEl) {
+      setTimeout(() => this.navigateToPage(insertedIndex), 30);
     }
 
     if (recordHistory) {
@@ -375,6 +454,7 @@ export class NoteSession {
           width: dims.width,
           height: dims.height,
           page: clampedIndex + 1,
+          pageId: page.id,
           style: page.style,
         });
         const insertPos = clampedIndex === 0 || !refEntry ? 0 : refEntry.pos + refEntry.node.nodeSize;
@@ -391,14 +471,19 @@ export class NoteSession {
           return true;
         });
         this.editor.view.dispatch(tr);
-        this.record = { ...this.record, content: this.editor.getJSON(), pages: nextPages };
+        this.record = { ...this.record, content: this.editor.view.state.doc.toJSON(), pages: nextPages };
+      } else {
+        this.record = { ...this.record, pages: nextPages };
       }
+    } else {
+      this.record = { ...this.record, pages: nextPages };
     }
 
     this.patch({ pages: nextPages, currentPageIndex: clampedIndex });
     this.scheduleDirtyCheck();
-    if (this.scrollEl && this.pageEl) {
-      setTimeout(() => this.scrollToPage(clampedIndex), 30);
+    this.assertPageInvariant();
+    if (this.scrollEl) {
+      setTimeout(() => this.navigateToPage(clampedIndex), 30);
     }
   }
 
@@ -445,12 +530,13 @@ export class NoteSession {
           return true;
         });
         this.editor.view.dispatch(tr);
-        this.record = { ...this.record, content: this.editor.getJSON() };
+        this.record = { ...this.record, content: this.editor.view.state.doc.toJSON() };
       }
     }
 
     // 2. 페이지 배열 갱신
     const nextPages = this.ui.pages.filter((_, idx) => idx !== clampedIndex);
+    this.record = { ...this.record, pages: nextPages };
 
     // 3. 해당 페이지의 스트로크 및 텍스트 정리
     const currentWidth = getPageDimensions(targetPage.size, targetPage.orientation).width;
@@ -499,8 +585,9 @@ export class NoteSession {
       currentPageIndex: nextCurrentIndex,
     });
     this.scheduleDirtyCheck();
-    if (this.scrollEl && this.pageEl) {
-      setTimeout(() => this.scrollToPage(nextCurrentIndex), 30);
+    this.assertPageInvariant();
+    if (this.scrollEl) {
+      setTimeout(() => this.navigateToPage(nextCurrentIndex), 30);
     }
 
     // 6. 단일 원자적 페이지 삭제 커맨드로 통합 히스토리에 기록
@@ -564,6 +651,7 @@ export class NoteSession {
         const newNode = inkTemplateType.create({
           ...templateAttrs,
           page: pageIndex + 1,
+          pageId: targetPage.id,
         });
         const insertPos = pageIndex === 0 || !refEntry ? 0 : refEntry.pos + refEntry.node.nodeSize;
         let tr = this.editor.state.tr.insert(insertPos, newNode);
@@ -579,8 +667,12 @@ export class NoteSession {
           return true;
         });
         this.editor.view.dispatch(tr);
-        this.record = { ...this.record, content: this.editor.getJSON(), pages: nextPages };
+        this.record = { ...this.record, content: this.editor.view.state.doc.toJSON(), pages: nextPages };
+      } else {
+        this.record = { ...this.record, pages: nextPages };
       }
+    } else {
+      this.record = { ...this.record, pages: nextPages };
     }
 
     // 3. 후속 페이지 스트로크들의 Y좌표를 원래 위치로 복귀 (하향 시프트)
@@ -603,8 +695,9 @@ export class NoteSession {
       currentPageIndex: pageIndex,
     });
     this.scheduleDirtyCheck();
-    if (this.scrollEl && this.pageEl) {
-      setTimeout(() => this.scrollToPage(pageIndex), 30);
+    this.assertPageInvariant();
+    if (this.scrollEl) {
+      setTimeout(() => this.navigateToPage(pageIndex), 30);
     }
   }
 
@@ -826,22 +919,38 @@ export class NoteSession {
 
   setCurrentPageIndex(index: number) {
     const clamped = Math.max(0, Math.min(this.ui.pages.length - 1, index));
+    this.navState = { ...this.navState, visible: clamped };
     if (clamped !== this.ui.currentPageIndex) {
       this.patch({ currentPageIndex: clamped });
     }
   }
 
-  /** 특정 페이지로 스크롤 없이 즉시/부드럽게 이동 */
-  scrollToPage(index: number) {
+  /**
+   * 명시적 페이지 이동 요청 (프로그램 스크롤 단 1회 수행 및 목표 페이지 하이라이트 고정)
+   */
+  navigateToPage(index: number) {
     const maxPages = Math.max(1, this.ui.pages.length);
     const clamped = Math.max(0, Math.min(maxPages - 1, index));
-    this.setCurrentPageIndex(clamped);
+
+    // 내비게이션 상태 기계 갱신 (target = clamped, programmatic = true)
+    this.navState = onNavigateRequest(this.navState, clamped);
+    this.patch({ currentPageIndex: clamped });
 
     const scrollEl = this.scrollEl;
-    const pageEl = this.pageEl;
-    if (!scrollEl || !pageEl) return;
+    if (!scrollEl) return;
 
-    // 1. PDF 템플릿 페이지 요소 검색 (1-based page: clamped + 1)
+    // DOM 실측 기반 offset을 목표로 단 1회 스크롤
+    const pageEl = this.pageEl || scrollEl;
+    const zoom = this.ui.zoom || 1;
+    const measured = getMeasuredPageLayout(pageEl, zoom);
+
+    if (measured.offsets.length > clamped) {
+      const targetY = measured.offsets[clamped] * zoom;
+      scrollEl.scrollTo({ top: targetY, behavior: 'smooth' });
+      return;
+    }
+
+    // DOM 실측이 아직 준비되지 않은 경우 폴백
     const pdfPage = pageEl.querySelector(
       `[data-ink-template][data-page="${clamped + 1}"], #pdf-page-${clamped + 1}`
     ) as HTMLElement | null;
@@ -850,15 +959,12 @@ export class NoteSession {
       return;
     }
 
-    // 2. 분리형 페이지 시트 검색 ([data-page-index="..."])
     const sheet = pageEl.querySelector(`[data-page-index="${clamped}"]`) as HTMLElement | null;
     if (sheet) {
       sheet.scrollIntoView({ behavior: 'smooth', block: 'start' });
       return;
     }
 
-    // 3. 페이지별 yOffset 공식(computePdfPageLayout) 기반 스크롤 폴백
-    const zoom = this.ui.zoom || 1;
     const currentPage = this.ui.pages[clamped] ?? this.ui.pages[0];
     const containerWidth = currentPage ? getPageDimensions(currentPage.size, currentPage.orientation).width : 840;
     const layout = computePdfPageLayout(
@@ -867,6 +973,11 @@ export class NoteSession {
     );
     const targetY = (layout.yOffsets[clamped] ?? 0) * zoom;
     scrollEl.scrollTo({ top: targetY, behavior: 'smooth' });
+  }
+
+  /** 특정 페이지로 스크롤 없이 즉시/부드럽게 이동 */
+  scrollToPage(index: number) {
+    this.navigateToPage(index);
   }
 
   /** 노트 영역 확대/축소 배율 설정 (0.5x ~ 3.0x) */
@@ -1166,12 +1277,25 @@ export class NoteSession {
 
   /**
    * 드래그 선택 영역 기반 즉각 오프라인 연관 문서 추천 (< 10ms)
+   * - range가 주어지면 에디터 포커스가 변경되어 selection.empty가 되더라도 저장된 범위를 활용합니다.
    */
-  recommendByCurrentSelection(topK = 5): { text: string; from: number; to: number; recommendations: LinkRecommendation[] } {
-    const { from, to, empty } = this.editor.state.selection;
-    if (empty) return { text: '', from, to, recommendations: [] };
-    const text = this.editor.state.doc.textBetween(from, to, ' ').trim();
-    if (!text) return { text: '', from, to, recommendations: [] };
+  recommendByCurrentSelection(
+    topK = 5,
+    range?: { from: number; to: number; text: string },
+  ): { text: string; from: number; to: number; recommendations: LinkRecommendation[] } {
+    let from = this.editor.state.selection.from;
+    let to = this.editor.state.selection.to;
+    let empty = this.editor.state.selection.empty;
+    let text = !empty ? this.editor.state.doc.textBetween(from, to, ' ').trim() : '';
+
+    if (!text && range && range.text) {
+      from = range.from;
+      to = range.to;
+      text = range.text.trim();
+      empty = false;
+    }
+
+    if (empty || !text) return { text: '', from, to, recommendations: [] };
     return {
       text,
       from,

@@ -15,7 +15,7 @@ describe('Gemini API & Stream Diagnostics Spec', () => {
     });
 
     expect(params.model).toBe('gemini-3.8-flash');
-    expect(params.contents[0].parts[0]).toEqual({ text: '안녕하세요. 짧게 답변해주세요.' });
+    expect(params.contents[0]?.parts?.[0]).toEqual({ text: '안녕하세요. 짧게 답변해주세요.' });
     expect(params.config.temperature).toBe(1.0);
     expect(params.config.thinkingConfig).toEqual({ thinkingLevel: 'low' });
   });

@@ -112,12 +112,27 @@ export function SelectionMenu({ session }: { session: NoteSession }) {
         const surroundingSentence = `${session.record.title} ${contextSnippet}`.trim();
 
         if (selectedText) {
-          setSelectionRange({
+          const sRange = {
             from: selection.from,
             to: selection.to,
             selectedText,
             surroundingSentence,
             documentTags,
+          };
+          setSelectionRange(sRange);
+
+          console.log('[LINK_SELECTION_DIAGNOSTIC]', {
+            userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : 'unknown',
+            activeTool: session.ui.readOnly ? 'readOnly' : (useSettings.getState().tool),
+            selectionConstructor: selection.constructor.name,
+            selectionEmpty: selection.empty,
+            selectionFrom: selection.from,
+            selectionTo: selection.to,
+            selectedText,
+            selectedTextLength: selectedText.length,
+            documentTextLength: docSize,
+            activeElement: document.activeElement ? `${document.activeElement.tagName}.${document.activeElement.className}` : 'none',
+            selectionEventType: 'compute',
           });
         } else {
           setSelectionRange(null);
@@ -279,8 +294,12 @@ export function SelectionMenu({ session }: { session: NoteSession }) {
             data-testid="instant-doc-link-btn"
             className="flex items-center gap-1 rounded-lg px-2 py-1 text-xs font-medium text-indigo-700 hover:bg-indigo-50"
             title="오프라인 초저지연(BM25+TF-IDF)으로 상위 5개 연관 문서를 즉시 찾아 위키링크로 연결합니다"
+            onPointerDown={(e) => e.preventDefault()}
             onClick={() => {
-              const res = session.recommendByCurrentSelection(5);
+              const range = selectionRange
+                ? { from: selectionRange.from, to: selectionRange.to, text: selectionRange.selectedText }
+                : undefined;
+              const res = session.recommendByCurrentSelection(5, range);
               setDocLinkState(res);
               setEditTranslationOpen(false);
             }}
@@ -289,8 +308,10 @@ export function SelectionMenu({ session }: { session: NoteSession }) {
           </button>
           <button
             type="button"
+            data-testid="instant-link-suggest-btn"
             className="flex items-center gap-1 rounded-lg px-2 py-1 text-xs hover:bg-emerald-50"
             title="선택한 텍스트와 연관된 문서 단락을 백그라운드에서 찾습니다"
+            onPointerDown={(e) => e.preventDefault()}
             onClick={() => {
               session.requestLinkSuggestions();
               session.editor.commands.setTextSelection(session.editor.state.selection.to);
@@ -301,6 +322,7 @@ export function SelectionMenu({ session }: { session: NoteSession }) {
           <button
             type="button"
             className="flex items-center gap-1 rounded-lg px-2 py-1 text-xs hover:bg-amber-50"
+            onPointerDown={(e) => e.preventDefault()}
             onClick={() => session.createAnnotation()}
           >
             <MessageSquare size={13} /> 💬 말풍선

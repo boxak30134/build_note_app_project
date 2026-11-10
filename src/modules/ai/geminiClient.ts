@@ -53,6 +53,7 @@ export interface GeminiStreamChunkLike {
   candidates?: Array<{
     content?: {
       parts?: Array<{ text?: string; thought?: boolean }>;
+      role?: string;
     };
   }>;
 }
