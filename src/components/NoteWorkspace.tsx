@@ -10,6 +10,7 @@ import { cachedBounds } from '../canvas/render';
 import { OverlayLayer } from './OverlayLayer';
 import { TextObjectLayer } from './TextObjectLayer';
 import { SelectionMenu } from './SelectionMenu';
+import { MarkdownAccessoryBar } from './MarkdownAccessoryBar';
 import { WikiPreview, openWikiTarget } from './WikiPreview';
 import {
   clampNoteZoom,
@@ -850,6 +851,7 @@ function LoadedWorkspace({
         </div>
       </div>
       {active && <SelectionMenu session={session} />}
+      {active && <MarkdownAccessoryBar session={session} />}
       {active && hoverLink && <WikiPreview reference={hoverLink} onHoverChange={(h) => !h && setHoverLink(null)} />}
     </div>
   );

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, afterAll } from 'vitest';
 import { Editor } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import { setDeviceOverrideForTest, isTouchDevice } from '../src/core/utils/device';
@@ -29,6 +29,10 @@ describe('안드로이드 태블릿/가상 키보드 마크다운 IME 보정 및
   afterEach(() => {
     editor.destroy();
     container.remove();
+    setDeviceOverrideForTest(null);
+  });
+
+  afterAll(() => {
     setDeviceOverrideForTest(null);
   });
 

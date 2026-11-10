@@ -217,17 +217,33 @@ export const TabletMarkdownImeFix = Extension.create({
   name: 'tabletMarkdownImeFix',
 
   addProseMirrorPlugins() {
-    let evalTimer: ReturnType<typeof setTimeout> | null = null;
+    let rafId: number | null = null;
+    let fallbackTimer: ReturnType<typeof setTimeout> | null = null;
 
     const scheduleEval = (view: EditorView) => {
       if (!isTouchDevice()) return;
-      if (evalTimer) clearTimeout(evalTimer);
-      evalTimer = setTimeout(() => {
-        evalTimer = null;
+      if (rafId !== null && typeof cancelAnimationFrame !== 'undefined') {
+        cancelAnimationFrame(rafId);
+        rafId = null;
+      }
+      if (fallbackTimer !== null) {
+        clearTimeout(fallbackTimer);
+        fallbackTimer = null;
+      }
+
+      const run = () => {
+        rafId = null;
+        fallbackTimer = null;
         if (!view.isDestroyed) {
           evaluateMarkdownIme(view);
         }
-      }, 16);
+      };
+
+      if (typeof requestAnimationFrame !== 'undefined') {
+        rafId = requestAnimationFrame(run);
+      } else {
+        fallbackTimer = setTimeout(run, 16);
+      }
     };
 
     return [
@@ -243,7 +259,9 @@ export const TabletMarkdownImeFix = Extension.create({
               if (
                 event.key === ' ' ||
                 event.key === 'Spacebar' ||
+                event.key === 'Enter' ||
                 event.keyCode === 32 ||
+                event.keyCode === 13 ||
                 event.keyCode === 229 // Android IME key code for composition input
               ) {
                 scheduleEval(view);
@@ -251,7 +269,14 @@ export const TabletMarkdownImeFix = Extension.create({
               return false;
             },
             beforeinput(view, event: InputEvent) {
-              if (event.data === ' ' || event.inputType === 'insertText') {
+              if (
+                event.data === ' ' ||
+                event.data === '\n' ||
+                event.inputType === 'insertText' ||
+                event.inputType === 'insertCompositionText' ||
+                event.inputType === 'insertLineBreak' ||
+                event.inputType === 'insertParagraph'
+              ) {
                 scheduleEval(view);
               }
               return false;

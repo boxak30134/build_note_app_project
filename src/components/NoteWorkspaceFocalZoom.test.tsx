@@ -5,6 +5,8 @@ import { NoteWorkspace } from './NoteWorkspace';
 import * as noteSessionMod from '../session/NoteSession';
 import { useSessions } from '../store/sessionStore';
 import { useSettings } from '../store/settingsStore';
+import { resetGlobalPalmState } from '../core/android/androidDeployment';
+import { setDeviceOverrideForTest } from '../core/utils/device';
 import type { NoteRecord } from '../storage/db';
 
 vi.mock('../search/searchClient', () => ({
@@ -36,6 +38,8 @@ describe('NoteWorkspace Pinch-to-Zoom Focal Point & Touch Scroll', () => {
 
   beforeEach(() => {
     cleanup();
+    resetGlobalPalmState();
+    setDeviceOverrideForTest(null);
     useSettings.setState({
       docFormat: 'continuous',
       fontSize: 16,
@@ -57,6 +61,8 @@ describe('NoteWorkspace Pinch-to-Zoom Focal Point & Touch Scroll', () => {
 
   afterEach(() => {
     cleanup();
+    resetGlobalPalmState();
+    setDeviceOverrideForTest(null);
     session?.destroy();
     vi.restoreAllMocks();
   });

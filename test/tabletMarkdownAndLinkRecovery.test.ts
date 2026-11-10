@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from 'vitest';
 import { Editor } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import { setDeviceOverrideForTest } from '../src/core/utils/device';
@@ -33,6 +33,10 @@ describe('REQ_TABLET_MARKDOWN_AND_LINK_RECOVERY: 태블릿 Markdown 렌더링 �
   afterEach(() => {
     editor.destroy();
     container.remove();
+    setDeviceOverrideForTest(null);
+  });
+
+  afterAll(() => {
     setDeviceOverrideForTest(null);
   });
 

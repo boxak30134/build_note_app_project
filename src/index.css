@@ -595,3 +595,28 @@ body,
   color: #334155;
   line-height: 1.5;
 }
+
+/* 태블릿/모바일 가상 키보드 마크다운 보조 툴바 */
+.markdown-accessory-bar {
+  animation: slideUpAccessory 0.15s ease-out;
+  touch-action: pan-x;
+}
+
+@keyframes slideUpAccessory {
+  from {
+    transform: translateY(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
