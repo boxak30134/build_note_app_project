@@ -82,7 +82,7 @@ describe('S-Pen 필기 ↔ 손가락 제스처 격리', () => {
   it('S-Pen 으로 상하좌우 획을 그어도 뷰포트 스크롤·줌이 전혀 변하지 않는다', async () => {
     render(<NoteWorkspace noteId={noteId} active={true} />);
     const viewport = await screen.findByTestId('note-viewport');
-    const pageEl = viewport.querySelector<HTMLElement>('.page-canvas-surface') ?? viewport;
+    const pageEl = await screen.findByTestId('note-page');
     viewport.scrollTop = 300;
     viewport.scrollLeft = 20;
 
@@ -98,6 +98,7 @@ describe('S-Pen 필기 ↔ 손가락 제스처 격리', () => {
   });
 
   it('손가락 1개 드래그는 이동량만큼 뷰포트를 패닝한다', async () => {
+    resetGlobalPalmState();
     render(<NoteWorkspace noteId={noteId} active={true} />);
     const viewport = await screen.findByTestId('note-viewport');
     viewport.scrollTop = 300;
@@ -113,7 +114,7 @@ describe('S-Pen 필기 ↔ 손가락 제스처 격리', () => {
   it('필기 중 손바닥(touch)이 닿아도 핀치 줌·패닝으로 오인되지 않는다 (Palm Rejection)', async () => {
     render(<NoteWorkspace noteId={noteId} active={true} />);
     const viewport = await screen.findByTestId('note-viewport');
-    const pageEl = viewport.querySelector<HTMLElement>('.page-canvas-surface') ?? viewport;
+    const pageEl = await screen.findByTestId('note-page');
     viewport.scrollTop = 300;
 
     firePointer(pageEl, 'pointerdown', { pointerId: 7, pointerType: 'pen', clientX: 100, clientY: 100 });

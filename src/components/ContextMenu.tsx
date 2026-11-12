@@ -41,7 +41,10 @@ export function ContextMenu() {
   if (!open || !noteId) return null;
   const session = getSession(noteId);
   if (!session) return null;
-  const hasTextSel = !session.editor.state.selection.empty;
+  const selText = !session.editor.state.selection.empty
+    ? session.editor.state.doc.textBetween(session.editor.state.selection.from, session.editor.state.selection.to, ' ').trim()
+    : '';
+  const hasTextSel = selText.length > 0;
   const hasLasso = session.ui.lassoIds.length > 0;
 
   const run = (fn: () => void | Promise<void>) => () => {
@@ -51,6 +54,7 @@ export function ContextMenu() {
 
   const copy = async () => {
     if (hasLasso) return lassoCopy(session);
+    if (!hasTextSel) return toast.info('복사할 선택 영역이 없습니다.');
     const { from, to } = session.editor.state.selection;
     const text = session.editor.state.doc.textBetween(from, to, '\n');
     if (!text) return toast.info('복사할 선택 영역이 없습니다.');
@@ -95,8 +99,13 @@ export function ContextMenu() {
       <button
         className="menu-item"
         onClick={run(() => {
-          if (hasTextSel || hasLasso) session.createAnnotation();
-          else session.createAnnotation(pagePoint ?? undefined);
+          if (hasTextSel || hasLasso) {
+            session.createAnnotation();
+          } else if (pagePoint) {
+            session.createAnnotation(pagePoint);
+          } else {
+            session.createAnnotation();
+          }
         })}
       >
         <MessageSquare size={14} /> 말풍선 주석 달기
