@@ -1,4 +1,4 @@
-import { useEffect, useState, useSyncExternalStore } from 'react';
+import { useEffect, useState, useRef, useSyncExternalStore } from 'react';
 import { useFloating, autoUpdate, offset, flip, shift, useDismiss, useInteractions, FloatingPortal } from '@floating-ui/react';
 import { motion } from 'framer-motion';
 import { Move, Copy, Scissors, Trash2, MessageSquare, Loader2, Sparkles, X, Quote, Link2 } from 'lucide-react';
@@ -39,6 +39,9 @@ function useLayoutTick(session: NoteSession): number {
 }
 
 function pinPosition(session: NoteSession, a: Annotation): { x: number; y: number } | null {
+  if (a.customPosition) {
+    return a.customPosition;
+  }
   const page = session.pageEl;
   if (!page) return null;
   if (a.anchor.type === 'text') {
@@ -60,9 +63,22 @@ function pinPosition(session: NoteSession, a: Annotation): { x: number; y: numbe
 /** [Layer 3] 플로팅 핀(💬)·말풍선·올가미 액션바·인용 추천 배지 */
 export function OverlayLayer({ session }: { session: NoteSession }) {
   useLayoutTick(session);
-  const ui = useSessionUI(session.id);
+  const storeUI = useSessionUI(session.id);
+  const ui = session?.ui ?? storeUI;
   const strokes = useSyncExternalStore(session.strokes.subscribe, session.strokes.getAll);
   const [pinEls, setPinEls] = useState<Record<string, HTMLElement | null>>({});
+  const [dragPin, setDragPin] = useState<{ id: string; x: number; y: number } | null>(null);
+  const dragStartRef = useRef<{
+    id: string;
+    startX: number;
+    startY: number;
+    initialPinX: number;
+    initialPinY: number;
+    currentPinX: number;
+    currentPinY: number;
+    hasMoved: boolean;
+  } | null>(null);
+  const justDraggedRef = useRef(false);
   void strokes;
 
   const selBox = ui.lassoIds.length ? session.strokes.boundsOf(ui.lassoIds) : null;
@@ -70,21 +86,103 @@ export function OverlayLayer({ session }: { session: NoteSession }) {
   return (
     <div className="pointer-events-none absolute inset-0 z-20">
       {ui.annotations.map((a) => {
-        const p = pinPosition(session, a);
-        if (!p) return null;
+        const basePos = pinPosition(session, a);
+        if (!basePos) return null;
+        const p = dragPin && dragPin.id === a.id ? { x: dragPin.x, y: dragPin.y } : basePos;
         const open = ui.openAnnotationId === a.id;
+        const isDragging = dragPin?.id === a.id;
+
+        const handlePointerDown = (e: React.PointerEvent<HTMLButtonElement>) => {
+          e.stopPropagation();
+          if (typeof (e.currentTarget as HTMLElement).setPointerCapture === 'function') {
+            try {
+              (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+            } catch {}
+          }
+          dragStartRef.current = {
+            id: a.id,
+            startX: e.clientX,
+            startY: e.clientY,
+            initialPinX: p.x,
+            initialPinY: p.y,
+            currentPinX: p.x,
+            currentPinY: p.y,
+            hasMoved: false,
+          };
+          justDraggedRef.current = false;
+        };
+
+        const handlePointerMove = (e: React.PointerEvent<HTMLButtonElement>) => {
+          if (!dragStartRef.current || dragStartRef.current.id !== a.id) return;
+          e.stopPropagation();
+          const zoom = session.ui.zoom || 1;
+          const dx = (e.clientX - dragStartRef.current.startX) / zoom;
+          const dy = (e.clientY - dragStartRef.current.startY) / zoom;
+          if (!dragStartRef.current.hasMoved && Math.hypot(dx, dy) >= 4) {
+            dragStartRef.current.hasMoved = true;
+          }
+          if (dragStartRef.current.hasMoved) {
+            const newX = Math.max(0, dragStartRef.current.initialPinX + dx);
+            const newY = Math.max(0, dragStartRef.current.initialPinY + dy);
+            dragStartRef.current.currentPinX = newX;
+            dragStartRef.current.currentPinY = newY;
+            setDragPin({ id: a.id, x: newX, y: newY });
+          }
+        };
+
+        const handlePointerUp = (e: React.PointerEvent<HTMLButtonElement>) => {
+          if (!dragStartRef.current || dragStartRef.current.id !== a.id) return;
+          e.stopPropagation();
+          if (typeof (e.currentTarget as HTMLElement).releasePointerCapture === 'function') {
+            try {
+              (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+            } catch {}
+          }
+          if (dragStartRef.current.hasMoved) {
+            justDraggedRef.current = true;
+            session.updateAnnotation(a.id, {
+              customPosition: {
+                x: Math.round(dragStartRef.current.currentPinX),
+                y: Math.round(dragStartRef.current.currentPinY),
+              },
+            });
+          }
+          dragStartRef.current = null;
+          setDragPin(null);
+        };
+
+        const handlePointerCancel = (e: React.PointerEvent<HTMLButtonElement>) => {
+          e.stopPropagation();
+          dragStartRef.current = null;
+          setDragPin(null);
+        };
+
         return (
           <button
             key={a.id}
             data-overlay
             data-pin
+            data-annotation-id={a.id}
             ref={(el) => {
               if (pinEls[a.id] !== el && el) setPinEls((m) => (m[a.id] === el ? m : { ...m, [a.id]: el }));
             }}
-            className={`pin pointer-events-auto absolute ${open ? 'pin-open' : ''}`}
+            className={`pin pointer-events-auto absolute ${open ? 'pin-open' : ''} ${
+              isDragging ? 'cursor-grabbing shadow-lg scale-110' : 'cursor-grab hover:scale-105'
+            } transition-transform select-none touch-none`}
             style={{ left: p.x, top: p.y }}
-            title={a.body ? snippet(a.body, 80) : '말풍선 주석'}
-            onClick={() => session.patch({ openAnnotationId: open ? null : a.id })}
+            title={a.body ? snippet(a.body, 80) : '말풍선 주석 (드래그하여 이동)'}
+            onPointerDown={handlePointerDown}
+            onPointerMove={handlePointerMove}
+            onPointerUp={handlePointerUp}
+            onPointerCancel={handlePointerCancel}
+            onClick={(e) => {
+              e.stopPropagation();
+              if (justDraggedRef.current) {
+                justDraggedRef.current = false;
+                return;
+              }
+              session.patch({ openAnnotationId: open ? null : a.id });
+            }}
           >
             💬
           </button>
@@ -99,7 +197,7 @@ export function OverlayLayer({ session }: { session: NoteSession }) {
 
       {selBox && <LassoActionBar session={session} selBox={selBox} />}
 
-      {ui.citations.map((c) => (
+      {ui.citations?.map((c) => (
         <CitationBadge key={c.id} session={session} citation={c} open={ui.openCitationId === c.id} />
       ))}
     </div>
@@ -108,7 +206,8 @@ export function OverlayLayer({ session }: { session: NoteSession }) {
 
 /** [Layer 3] 올가미 선택 영역 바로 위에 위치하며 다른 손글씨(z-30)보다 앞(z-50)에 표시되는 액션 바 */
 function LassoActionBar({ session, selBox }: { session: NoteSession; selBox: AABB }) {
-  const ui = useSessionUI(session.id);
+  const storeUI = useSessionUI(session.id);
+  const ui = session?.ui ?? storeUI;
   const page = session.pageEl;
   const zoom = session.ui.zoom || 1;
 

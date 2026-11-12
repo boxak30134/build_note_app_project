@@ -1155,20 +1155,29 @@ export class NoteSession {
   /** 텍스트 선택 → 텍스트 앵커, 올가미 선택 → 스트로크 앵커, 그 외 → 지점 앵커 */
   createAnnotation(point?: { x: number; y: number }, recordHistory = true): string {
     const id = uid('ann');
-    const { selection } = this.editor.state;
     let anchor: AnnotationAnchor;
-    if (!selection.empty && !point) {
-      const quote = this.editor.state.doc.textBetween(selection.from, selection.to, ' ');
-      this.editor.chain().focus().setMark('annotation', { id }).run();
-      anchor = { type: 'text', quote };
-    } else if (this.ui.lassoIds.length > 0 && !point) {
+
+    if (point) {
+      anchor = { type: 'point', x: point.x, y: point.y };
+    } else if (this.ui.lassoIds.length > 0) {
       const box = this.strokes.boundsOf(this.ui.lassoIds)!;
       anchor = { type: 'strokes', strokeIds: this.ui.lassoIds.slice(), fallbackBox: box };
       this.patch({ lassoIds: [], moveMode: false });
     } else {
-      const p = point ?? this.caretPoint();
-      anchor = { type: 'point', x: p.x, y: p.y };
+      const { selection } = this.editor.state;
+      const quote = !selection.empty
+        ? this.editor.state.doc.textBetween(selection.from, selection.to, ' ').trim()
+        : '';
+      if (quote.length > 0) {
+        // 실제 텍스트가 드래그 선택된 경우에만 텍스트 마크 적용 (스크롤 튐 방지를 위해 focus() 제외)
+        this.editor.chain().setMark('annotation', { id }).run();
+        anchor = { type: 'text', quote };
+      } else {
+        const p = this.viewportCenterPoint();
+        anchor = { type: 'point', x: p.x, y: p.y };
+      }
     }
+
     const newAnn: Annotation = { id, anchor, body: '', turns: [], createdAt: Date.now() };
     this.setAnnotations((list) => [...list, newAnn]);
     this.patch({ openAnnotationId: id });
@@ -1190,6 +1199,32 @@ export class NoteSession {
       });
     }
     return id;
+  }
+
+  /** 현재 뷰포트 화면 중앙 좌표 (페이지 로컬 좌표) - 스크롤 튐 없는 안전한 기본 앵커 */
+  viewportCenterPoint(): { x: number; y: number } {
+    const scroller = this.scrollEl;
+    const page = this.pageEl;
+    const zoom = this.ui.zoom || 1;
+    if (scroller && page) {
+      const sRect = scroller.getBoundingClientRect();
+      const pRect = page.getBoundingClientRect();
+      if (sRect.width > 0 && sRect.height > 0) {
+        const centerX = sRect.left + sRect.width / 2;
+        const centerY = sRect.top + sRect.height / 2;
+        return {
+          x: Math.max(20, Math.round((centerX - pRect.left) / zoom)),
+          y: Math.max(20, Math.round((centerY - pRect.top) / zoom)),
+        };
+      }
+    }
+    if (scroller) {
+      return {
+        x: Math.max(20, Math.round((scroller.scrollLeft + (scroller.clientWidth || 600) / 2) / zoom)),
+        y: Math.max(20, Math.round((scroller.scrollTop + (scroller.clientHeight || 800) / 2) / zoom)),
+      };
+    }
+    return this.caretPoint();
   }
 
   /** 현재 캐럿 위치 (페이지 좌표) */
