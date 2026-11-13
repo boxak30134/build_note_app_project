@@ -22,6 +22,7 @@ import { getSession } from '../session/NoteSession';
 import { openWikiTarget } from './WikiPreview';
 import { toast } from '../store/uiStore';
 import { useAiChatStore, aiChatAbortManager, type ChatMsg } from '../store/aiChatStore';
+import { DriveSyncSettingsSection } from './settings/DriveSyncSettingsSection';
 
 const PROVIDERS: Array<{ id: AiProviderId; emoji: string; desc: string; color: string }> = [
   { id: 'google', emoji: '🔷', desc: `Google Gemini 학술 튜터 (${GEMINI_PRIMARY_MODEL} / ${GEMINI_FALLBACK_MODEL})`, color: 'border-blue-200 hover:bg-blue-50' },
@@ -225,6 +226,7 @@ function SettingsPanel({ connected, onConnect }: { connected: AiProviderId[]; on
 
   return (
     <div className="flex-1 space-y-4 overflow-y-auto p-3 text-xs">
+      <DriveSyncSettingsSection />
       <section>
         <h4 className="mb-2 font-semibold text-slate-700">AI 서비스</h4>
         {PROVIDERS.map((p) => {

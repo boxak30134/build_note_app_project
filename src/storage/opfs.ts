@@ -98,3 +98,38 @@ export function extOfMime(mime: string): string {
   const m = mime.split('/')[1] ?? 'png';
   return m === 'jpeg' ? 'jpg' : m.replace('svg+xml', 'svg');
 }
+
+/** OPFS에서 지정 노트의 첨부 파일 Blob 읽기 */
+export async function readAttachmentBlob(noteId: string, relPath: string): Promise<Blob | null> {
+  try {
+    const { dirs, name } = split(relPath);
+    const dir = await dirFor(noteId, dirs, false);
+    const fh = await dir.getFileHandle(name);
+    return await fh.getFile();
+  } catch {
+    return null;
+  }
+}
+
+/** OPFS의 notes/<noteId>/images/ 디렉토리 내 이미지 파일 목록 반환 */
+export async function listNoteImages(
+  noteId: string,
+): Promise<Array<{ relPath: string; name: string; blob: Blob }>> {
+  const out: Array<{ relPath: string; name: string; blob: Blob }> = [];
+  try {
+    const dir = await dirFor(noteId, ['images'], false);
+    const iterable = dir as unknown as {
+      values?: () => AsyncIterable<FileSystemHandle>;
+    };
+    if (!iterable.values) return out;
+    for await (const handle of iterable.values()) {
+      if (handle.kind === 'file') {
+        const file = await (handle as FileSystemFileHandle).getFile();
+        out.push({ relPath: `images/${handle.name}`, name: handle.name, blob: file });
+      }
+    }
+  } catch {
+    // images 폴더가 아직 없으면 빈 배열 반환
+  }
+  return out;
+}
