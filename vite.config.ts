@@ -3,6 +3,7 @@ import { fileURLToPath, URL } from 'node:url';
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
+import { VitePWA } from 'vite-plugin-pwa';
 
 const isReleaseByokBuild =
   process.env.VITE_BYOK_ONLY === 'true' ||
@@ -23,7 +24,40 @@ export default defineConfig(({ mode }) => {
     process.env.VITE_RELEASE_BUILD === 'true';
 
   return {
-    plugins: [react(), tailwindcss()],
+    plugins: [
+      react(),
+      tailwindcss(),
+      VitePWA({
+        registerType: 'autoUpdate',
+        manifest: {
+          name: 'EduInk Studio',
+          short_name: 'EduInk',
+          display: 'standalone',
+          orientation: 'any',
+          start_url: '/',
+          theme_color: '#ffffff',
+          background_color: '#ffffff',
+          icons: [
+            {
+              src: '/pwa-192x192.png',
+              sizes: '192x192',
+              type: 'image/png',
+              purpose: 'any maskable',
+            },
+            {
+              src: '/pwa-512x512.png',
+              sizes: '512x512',
+              type: 'image/png',
+              purpose: 'any maskable',
+            },
+          ],
+        },
+        workbox: {
+          globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
+          navigateFallbackDenylist: [/^\/oauth\/callback/],
+        },
+      }),
+    ],
     worker: { format: 'es' },
     define: byokRelease
       ? {
