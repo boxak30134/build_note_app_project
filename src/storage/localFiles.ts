@@ -115,8 +115,8 @@ export function pickFiles(accept: string, multiple: boolean, capture?: string): 
   });
 }
 
-export function downloadBytes(bytes: Uint8Array, name: string) {
-  const url = URL.createObjectURL(new Blob([bytes as BlobPart], { type: 'text/markdown' }));
+export function downloadBytes(bytes: Uint8Array, name: string, mimeType = 'text/markdown') {
+  const url = URL.createObjectURL(new Blob([bytes as BlobPart], { type: mimeType }));
   const a = document.createElement('a');
   a.href = url;
   a.download = name;

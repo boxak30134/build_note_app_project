@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { motion, AnimatePresence } from 'framer-motion';
-import { PanelLeft, PanelRight, Plus, FileText, Image as ImageIcon, Camera, Table, MessageSquare, Save, Bot, HardDrive } from 'lucide-react';
+import { PanelLeft, PanelRight, Plus, FileText, Image as ImageIcon, Camera, Table, MessageSquare, Save, Bot, HardDrive, Download, FileDown } from 'lucide-react';
 import { Capacitor } from '@capacitor/core';
 import { useSettings } from '../store/settingsStore';
 import { useTabs } from '../store/tabsStore';
@@ -106,6 +106,7 @@ export function Header() {
       <button className={`btn-ghost ${ui.dirty ? 'text-indigo-600' : 'text-slate-400'}`} onClick={() => void save()} disabled={!activeId} title="저장 (Ctrl+S)">
         <Save size={15} /> {ui.dirty ? '저장' : '저장됨'}
       </button>
+      <ExportMenu activeId={activeId} />
       <AttachMenu />
       <button className={`icon-btn ${rightOpen ? 'text-indigo-600' : ''}`} onClick={toggleRight} title="AI 사이드바 열기/닫기">
         <Bot size={18} />
@@ -173,6 +174,94 @@ function AttachMenu() {
                 {it.icon} {it.label}
               </button>
             ))}
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+function ExportMenu({ activeId }: { activeId: string | null }) {
+  const [open, setOpen] = useState(false);
+  const [exportStatus, setExportStatus] = useState<string | null>(null);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: PointerEvent) => !ref.current?.contains(e.target as Node) && setOpen(false);
+    window.addEventListener('pointerdown', close);
+    return () => window.removeEventListener('pointerdown', close);
+  }, [open]);
+
+  const handleExportMd = async () => {
+    setOpen(false);
+    const s = getSession(activeId);
+    if (!s) return toast.info('먼저 내보낼 노트를 여세요.');
+    try {
+      const { exportNoteToMarkdown } = await import('../features/export/noteExport');
+      const ok = await exportNoteToMarkdown(s);
+      if (ok) toast.success('Markdown(.md) 파일로 내보냈습니다.');
+    } catch (e) {
+      toast.error(`Markdown 내보내기 실패: ${(e as Error).message}`);
+    }
+  };
+
+  const handleExportPdf = async () => {
+    setOpen(false);
+    const s = getSession(activeId);
+    if (!s) return toast.info('먼저 내보낼 노트를 여세요.');
+    setExportStatus('PDF 생성 중...');
+    try {
+      const { exportNoteToPdf } = await import('../features/export/noteExport');
+      const ok = await exportNoteToPdf(s, (p, t) => setExportStatus(`PDF (${p}/${t})`));
+      if (ok) toast.success('PDF(.pdf) 파일로 내보냈습니다.');
+    } catch (e) {
+      toast.error(`PDF 내보내기 실패: ${(e as Error).message}`);
+    } finally {
+      setExportStatus(null);
+    }
+  };
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        type="button"
+        data-testid="header-export-btn"
+        className="btn-ghost text-slate-600 disabled:opacity-40"
+        disabled={!activeId || Boolean(exportStatus)}
+        onClick={() => setOpen((o) => !o)}
+        onMouseDown={(e) => e.preventDefault()}
+        title="Markdown 또는 PDF로 내보내기"
+      >
+        <Download size={15} /> {exportStatus ?? '내보내기'}
+      </button>
+      <AnimatePresence>
+        {open && (
+          <motion.div
+            initial={{ opacity: 0, y: -6, scale: 0.96 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -6, scale: 0.96 }}
+            transition={{ type: 'spring', stiffness: 500, damping: 32 }}
+            className="absolute right-0 top-full z-50 mt-1 w-48 rounded-xl border border-slate-200 bg-white py-1 shadow-xl"
+          >
+            <button
+              type="button"
+              data-testid="export-md-btn"
+              className="menu-item"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => void handleExportMd()}
+            >
+              <FileText size={15} /> Markdown (.md)
+            </button>
+            <button
+              type="button"
+              data-testid="export-pdf-btn"
+              className="menu-item"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => void handleExportPdf()}
+            >
+              <FileDown size={15} /> PDF (.pdf)
+            </button>
           </motion.div>
         )}
       </AnimatePresence>
