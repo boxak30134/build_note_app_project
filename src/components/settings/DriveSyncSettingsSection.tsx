@@ -34,7 +34,7 @@ const STATUS_BADGE: Record<string, { label: string; cls: string }> = {
 };
 
 export function DriveSyncSettingsSection() {
-  const { driveSyncConfig, setDriveSyncConfig } = useSettings();
+  const { driveSyncConfig } = useSettings();
   const [hasToken, setHasToken] = useState(false);
   const [busy, setBusy] = useState(false);
   const [pickerModalOpen, setPickerModalOpen] = useState(false);
@@ -236,7 +236,7 @@ export function DriveSyncSettingsSection() {
           className="border-t border-slate-200 pt-1.5 text-[10px] text-slate-500"
         >
           <summary className="cursor-pointer select-none font-medium text-slate-600 hover:text-slate-800">
-            고급 설정 (커스텀 Client ID · 최소 권한 정보)
+            고급 설정 (최소 권한 정보 · 폴더 관리)
           </summary>
           <div className="mt-2 space-y-2">
             <div className="flex items-start gap-1.5 rounded bg-white p-1.5 text-[10px] text-slate-600 border border-slate-100">
@@ -244,20 +244,6 @@ export function DriveSyncSettingsSection() {
               <span>
                 최소 권한(<code className="font-mono">drive.file</code>)만 사용하여 전체 드라이브에 접근하지 않고 지정 폴더 1개만 격리 동기화합니다.
               </span>
-            </div>
-
-            <div>
-              <label className="mb-0.5 block text-[10px] font-medium text-slate-600">
-                커스텀 OAuth Client ID (선택 사항)
-              </label>
-              <input
-                type="text"
-                data-testid="drive-client-id-input"
-                className="w-full rounded border bg-white px-1.5 py-1 font-mono text-[11px] outline-none focus:border-indigo-400"
-                placeholder="미입력 시 앱 기본 Client ID(VITE_GOOGLE_CLIENT_ID) 사용"
-                value={driveSyncConfig.clientId}
-                onChange={(e) => setDriveSyncConfig({ clientId: e.target.value })}
-              />
             </div>
 
             {hasToken && (

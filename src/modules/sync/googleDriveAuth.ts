@@ -23,6 +23,9 @@ export interface GoogleOAuthUrlOptions {
   prompt?: '' | 'select_account' | 'consent';
 }
 
+export const DEFAULT_GOOGLE_CLIENT_ID =
+  '779568357105-1bv1t4br3tkgekksmu6enu1blhghvkps.apps.googleusercontent.com';
+
 export function resolveGoogleClientId(overrideClientId?: string): string {
   const fromOverride = overrideClientId?.trim();
   if (fromOverride) return fromOverride;
@@ -41,7 +44,7 @@ export function resolveGoogleClientId(overrideClientId?: string): string {
   } catch {
     // ignore
   }
-  return '';
+  return DEFAULT_GOOGLE_CLIENT_ID;
 }
 
 /**

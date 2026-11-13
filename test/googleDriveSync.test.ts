@@ -12,6 +12,7 @@ import {
 import {
   authenticateGoogleDrive,
   buildGoogleOAuthUrl,
+  DEFAULT_GOOGLE_CLIENT_ID,
   disconnectGoogleDrive,
   resolveGoogleClientId,
 } from '../src/modules/sync/googleDriveAuth';
@@ -50,18 +51,18 @@ describe('REQ_google_drive_sync: Google Drive 지정 폴더 격리 동기화', (
       },
     });
 
-    vi.spyOn(db.notes, 'toArray').mockImplementation(async () => Array.from(noteStore.values()));
-    vi.spyOn(db.notes, 'get').mockImplementation(async (id: string) => noteStore.get(id));
-    vi.spyOn(db.notes, 'put').mockImplementation(async (rec: NoteRecord) => {
+    vi.spyOn(db.notes, 'toArray').mockImplementation((async () => Array.from(noteStore.values())) as any);
+    vi.spyOn(db.notes, 'get').mockImplementation(((id: any) => Promise.resolve(typeof id === 'string' ? noteStore.get(id) : undefined)) as any);
+    vi.spyOn(db.notes, 'put').mockImplementation((async (rec: NoteRecord) => {
       noteStore.set(rec.id, rec);
       return rec.id;
-    });
-    vi.spyOn(db.notes, 'update').mockImplementation(async (id: string, changes: Partial<NoteRecord>) => {
+    }) as any);
+    vi.spyOn(db.notes, 'update').mockImplementation((async (id: string, changes: Partial<NoteRecord>) => {
       const existing = noteStore.get(id);
       if (!existing) return 0;
       noteStore.set(id, { ...existing, ...changes });
       return 1;
-    });
+    }) as any);
   });
 
   afterEach(() => {
@@ -391,8 +392,8 @@ describe('REQ_google_drive_sync: Google Drive 지정 폴더 격리 동기화', (
     expect(noteStore.get('keep_me')).toBeDefined();
   });
 
-  it('8. (v2) VITE_GOOGLE_CLIENT_ID 기본 해석 및 미연결 UI 단순화(고급 Client ID 접이식 숨김)', async () => {
-    vi.stubEnv('VITE_GOOGLE_CLIENT_ID', 'builtin-env-client.apps.googleusercontent.com');
+  it('8. (v2) 고정 기본 Client ID 해석 및 커스텀 입력창 제거(원클릭 연결 UI 단순화)', async () => {
+    vi.unstubAllEnvs();
     useSettings.setState({
       driveSyncConfig: {
         ...DEFAULT_DRIVE_SYNC_CONFIG,
@@ -401,11 +402,15 @@ describe('REQ_google_drive_sync: Google Drive 지정 폴더 격리 동기화', (
     });
     vi.spyOn(secureStoreMod, 'loadDriveToken').mockResolvedValue(null);
 
-    expect(resolveGoogleClientId()).toBe('builtin-env-client.apps.googleusercontent.com');
+    // 환경 변수 및 설정이 비어있어도 고정된 내장 Client ID가 반환됨
+    expect(resolveGoogleClientId()).toBe(DEFAULT_GOOGLE_CLIENT_ID);
+    expect(DEFAULT_GOOGLE_CLIENT_ID).toBe(
+      '779568357105-1bv1t4br3tkgekksmu6enu1blhghvkps.apps.googleusercontent.com',
+    );
 
     render(createElement(DriveSyncSettingsSection));
 
-    // 기본 화면에 원클릭 연결 버튼만 노출되고, Client ID 입력 필드는 접힌 <details> 내부에 존재
+    // 기본 화면에 원클릭 연결 버튼만 노출되고, 커스텀 Client ID 입력 필드는 제거됨
     const connectBtn = await screen.findByTestId('drive-connect-btn');
     expect(connectBtn.textContent).toContain('Google 계정으로 드라이브 연결');
     expect(screen.queryByTestId('drive-pick-folder-btn')).toBeNull();
@@ -413,7 +418,7 @@ describe('REQ_google_drive_sync: Google Drive 지정 폴더 격리 동기화', (
 
     const details = screen.getByTestId('drive-advanced-settings') as HTMLDetailsElement;
     expect(details.open).toBe(false);
-    expect(details.contains(screen.getByTestId('drive-client-id-input'))).toBe(true);
+    expect(screen.queryByTestId('drive-client-id-input')).toBeNull();
   });
 
   it('9. (v2) GIS 기존 세션/login_hint 인증 후 이름·이메일 저장 및 즉시 Picker 연결, 완료 UI 배지 표시', async () => {
