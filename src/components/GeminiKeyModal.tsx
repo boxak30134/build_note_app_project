@@ -63,7 +63,7 @@ export const GeminiKeyModal: React.FC<Props> = ({
 
         <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg p-3 mb-4 text-xs text-blue-200 leading-relaxed">
           <p className="font-semibold text-blue-100 mb-1">💡 키를 입력하지 않아도 번역은 기본 작동합니다!</p>
-          더 정교한 학술 문맥(수학/과학 논문) 번역을 원하실 때만 <strong>신용카드 필요 없는 무료 키</strong>를 등록하세요.
+          더 정교한 학술 문맥(전공 서적·연구 논문·전문 자료) 번역을 원하실 때만 <strong>신용카드 필요 없는 무료 키</strong>를 등록하세요.
         </div>
 
         {/* 번역 결과 삽입 형식 선택 */}

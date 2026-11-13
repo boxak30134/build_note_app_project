@@ -7,7 +7,7 @@
         "id": "ring-algebra",
         "meaning": "환(環)",
         "domain": "algebra",
-        "baseWeight": 1.0,
+        "baseWeight": 0.8,
         "contextTriggers": [
           "abstract algebra", "algebra", "field", "ideal", "group",
           "subring", "homomorphism", "isomorphism", "commutative",
@@ -31,7 +31,7 @@
         "id": "field-algebra",
         "meaning": "체(體)",
         "domain": "algebra",
-        "baseWeight": 1.0,
+        "baseWeight": 0.8,
         "contextTriggers": [
           "abstract algebra", "algebra", "ring", "galois", "vector space",
           "characteristic", "subfield", "finite field", "extension", "algebraic", "polynomial"
@@ -41,7 +41,7 @@
         "id": "field-physics",
         "meaning": "장(場)",
         "domain": "physics",
-        "baseWeight": 0.9,
+        "baseWeight": 0.8,
         "contextTriggers": [
           "electric", "magnetic", "electromagnetic", "gravitational",
           "scalar", "vector field", "potential", "force", "flux", "quantum"
@@ -51,7 +51,7 @@
         "id": "field-general",
         "meaning": "분야, 들판",
         "domain": "general",
-        "baseWeight": 0.7,
+        "baseWeight": 0.8,
         "contextTriggers": ["grass", "farm", "sports", "research", "study", "industry", "career"]
       }
     ]

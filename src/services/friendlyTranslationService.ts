@@ -104,7 +104,7 @@ export async function executeFriendlyTranslation({
     };
   }
 
-  // Tier 1: 로컬 수학 다의어 매칭이 유효한 경우
+  // Tier 1: 로컬 적응형 다의어(문맥·사용자 학습) 매칭이 유효한 경우
   if (localMeaning) {
     return {
       success: true,

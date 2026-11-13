@@ -66,8 +66,8 @@ describe('Gemini 기반 학술 튜터 및 AI 연계 모듈 (CLAUDE.md §9)', () 
     });
 
     expect(params.config.systemInstruction).toContain(ACADEMIC_TUTOR_SYSTEM_PROMPT);
-    expect(params.config.systemInstruction).toContain('너는 대학 학부 전공생(수학, 수리과학, 컴퓨터과학, 공학 등)을 지원하는 엄밀하고 간결한 학술 튜터이다.');
-    expect(params.config.systemInstruction).toContain('KaTeX 렌더링 무결성 (Strict LaTeX Formatting)');
+    expect(params.config.systemInstruction).toContain('너는 인문·사회·자연과학·공학 등 모든 학문 분야의 학습·리서치 노트를 지원하는 엄밀하고 간결한 범용 학술 튜터이다.');
+    expect(params.config.systemInstruction).toContain('KaTeX 렌더링 무결성 (수식 포함 시 조건부 적용)');
     expect(params.config.systemInstruction).toContain('\\begin{aligned} ... \\end{aligned}');
     expect(params.config.systemInstruction).toContain('[현재 노트: 실해석학 개론]');
     expect(buildAcademicSystemInstruction()).toBe(ACADEMIC_TUTOR_SYSTEM_PROMPT);

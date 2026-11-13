@@ -7,7 +7,9 @@ import { useSessionUI } from '../store/sessionStore';
 import { useTabs } from '../store/tabsStore';
 import { saveApiKey, removeApiKey, loadTranslateApiKey, saveTranslateApiKey, removeTranslateApiKey } from '../storage/secureStore';
 import { useConnectedProviders, useProvidersLoaded, refreshProviders } from '../ai/useConnectedProviders';
-import { streamAi, PROVIDER_LABEL, PROVIDER_KEY_URL } from '../ai/aiClient';
+import { streamAi, PROVIDER_LABEL, PROVIDER_KEY_URL, PROVIDER_KEY_GUIDE, MissingApiKeyError } from '../ai/aiClient';
+import { estimateTurnTokenPreview } from '../ai/modelCatalog';
+import { AiModelSelector } from './AiModelSelector';
 import {
   clearGeminiClientCache,
   GEMINI_FALLBACK_MODEL,
@@ -59,7 +61,7 @@ export function RightSidebar() {
       ) : connected.length === 0 ? (
         <Onboarding onPick={setConnecting} />
       ) : (
-        <Chat connected={connected} />
+        <Chat connected={connected} onConnect={setConnecting} />
       )}
       <RelatedNotesPanel />
     </aside>
@@ -86,7 +88,7 @@ export function RelatedNotesPanel() {
       </div>
       {ui.relatedNotes.length === 0 ? (
         <p className="py-2 text-center text-[11px] text-slate-400">
-          현재 노트와 유사한 수학 개념·키워드를 가진 노트가 없습니다.
+          현재 노트와 유사한 개념·키워드를 가진 노트가 없습니다.
         </p>
       ) : (
         <div className="space-y-1.5">
@@ -197,8 +199,16 @@ function ConnectForm({ provider, onDone }: { provider: AiProviderId; onDone: () 
       <a className="mb-3 flex items-center gap-1 text-[11px] text-indigo-600 hover:underline" href={PROVIDER_KEY_URL[provider]} target="_blank" rel="noreferrer">
         API Key 발급 페이지 <ExternalLink size={10} />
       </a>
-      <label className="mb-1 block text-xs font-medium text-slate-600">모델 ID</label>
-      <input className="mb-3 w-full rounded-lg border px-2 py-1.5 font-mono text-xs outline-none focus:border-indigo-400" value={model} onChange={(e) => setModel(e.target.value)} />
+      <label className="mb-1 block text-xs font-medium text-slate-600">모델 선택</label>
+      <div className="mb-3">
+        <AiModelSelector
+          provider={provider}
+          modelId={model}
+          filterProvider={provider}
+          onChange={(nextModel) => setModel(nextModel)}
+          testId="connect-model-selector"
+        />
+      </div>
       <div className="mb-3 flex items-start gap-2 rounded-lg bg-slate-50 p-2 text-[11px] text-slate-500">
         <ShieldCheck size={14} className="mt-0.5 shrink-0 text-emerald-600" />
         키는 서버로 전송되지 않으며, 브라우저의 추출 불가능한 AES-GCM 키로 암호화되어 IndexedDB 에만 저장됩니다. AI 호출은 이 기기에서 해당 서비스로 직접 이루어집니다.
@@ -257,12 +267,15 @@ function SettingsPanel({ connected, onConnect }: { connected: AiProviderId[]; on
                 )}
               </div>
               {on && (
-                <input
-                  className="mt-1 w-full rounded border px-1.5 py-1 font-mono"
-                  value={aiModels[p.id]}
-                  onChange={(e) => set({ aiModels: { ...aiModels, [p.id]: e.target.value } })}
-                  title="모델 ID"
-                />
+                <div className="mt-1.5">
+                  <AiModelSelector
+                    provider={p.id}
+                    modelId={aiModels[p.id]}
+                    filterProvider={p.id}
+                    onChange={(nextModel) => set({ aiModels: { ...aiModels, [p.id]: nextModel } })}
+                    testId={`settings-model-selector-${p.id}`}
+                  />
+                </div>
               )}
             </div>
           );
@@ -405,17 +418,16 @@ function SettingsPanel({ connected, onConnect }: { connected: AiProviderId[]; on
   );
 }
 
-function Chat({ connected }: { connected: AiProviderId[] }) {
-  const { aiProvider, set } = useSettings();
-  const provider =
-    aiProvider && connected.includes(aiProvider)
-      ? aiProvider
-      : connected.includes('google')
-        ? 'google'
-        : connected[0];
+function Chat({ connected, onConnect }: { connected: AiProviderId[]; onConnect: (p: AiProviderId) => void }) {
+  const { aiProvider, aiModels, set } = useSettings();
+  const provider: AiProviderId =
+    aiProvider ?? (connected.includes('google') ? 'google' : connected[0] ?? 'google');
+  const isProviderConnected = connected.includes(provider);
+  const activeModelId = aiModels[provider] || DEFAULT_MODELS[provider];
   const activeId = useTabs((s) => s.activeTabId);
   const [msgs, setMsgs] = useState<ChatMsg[]>([]);
   const [input, setInput] = useState(() => localStorage.getItem('eduink-chat-draft') ?? '');
+  const [selectedText, setSelectedText] = useState('');
   const [busy, setBusy] = useState(false);
   const abortControllerRef = useRef<AbortController | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
@@ -425,6 +437,34 @@ function Chat({ connected }: { connected: AiProviderId[] }) {
     message?: string;
     model?: string;
   }>({ status: 'idle' });
+
+  // 현재 에디터 선택 영역 추적 (예상 입력 토큰 미리보기용)
+  useEffect(() => {
+    const s = getSession(activeId);
+    if (!s) {
+      setSelectedText('');
+      return;
+    }
+    const syncSelection = () => {
+      const { selection, doc } = s.editor.state;
+      const text = !selection.empty ? doc.textBetween(selection.from, selection.to, ' ').trim() : '';
+      setSelectedText(text);
+    };
+    syncSelection();
+    s.editor.on('selectionUpdate', syncSelection);
+    return () => {
+      s.editor.off('selectionUpdate', syncSelection);
+    };
+  }, [activeId]);
+
+  const tokenPreview = estimateTurnTokenPreview({
+    selectedText,
+    draftText: input,
+    recentTurnTexts: msgs.slice(-4).map((m) => m.content),
+    modelId: activeModelId,
+    provider,
+    target: 'sidebar',
+  });
 
   // 컴포넌트 언마운트(unmount) 시점에만 진행 중인 요청을 abort 하도록 격리
   useEffect(() => {
@@ -530,10 +570,23 @@ function Chat({ connected }: { connected: AiProviderId[] }) {
       }
     } catch (err) {
       if (!controller.signal.aborted) {
-        const errMsg = (err as Error)?.message || 'AI 호출 중 알 수 없는 오류가 발생했습니다.';
-        toast.error(errMsg, 'AI 호출 실패');
-        setStatusInfo({ status: 'error', message: errMsg });
-        setMsgs([...history, { role: 'assistant', content: `⚠️ 오류로 답변을 받지 못했습니다.\n${errMsg}` }]);
+        if (err instanceof MissingApiKeyError) {
+          const guideMsg = `${PROVIDER_LABEL[err.provider]} API Key가 입력되지 않았습니다. 아래 안내에서 키를 등록해 주세요.`;
+          toast.error(guideMsg, 'API Key 필요');
+          setStatusInfo({ status: 'error', message: guideMsg });
+          setMsgs([
+            ...history,
+            {
+              role: 'assistant',
+              content: `🔑 ${err.message}\n발급 링크: ${err.keyUrl}`,
+            },
+          ]);
+        } else {
+          const errMsg = (err as Error)?.message || 'AI 호출 중 알 수 없는 오류가 발생했습니다.';
+          toast.error(errMsg, 'AI 호출 실패');
+          setStatusInfo({ status: 'error', message: errMsg });
+          setMsgs([...history, { role: 'assistant', content: `⚠️ 오류로 답변을 받지 못했습니다.\n${errMsg}` }]);
+        }
       } else {
         setStatusInfo({ status: 'cancelled', message: '취소됨' });
       }
@@ -547,18 +600,24 @@ function Chat({ connected }: { connected: AiProviderId[] }) {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex items-center gap-1 border-b px-2 py-1.5">
-        <select className="rounded border bg-white px-1 py-0.5 text-xs" value={provider} onChange={(e) => set({ aiProvider: e.target.value as AiProviderId })}>
-          {connected.map((p) => (
-            <option key={p} value={p}>
-              {PROVIDER_LABEL[p]}
-            </option>
-          ))}
-        </select>
-        <div className="flex-1" />
+      <div className="flex items-center gap-1.5 border-b px-2 py-1.5">
+        <div className="min-w-0 flex-1">
+          <AiModelSelector
+            provider={provider}
+            modelId={activeModelId}
+            onChange={(nextModel, nextProvider) =>
+              set({
+                aiProvider: nextProvider,
+                aiModels: { ...aiModels, [nextProvider]: nextModel },
+              })
+            }
+            compact
+            testId="chat-model-selector"
+          />
+        </div>
         <button
           type="button"
-          className="btn-ghost text-[11px]"
+          className="btn-ghost shrink-0 text-[11px]"
           disabled={busy || !activeId}
           onClick={(e) => void handleSendMessage(e, '이 노트의 핵심 내용을 학술적으로 엄밀하게 요약하고, 학습자가 점검할 핵심 질문 3개를 제시해줘.')}
         >
@@ -628,40 +687,83 @@ function Chat({ connected }: { connected: AiProviderId[] }) {
         ))}
         <div ref={endRef} />
       </div>
-      <form className="flex items-end gap-1 border-t p-2" onSubmit={(e) => void handleSendMessage(e)}>
-        <textarea
-          className="max-h-32 min-h-[38px] flex-1 resize-none rounded-lg border px-2 py-1.5 text-xs outline-none focus:border-indigo-400"
-          placeholder="노트에 대해 질문… (Enter 전송, Shift+Enter 줄바꿈)"
-          value={input}
-          rows={2}
-          onChange={(e) => {
-            setInput(e.target.value);
-            localStorage.setItem('eduink-chat-draft', e.target.value);
-          }}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
-              e.preventDefault();
-              void handleSendMessage(e);
-            }
-          }}
-        />
-        {busy ? (
-          <button
-            type="button"
-            className="btn-primary !px-2"
-            onClick={(e) => {
-              e.preventDefault();
-              abortControllerRef.current?.abort();
+      {!isProviderConnected && (
+        <div
+          data-testid="missing-provider-key-banner"
+          className="border-t border-amber-200 bg-amber-50 px-2.5 py-2 text-[11px] text-amber-900"
+        >
+          <div className="font-semibold">
+            {PROVIDER_LABEL[provider]} API Key가 입력되지 않았습니다.
+          </div>
+          <p className="mt-0.5 text-[10px] text-amber-800">{PROVIDER_KEY_GUIDE[provider]}</p>
+          <div className="mt-1.5 flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => onConnect(provider)}
+              className="rounded bg-amber-600 px-2 py-0.5 text-[10px] font-semibold text-white hover:bg-amber-700"
+            >
+              API 키 입력하기
+            </button>
+            <a
+              href={PROVIDER_KEY_URL[provider]}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-0.5 text-[10px] font-medium text-amber-800 underline hover:text-amber-950"
+            >
+              발급 페이지 <ExternalLink size={10} />
+            </a>
+          </div>
+        </div>
+      )}
+      <form className="border-t p-2" onSubmit={(e) => void handleSendMessage(e)}>
+        <div className="flex items-end gap-1">
+          <textarea
+            className="max-h-32 min-h-[38px] flex-1 resize-none rounded-lg border px-2 py-1.5 text-xs outline-none focus:border-indigo-400"
+            placeholder="노트에 대해 질문… (Enter 전송, Shift+Enter 줄바꿈)"
+            value={input}
+            rows={2}
+            onChange={(e) => {
+              setInput(e.target.value);
+              localStorage.setItem('eduink-chat-draft', e.target.value);
             }}
-            title="중지"
-          >
-            <Square size={14} />
-          </button>
-        ) : (
-          <button type="submit" className="btn-primary !px-2" disabled={!input.trim()} title="전송">
-            <Send size={14} />
-          </button>
-        )}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+                e.preventDefault();
+                void handleSendMessage(e);
+              }
+            }}
+          />
+          {busy ? (
+            <button
+              type="button"
+              className="btn-primary !px-2"
+              onClick={(e) => {
+                e.preventDefault();
+                abortControllerRef.current?.abort();
+              }}
+              title="중지"
+            >
+              <Square size={14} />
+            </button>
+          ) : (
+            <button type="submit" className="btn-primary !px-2" disabled={!input.trim()} title="전송">
+              <Send size={14} />
+            </button>
+          )}
+        </div>
+        <div
+          data-testid="ai-token-preview"
+          className="mt-1 flex items-center justify-between text-[10px] text-slate-400"
+        >
+          <span>
+            {selectedText.length > 0
+              ? `선택 ${tokenPreview.clippedSelectedChars}자 포함 · 예상 입력 ~${tokenPreview.estimatedInputTokens.toLocaleString()} tok`
+              : `예상 입력 ~${tokenPreview.estimatedInputTokens.toLocaleString()} tok`}
+          </span>
+          <span className="font-mono">
+            출력 상한 {tokenPreview.maxOutputTokens.toLocaleString()} tok
+          </span>
+        </div>
       </form>
     </div>
   );
