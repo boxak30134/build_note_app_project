@@ -1,10 +1,12 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef, useSyncExternalStore } from 'react';
 import { ChevronLeft, ChevronRight, FileText, Layers, Plus, Trash2 } from 'lucide-react';
 import type { NoteSession } from '../session/NoteSession';
 import { useSessionUI } from '../store/sessionStore';
 import { toast } from '../store/uiStore';
 import { attachmentUrl } from '../storage/opfs';
-import { createPage, PAGE_STYLE_LABELS, type PageStyleId, type PaperSizeId } from '../core/page/pageTypes';
+import { createPage, PAGE_STYLE_LABELS, getPageDimensions, type PageStyleId, type PaperSizeId, type PageOrientation } from '../core/page/pageTypes';
+import { drawStroke } from '../canvas/render';
+import { strokeBounds } from '../core/strokes/StrokeStore';
 
 export interface PageItem {
   pageNumber: number; // 1-based (1, 2, ... N)
@@ -13,6 +15,7 @@ export interface PageItem {
   height?: number;
   size?: PaperSizeId;
   style?: PageStyleId;
+  orientation?: PageOrientation;
 }
 
 /** 노트 컨텐트 및 UI 상태에서 페이지 항목 목록을 추출한다 */
@@ -48,7 +51,170 @@ export function extractPageItems(session: NoteSession | null): PageItem[] {
     pageNumber: idx + 1,
     size: p.size,
     style: p.style,
+    orientation: p.orientation,
   }));
+}
+
+const EMPTY_STROKES: any[] = [];
+const DUMMY_SUBSCRIBE = () => () => {};
+const DUMMY_GET_ALL = () => EMPTY_STROKES;
+
+/** 사용자 생성 일반 페이지 실시간 미리보기 (용지 스타일 + 텍스트 + 손글씨 필기) */
+export function PagePreviewCanvas({
+  session,
+  pageIndex,
+  item,
+}: {
+  session: NoteSession;
+  pageIndex: number;
+  item: PageItem;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [containerWidth, setContainerWidth] = useState(120);
+
+  const strokes = useSyncExternalStore(
+    session.strokes?.subscribe ?? DUMMY_SUBSCRIBE,
+    session.strokes?.getAll ?? DUMMY_GET_ALL
+  );
+  const [htmlContent, setHtmlContent] = useState(() => {
+    return session.editor ? session.editor.getHTML() : '';
+  });
+
+  // 에디터 텍스트 변경 구독 (150ms 디바운스)
+  useEffect(() => {
+    if (!session.editor) return;
+    let timer: ReturnType<typeof setTimeout>;
+    const update = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        if (session.editor) {
+          setHtmlContent(session.editor.getHTML());
+        }
+      }, 150);
+    };
+    session.editor.on('update', update);
+    return () => {
+      clearTimeout(timer);
+      session.editor?.off('update', update);
+    };
+  }, [session, session.editor]);
+
+  // 컨테이너 너비 측정
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = typeof ResizeObserver !== 'undefined'
+      ? new ResizeObserver((entries) => {
+          for (const entry of entries) {
+            if (entry.contentRect.width > 0) {
+              const newW = Math.round(entry.contentRect.width);
+              setContainerWidth((prev) => (Math.abs(prev - newW) > 1 ? newW : prev));
+            }
+          }
+        })
+      : null;
+    ro?.observe(el);
+    return () => ro?.disconnect();
+  }, []);
+
+  // 페이지 치수 및 Y 오프셋 계산
+  const pages = session.ui.pages && session.ui.pages.length > 0
+    ? session.ui.pages
+    : (session.record.pages && session.record.pages.length > 0 ? session.record.pages : [createPage()]);
+
+  let offsetY = 0;
+  for (let i = 0; i < pageIndex && i < pages.length; i++) {
+    const p = pages[i];
+    offsetY += getPageDimensions(p.size, p.orientation).height;
+  }
+  const pageMeta = pages[pageIndex] || pages[0] || createPage();
+  const pageDims = getPageDimensions(item.size || pageMeta.size, item.orientation || pageMeta.orientation);
+  const scale = containerWidth > 0 ? containerWidth / pageDims.width : 0.15;
+
+  // 캔버스 손글씨 스트로크 렌더링
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const container = containerRef.current;
+    if (!canvas || !container) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const w = container.clientWidth || 120;
+    const h = container.clientHeight || Math.round(w * (pageDims.height / pageDims.width));
+    const dpr = window.devicePixelRatio || 1;
+
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    const currentScale = w / pageDims.width;
+    ctx.save();
+    ctx.scale(currentScale * dpr, currentScale * dpr);
+    ctx.translate(0, -offsetY);
+
+    const allStrokes = session.strokes?.getAll ? session.strokes.getAll() : [];
+    const pageMinY = offsetY;
+    const pageMaxY = offsetY + pageDims.height;
+
+    for (const s of allStrokes) {
+      const box = strokeBounds(s);
+      if (box.maxY >= pageMinY && box.minY <= pageMaxY) {
+        drawStroke(ctx, s);
+      }
+    }
+    ctx.restore();
+  }, [strokes, pageDims.width, pageDims.height, offsetY, containerWidth]);
+
+  const isEmpty = (!htmlContent || htmlContent === '<p></p>') && strokes.length === 0;
+
+  return (
+    <div
+      ref={containerRef}
+      data-testid={`page-preview-canvas-${pageIndex + 1}`}
+      className={`relative h-full w-full overflow-hidden select-none pointer-events-none page-style-${item.style || pageMeta.style || 'plain'}`}
+    >
+      {/* 텍스트 축소 프리뷰 레이어 */}
+      {htmlContent && htmlContent !== '<p></p>' && (
+        <div
+          className="absolute origin-top-left pointer-events-none select-none overflow-hidden"
+          style={{
+            width: `${pageDims.width}px`,
+            height: `${pageDims.height}px`,
+            transform: `scale(${scale})`,
+            top: 0,
+            left: 0,
+          }}
+        >
+          <div
+            style={{
+              transform: `translateY(-${offsetY}px)`,
+            }}
+            className="prose prose-sm max-w-none p-6 text-slate-800 opacity-80 leading-relaxed font-sans"
+            dangerouslySetInnerHTML={{ __html: htmlContent }}
+          />
+        </div>
+      )}
+
+      {/* 손글씨 캔버스 레이어 */}
+      <canvas
+        ref={canvasRef}
+        className="absolute inset-0 h-full w-full pointer-events-none"
+      />
+
+      {/* 내용이 비어있을 때 은은한 스타일 플레이스홀더 */}
+      {isEmpty && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center p-2 text-slate-400 opacity-40">
+          <FileText size={20} className="stroke-[1.2] text-slate-300" />
+          {item.style && (
+            <span className="mt-1 text-[8px] font-medium text-slate-400">
+              {PAGE_STYLE_LABELS[item.style]}
+            </span>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 /** 좌측 사이드바: 현재 문서의 페이지 미리보기 썸네일 그리드 및 원클릭 즉시 이동 */
@@ -187,16 +353,11 @@ export function PageThumbnailList({ session }: { session: NoteSession | null }) 
                       className="h-full w-full object-contain transition-transform group-hover:scale-[1.02]"
                     />
                   ) : (
-                    <div
-                      className={`flex h-full w-full flex-col items-center justify-center p-2 text-slate-400 page-style-${it.style || 'plain'}`}
-                    >
-                      <FileText size={24} className="stroke-[1.2] text-slate-300" />
-                      {it.style && (
-                        <span className="mt-1 text-[9px] font-medium text-slate-400">
-                          {PAGE_STYLE_LABELS[it.style]}
-                        </span>
-                      )}
-                    </div>
+                    <PagePreviewCanvas
+                      session={session}
+                      pageIndex={it.pageNumber - 1}
+                      item={it}
+                    />
                   )}
 
                   {/* 활성 페이지 표시 뱃지 */}

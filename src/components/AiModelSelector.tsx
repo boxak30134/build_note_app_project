@@ -114,7 +114,7 @@ export function AiModelSelector({
         <div
           role="listbox"
           data-testid={`${testId}-dropdown`}
-          className="absolute left-0 right-0 z-50 mt-1 max-h-80 overflow-y-auto rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl"
+          className="absolute left-0 right-0 z-50 mt-1 max-h-80 min-w-[250px] overflow-y-auto rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl"
         >
           {groups.map((group) => (
             <div key={group.provider} className="mb-1.5 last:mb-0">

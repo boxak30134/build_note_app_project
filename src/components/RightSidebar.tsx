@@ -21,18 +21,13 @@ import {
 import { getSession } from '../session/NoteSession';
 import { openWikiTarget } from './WikiPreview';
 import { toast } from '../store/uiStore';
+import { useAiChatStore, aiChatAbortManager, type ChatMsg } from '../store/aiChatStore';
 
 const PROVIDERS: Array<{ id: AiProviderId; emoji: string; desc: string; color: string }> = [
   { id: 'google', emoji: '🔷', desc: `Google Gemini 학술 튜터 (${GEMINI_PRIMARY_MODEL} / ${GEMINI_FALLBACK_MODEL})`, color: 'border-blue-200 hover:bg-blue-50' },
   { id: 'openai', emoji: '🟢', desc: 'OpenAI GPT 모델', color: 'border-emerald-200 hover:bg-emerald-50' },
   { id: 'anthropic', emoji: '🟠', desc: 'Anthropic Claude 모델', color: 'border-orange-200 hover:bg-orange-50' },
 ];
-
-interface ChatMsg {
-  role: 'user' | 'assistant';
-  content: string;
-  model?: string;
-}
 
 /** 오른쪽 사이드바: 생성형 AI 허브 & BYOK 온보딩 */
 export function RightSidebar() {
@@ -58,8 +53,6 @@ export function RightSidebar() {
         <ConnectForm provider={connecting} onDone={() => setConnecting(null)} />
       ) : view === 'settings' ? (
         <SettingsPanel connected={connected} onConnect={setConnecting} />
-      ) : connected.length === 0 ? (
-        <Onboarding onPick={setConnecting} />
       ) : (
         <Chat connected={connected} onConnect={setConnecting} />
       )}
@@ -123,7 +116,7 @@ export function RelatedNotesPanel() {
   );
 }
 
-function Onboarding({ onPick }: { onPick: (p: AiProviderId) => void }) {
+export function Onboarding({ onPick }: { onPick: (p: AiProviderId) => void }) {
   return (
     <div className="flex-1 overflow-y-auto p-4">
       <div className="mb-4 text-center">
@@ -266,17 +259,15 @@ function SettingsPanel({ connected, onConnect }: { connected: AiProviderId[]; on
                   </button>
                 )}
               </div>
-              {on && (
-                <div className="mt-1.5">
-                  <AiModelSelector
-                    provider={p.id}
-                    modelId={aiModels[p.id]}
-                    filterProvider={p.id}
-                    onChange={(nextModel) => set({ aiModels: { ...aiModels, [p.id]: nextModel } })}
-                    testId={`settings-model-selector-${p.id}`}
-                  />
-                </div>
-              )}
+              <div className="mt-1.5">
+                <AiModelSelector
+                  provider={p.id}
+                  modelId={aiModels[p.id]}
+                  filterProvider={p.id}
+                  onChange={(nextModel) => set({ aiModels: { ...aiModels, [p.id]: nextModel } })}
+                  testId={`settings-model-selector-${p.id}`}
+                />
+              </div>
             </div>
           );
         })}
@@ -425,18 +416,18 @@ function Chat({ connected, onConnect }: { connected: AiProviderId[]; onConnect: 
   const isProviderConnected = connected.includes(provider);
   const activeModelId = aiModels[provider] || DEFAULT_MODELS[provider];
   const activeId = useTabs((s) => s.activeTabId);
-  const [msgs, setMsgs] = useState<ChatMsg[]>([]);
-  const [input, setInput] = useState(() => localStorage.getItem('eduink-chat-draft') ?? '');
+  const msgs = useAiChatStore((s) => s.messages);
+  const setMsgs = useAiChatStore((s) => s.setMessages);
+  const input = useAiChatStore((s) => s.inputDraft);
+  const setInput = useAiChatStore((s) => s.setInputDraft);
+  const busy = useAiChatStore((s) => s.busy);
+  const setBusy = useAiChatStore((s) => s.setBusy);
+  const statusInfo = useAiChatStore((s) => s.statusInfo);
+  const setStatusInfo = useAiChatStore((s) => s.setStatusInfo);
+  const clearMessages = useAiChatStore((s) => s.clearMessages);
   const [selectedText, setSelectedText] = useState('');
-  const [busy, setBusy] = useState(false);
-  const abortControllerRef = useRef<AbortController | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
   const lastQuestionRef = useRef<string>('');
-  const [statusInfo, setStatusInfo] = useState<{
-    status: 'idle' | 'connecting' | 'retrying' | 'fallback' | 'streaming' | 'done' | 'error' | 'cancelled';
-    message?: string;
-    model?: string;
-  }>({ status: 'idle' });
 
   // 현재 에디터 선택 영역 추적 (예상 입력 토큰 미리보기용)
   useEffect(() => {
@@ -466,13 +457,6 @@ function Chat({ connected, onConnect }: { connected: AiProviderId[]; onConnect: 
     target: 'sidebar',
   });
 
-  // 컴포넌트 언마운트(unmount) 시점에만 진행 중인 요청을 abort 하도록 격리
-  useEffect(() => {
-    return () => {
-      abortControllerRef.current?.abort();
-    };
-  }, []);
-
   // 주의: 최신 Chrome 에서 scrollIntoView() 는 Promise 를 반환한다.
   // 화살표 함수 축약형으로 쓰면 effect 가 Promise 를 반환해 React 가 cleanup 으로 호출하다 오류가 나므로 블록으로 감싼다.
   useEffect(() => {
@@ -500,12 +484,10 @@ function Chat({ connected, onConnect }: { connected: AiProviderId[]; onConnect: 
     setMsgs([...history, { role: 'assistant', content: '' }]);
     if (overrideText === undefined) {
       setInput('');
-      localStorage.removeItem('eduink-chat-draft');
     }
     setBusy(true);
 
-    const controller = new AbortController();
-    abortControllerRef.current = controller;
+    const controller = aiChatAbortManager.create();
 
     let resolvedModelName = provider === 'google' ? GEMINI_PRIMARY_MODEL : PROVIDER_LABEL[provider];
     setStatusInfo({
@@ -592,9 +574,7 @@ function Chat({ connected, onConnect }: { connected: AiProviderId[]; onConnect: 
       }
     } finally {
       setBusy(false);
-      if (abortControllerRef.current === controller) {
-        abortControllerRef.current = null;
-      }
+      aiChatAbortManager.clear();
     }
   };
 
@@ -623,7 +603,15 @@ function Chat({ connected, onConnect }: { connected: AiProviderId[]; onConnect: 
         >
           <Sparkles size={12} /> 노트 요약
         </button>
-        <button type="button" className="icon-btn" title="대화 지우기" onClick={() => setMsgs([])}>
+        <button
+          type="button"
+          className="icon-btn"
+          title="대화 지우기"
+          onClick={() => {
+            clearMessages();
+            toast.info('대화 내역을 초기화했습니다.');
+          }}
+        >
           <Trash2 size={13} />
         </button>
       </div>
@@ -648,7 +636,7 @@ function Chat({ connected, onConnect }: { connected: AiProviderId[]; onConnect: 
               type="button"
               className="ml-2 font-medium text-red-600 hover:text-red-800 shrink-0"
               onClick={() => {
-                abortControllerRef.current?.abort();
+                aiChatAbortManager.abort();
                 setStatusInfo({ status: 'cancelled', message: '취소됨' });
               }}
             >
@@ -722,10 +710,7 @@ function Chat({ connected, onConnect }: { connected: AiProviderId[]; onConnect: 
             placeholder="노트에 대해 질문… (Enter 전송, Shift+Enter 줄바꿈)"
             value={input}
             rows={2}
-            onChange={(e) => {
-              setInput(e.target.value);
-              localStorage.setItem('eduink-chat-draft', e.target.value);
-            }}
+            onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
                 e.preventDefault();
@@ -739,7 +724,7 @@ function Chat({ connected, onConnect }: { connected: AiProviderId[]; onConnect: 
               className="btn-primary !px-2"
               onClick={(e) => {
                 e.preventDefault();
-                abortControllerRef.current?.abort();
+                aiChatAbortManager.abort();
               }}
               title="중지"
             >

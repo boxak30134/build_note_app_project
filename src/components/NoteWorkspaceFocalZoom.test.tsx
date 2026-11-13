@@ -43,6 +43,8 @@ describe('NoteWorkspace Pinch-to-Zoom Focal Point & Touch Scroll', () => {
     useSettings.setState({
       docFormat: 'continuous',
       fontSize: 16,
+      tool: 'pencil',
+      mouseDraw: false,
     });
     useSessions.getState().patch(noteId, {
       loaded: true,
@@ -72,7 +74,7 @@ describe('NoteWorkspace Pinch-to-Zoom Focal Point & Touch Scroll', () => {
 
     // NoteWorkspace 로딩 대기
     const viewport = await screen.findByTestId('note-viewport');
-    const page = screen.getByTestId('note-page');
+    const page = await screen.findByTestId('note-page');
     expect(viewport).toBeTruthy();
     expect(page).toBeTruthy();
 
