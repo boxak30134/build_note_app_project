@@ -1509,11 +1509,16 @@ export class NoteSession {
   }
 
   async insertPdf(file: File) {
+    const isPdf = file.type === 'application/pdf' || file.name.trim().toLowerCase().endsWith('.pdf');
+    if (!isPdf) {
+      toast.error(`지원하지 않는 파일 형식입니다: ${file.name}`);
+      return;
+    }
     try {
       const rel = await saveAttachmentExclusive(this.id, file, file.name);
       this.editor.chain().focus().insertContent([{ type: 'pdfEmbed', attrs: { src: rel, name: file.name } }, { type: 'paragraph' }]).run();
     } catch (e) {
-      toast.error(`PDF 저장 실패: ${(e as Error).message}`);
+      toast.error(`PDF 저장 실패: ${(e as Error).message || '알 수 없는 오류'}`);
     }
   }
 
@@ -1539,7 +1544,7 @@ export class NoteSession {
     const files = Array.from(event.dataTransfer?.files ?? []);
     if (files.length === 0) return false;
     const images = files.filter((f) => f.type.startsWith('image/'));
-    const pdfs = files.filter((f) => f.type === 'application/pdf');
+    const pdfs = files.filter((f) => f.type === 'application/pdf' || f.name.trim().toLowerCase().endsWith('.pdf'));
     if (images.length === 0 && pdfs.length === 0) return false;
     event.preventDefault();
     const pos = this.editor.view.posAtCoords({ left: event.clientX, top: event.clientY })?.pos;

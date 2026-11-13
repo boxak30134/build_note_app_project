@@ -137,7 +137,7 @@ function AttachMenu() {
       icon: <FileText size={15} />,
       label: 'PDF',
       run: withSession(async (s) => {
-        const [f] = await pickFiles('application/pdf', false);
+        const [f] = await pickFiles('application/pdf,.pdf', false);
         if (f) await s.insertPdf(f);
       }),
     },

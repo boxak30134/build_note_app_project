@@ -21,8 +21,8 @@ export interface ImportSummary {
 export const IMPORT_MAX_BYTES = 200 * 1024 * 1024;
 
 export function detectImportKind(file: { name: string; type: string }): ImportKind | null {
-  const ext = file.name.split('.').pop()?.toLowerCase();
-  if (ext === 'pdf' || file.type === 'application/pdf') return 'pdf';
+  const normalizedName = file.name.trim().toLowerCase();
+  if (file.type === 'application/pdf' || normalizedName.endsWith('.pdf')) return 'pdf';
   return null;
 }
 
@@ -75,7 +75,7 @@ export async function assemblePdfImportResult(
     );
 
     if (page.template) {
-      const rel = await saveAttachment(page.template.blob, `${stem}-p${page.index}.png`);
+      const rel = await saveAttachment(page.template.blob, `${stem}-p${page.index}.jpg`);
       content.push({
         type: 'inkTemplate',
         attrs: {
@@ -120,7 +120,7 @@ export async function assemblePdfImportResult(
 
 async function importPdfFile(file: File, noteId: string, onProgress?: (msg: string) => void) {
   const { importPdf } = await import('./pdfImport');
-  const result = await importPdf(await file.arrayBuffer(), (p, t) => onProgress?.(`PDF 페이지 분석 중… ${p}/${t}`));
+  const result = await importPdf(await file.arrayBuffer(), (p, t) => onProgress?.(`PDF 변환 중 (${p} / ${t} 페이지)...`));
   return assemblePdfImportResult(result, file.name, (blob, name) => saveAttachmentExclusive(noteId, blob, name));
 }
 

@@ -366,11 +366,11 @@ export function LeftSidebar() {
 
   /** PDF 문서 가져오기 */
   const importExternal = async () => {
-    const files = await pickFiles('.pdf,application/pdf', true);
+    const files = await pickFiles('application/pdf,.pdf', true);
     if (files.length === 0) return;
     const { importExternalFile } = await import('../features/import/importer');
     for (const f of files) {
-      setImporting(`${f.name} 가져오는 중…`);
+      setImporting(`${f.name} — PDF 준비 중...`);
       try {
         const r = await importExternalFile(f, selectedFolder, (msg) => setImporting(`${f.name} — ${msg}`));
         indexNote(r.note);
@@ -378,7 +378,7 @@ export function LeftSidebar() {
         const detail = `${r.pages}쪽 · 텍스트 블록 ${r.textBlocks}개 · 페이지 템플릿 ${r.handwritingPages}쪽 · 이미지 ${r.media}개`;
         toast.success(`'${r.note.title}' 가져오기 완료\n${detail}`);
       } catch (e) {
-        toast.error((e as Error).message, `${f.name} 가져오기 실패`);
+        toast.error((e as Error).message || '알 수 없는 오류가 발생했습니다.', `${f.name} 가져오기 실패`);
       }
     }
     setImporting(null);
