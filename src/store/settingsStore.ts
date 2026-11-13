@@ -53,6 +53,40 @@ export const DEFAULT_COLORS = DEFAULT_PALETTE_COLORS;
 
 export type TranslationInsertMode = 'parentheses' | 'ruby' | 'replace';
 
+export type DriveSyncStatus =
+  | 'idle'
+  | 'syncing'
+  | 'synced'
+  | 'offline'
+  | 'SYNC_FOLDER_MISSING'
+  | 'error';
+
+export interface DriveSyncConfig {
+  enabled: boolean;
+  targetFolderId: string | null;
+  targetFolderName: string | null;
+  targetImagesFolderId: string | null;
+  lastSyncedAt: number | null;
+  syncStatus: DriveSyncStatus;
+  clientId: string;
+  accountEmail: string | null;
+  accountName: string | null;
+  lastError: string | null;
+}
+
+export const DEFAULT_DRIVE_SYNC_CONFIG: DriveSyncConfig = {
+  enabled: false,
+  targetFolderId: null,
+  targetFolderName: null,
+  targetImagesFolderId: null,
+  lastSyncedAt: null,
+  syncStatus: 'idle',
+  clientId: '',
+  accountEmail: null,
+  accountName: null,
+  lastError: null,
+};
+
 export const DEFAULT_MODELS: Record<AiProviderId, string> = {
   openai: 'gpt-4.1-mini',
   google: GEMINI_PRIMARY_MODEL,
@@ -107,6 +141,9 @@ export interface SettingsState {
   /** 기본 글자 크기 (px, 기본값: 16) */
   fontSize: number;
 
+  /** Google Drive 지정 폴더 격리 동기화 설정 */
+  driveSyncConfig: DriveSyncConfig;
+
   toggleLeft: () => void;
   toggleRight: () => void;
   setPaneWidth: (side: 'left' | 'right', w: number) => void;
@@ -126,6 +163,7 @@ export interface SettingsState {
   removeCustomFont: (fontId: string) => void;
   setTranslationInsertMode: (mode: TranslationInsertMode) => void;
   setFontSize: (size: number) => void;
+  setDriveSyncConfig: (patch: Partial<DriveSyncConfig>) => void;
   set: (p: Partial<SettingsState>) => void;
 }
 
@@ -164,6 +202,7 @@ export const useSettings = create<SettingsState>()(
 
       translationInsertMode: 'parentheses',
       fontSize: 16,
+      driveSyncConfig: DEFAULT_DRIVE_SYNC_CONFIG,
 
       toggleLeft: () => set((s) => ({ leftOpen: !s.leftOpen })),
       toggleRight: () => set((s) => ({ rightOpen: !s.rightOpen })),
@@ -226,11 +265,13 @@ export const useSettings = create<SettingsState>()(
         }),
       setTranslationInsertMode: (translationInsertMode) => set({ translationInsertMode }),
       setFontSize: (fontSize) => set({ fontSize: Math.max(8, Math.min(72, Math.round(fontSize))) }),
+      setDriveSyncConfig: (patch) =>
+        set((s) => ({ driveSyncConfig: { ...s.driveSyncConfig, ...patch } })),
       set: (p) => set(p),
     }),
     {
       name: 'eduink-settings',
-      version: 6,
+      version: 8,
       migrate: (persistedState: unknown, version: number) => {
         const state = (persistedState ?? {}) as Partial<SettingsState>;
         if (version < 2 && state.aiModels) {
@@ -263,6 +304,16 @@ export const useSettings = create<SettingsState>()(
         }
         if (version < 6) {
           state.fontSize = state.fontSize ?? 16;
+        }
+        if (version < 7) {
+          state.driveSyncConfig = state.driveSyncConfig ?? DEFAULT_DRIVE_SYNC_CONFIG;
+        }
+        if (version < 8 && state.driveSyncConfig) {
+          state.driveSyncConfig = {
+            ...DEFAULT_DRIVE_SYNC_CONFIG,
+            ...state.driveSyncConfig,
+            accountName: state.driveSyncConfig.accountName ?? null,
+          };
         }
         return state as SettingsState;
       },

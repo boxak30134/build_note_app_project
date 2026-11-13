@@ -40,6 +40,11 @@ export interface NoteRecord {
   /** 로컬 파일에 연결된 경우 (File System Access API) */
   fileHandle?: FileSystemFileHandle | null;
   fileLastModified?: number | null;
+  /** Google Drive 지정 폴더 동기화 메타데이터 */
+  driveFileId?: string | null;
+  lastSyncedAt?: number | null;
+  syncDirty?: boolean;
+  remoteModifiedTime?: string | null;
   createdAt: number;
   updatedAt: number;
   deletedAt?: number | null;
@@ -77,6 +82,13 @@ export class EduInkDB extends Dexie {
       customFonts: 'id, name, createdAt',
       glossaryStats: 'id, word, contextTag, selectedMeaning, lastUpdated',
     });
+    this.version(4).stores({
+      notes: 'id, folderId, title, updatedAt, deletedAt, driveFileId, syncDirty',
+      folders: 'id, parentId, name, deletedAt',
+      secrets: 'id',
+      customFonts: 'id, name, createdAt',
+      glossaryStats: 'id, word, contextTag, selectedMeaning, lastUpdated',
+    });
   }
 }
 
@@ -103,6 +115,10 @@ export function emptyNote(partial: Partial<NoteRecord> = {}): NoteRecord {
     eol: 'lf',
     fileHandle: null,
     fileLastModified: null,
+    driveFileId: null,
+    lastSyncedAt: null,
+    syncDirty: false,
+    remoteModifiedTime: null,
     createdAt: now,
     updatedAt: now,
     deletedAt: null,

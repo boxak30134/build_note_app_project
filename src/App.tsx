@@ -18,6 +18,7 @@ import { registerCustomFontInDOM } from './core/font/fontManager';
 import { indexAllNotes, indexNote } from './search/searchClient';
 import { allSessions, getSession } from './session/NoteSession';
 import { toast } from './store/uiStore';
+import { registerDriveOnlineSyncListener } from './modules/sync/driveSyncEngine';
 
 function Resizer({ side }: { side: 'left' | 'right' }) {
   const setPaneWidth = useSettings((s) => s.setPaneWidth);
@@ -114,6 +115,7 @@ export default function App() {
       setReady(true);
       void indexAllNotes();
     })();
+    return registerDriveOnlineSyncListener();
   }, []);
 
   // 전역 단축키: Ctrl+S 저장, 에디터 밖 Ctrl+Z/Y 통합 Undo/Redo (포커스된 분할 패널 우선)

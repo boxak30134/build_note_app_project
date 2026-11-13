@@ -1591,6 +1591,7 @@ export class NoteSession {
         textObjects: this.ui.textObjects ?? [],
         pages,
         fileLastModified,
+        syncDirty: true,
         updatedAt: Date.now(),
       };
       await db.notes.put(updated);
@@ -1599,10 +1600,48 @@ export class NoteSession {
       this.captureClean();
       indexNote(updated);
       this.refreshRelatedNotes();
+      if (useSettings.getState().driveSyncConfig.enabled) {
+        void import('../modules/sync/driveSyncEngine')
+          .then((m) => m.scheduleBackgroundDriveSync())
+          .catch(() => undefined);
+      }
       return true;
     } finally {
       this.saving = false;
     }
+  }
+
+  /** 원격 Google Drive 변경 사항을 Undo 스택 오염 없이(addToHistory: false) 안전하게 반영 */
+  async applyRemoteMarkdown(
+    markdownText: string,
+    driveFileId: string,
+    remoteModifiedTime: string | null,
+    syncedAt: number,
+  ) {
+    const json = this.editor.markdown ? this.editor.markdown.parse(markdownText) : markdownToJson(markdownText);
+    this.editor.view.dispatch(
+      this.editor.state.tr
+        .replaceWith(0, this.editor.state.doc.content.size, this.editor.schema.nodeFromJSON(json).content)
+        .setMeta('addToHistory', false)
+        .setMeta(ASSIGN_IDS_META, true),
+    );
+    const content = this.editor.getJSON();
+    const updated: NoteRecord = {
+      ...this.record,
+      content,
+      markdown: markdownText,
+      plainText: plainTextOf(content),
+      driveFileId,
+      remoteModifiedTime,
+      lastSyncedAt: syncedAt,
+      syncDirty: false,
+      updatedAt: syncedAt,
+    };
+    await db.notes.put(updated);
+    this.record = updated;
+    drafts.clear(this.id);
+    this.captureClean();
+    indexNote(updated);
   }
 
   /** 디스크에서 다시 불러오기 (외부 변경 반영) */

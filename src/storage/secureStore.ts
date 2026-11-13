@@ -154,3 +154,69 @@ export async function removeTranslateApiKey(): Promise<void> {
     // ignore
   }
 }
+
+export interface DriveOAuthToken {
+  accessToken: string;
+  expiresAt: number;
+  refreshToken?: string;
+  email?: string;
+  name?: string;
+  scope?: string;
+}
+
+const DRIVE_TOKEN_ID = 'oauth:google-drive';
+const DRIVE_TOKEN_FALLBACK_KEY = 'eduink_oauth_google_drive';
+
+export async function saveDriveToken(token: DriveOAuthToken): Promise<void> {
+  const raw = JSON.stringify(token);
+  try {
+    const key = await masterKey();
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const data = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(raw));
+    await db.secrets.put({ id: DRIVE_TOKEN_ID, value: { iv, data } satisfies Encrypted });
+  } catch {
+    try {
+      localStorage.setItem(DRIVE_TOKEN_FALLBACK_KEY, raw);
+    } catch {
+      // ignore
+    }
+  }
+}
+
+export async function loadDriveToken(): Promise<DriveOAuthToken | null> {
+  try {
+    const rec = await db.secrets.get(DRIVE_TOKEN_ID);
+    if (rec) {
+      const { iv, data } = rec.value as Encrypted;
+      const key = await masterKey();
+      const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: iv as BufferSource }, key, data);
+      const decoded = JSON.parse(new TextDecoder().decode(plain)) as DriveOAuthToken;
+      if (decoded?.accessToken) return decoded;
+    }
+  } catch {
+    // ignore
+  }
+  try {
+    const raw = localStorage.getItem(DRIVE_TOKEN_FALLBACK_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as DriveOAuthToken;
+      if (parsed?.accessToken) return parsed;
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+export async function removeDriveToken(): Promise<void> {
+  try {
+    await db.secrets.delete(DRIVE_TOKEN_ID);
+  } catch {
+    // ignore
+  }
+  try {
+    localStorage.removeItem(DRIVE_TOKEN_FALLBACK_KEY);
+  } catch {
+    // ignore
+  }
+}
