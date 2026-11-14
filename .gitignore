@@ -17,6 +17,7 @@ Thumbs.db
 *.key
 CLAUDE.md
 AGENTS.md
+vibe-context/
 /requirements/
 /report/
 /scripts/

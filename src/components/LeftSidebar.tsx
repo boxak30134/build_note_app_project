@@ -20,6 +20,7 @@ import {
   FolderTree,
   Layers,
   CheckSquare,
+  CloudUpload,
 } from 'lucide-react';
 import { db, emptyNote, uid, type FolderRecord, type NoteRecord } from '../storage/db';
 import { useTabs } from '../store/tabsStore';
@@ -31,6 +32,8 @@ import { markdownToJson } from '../editor/extensions';
 import { indexNote, unindexNote } from '../search/searchClient';
 import { deleteAttachmentsOf } from '../storage/attachmentsCleanup';
 import { getSession } from '../session/NoteSession';
+import { uploadSelectedNotesToDrive } from '../modules/sync/driveSyncEngine';
+import { useSettings } from '../store/settingsStore';
 import { PageThumbnailList, extractPageItems } from './PageThumbnailList';
 
 type Menu = { x: number; y: number; kind: 'note' | 'folder'; id: string } | null;
@@ -275,6 +278,67 @@ export function LeftSidebar() {
     toast.success(`${count}개 항목을 이동했습니다.`);
   };
 
+  /** 우클릭 대상과 다중 선택 상태를 조합해 업로드할 문서 ID 목록 산출 */
+  const resolveMenuUploadNoteIds = (target: { kind: 'note' | 'folder'; id: string }): string[] => {
+    const clickedKey = `${target.kind}:${target.id}`;
+    const useSelection = selectedKeys.size > 0 && selectedKeys.has(clickedKey);
+    if (!useSelection) {
+      if (target.kind === 'note') return [target.id];
+      const folderScope = new Set(descendantFolderIds(liveFolders, target.id));
+      return liveNotes.filter((n) => n.folderId && folderScope.has(n.folderId)).map((n) => n.id);
+    }
+
+    const ids = new Set<string>();
+    const folderIds: string[] = [];
+    for (const key of selectedKeys) {
+      if (key.startsWith('note:')) ids.add(key.slice(5));
+      else if (key.startsWith('folder:')) folderIds.push(...descendantFolderIds(liveFolders, key.slice(7)));
+    }
+    if (folderIds.length > 0) {
+      const folderScope = new Set(folderIds);
+      liveNotes.forEach((n) => {
+        if (n.folderId && folderScope.has(n.folderId)) ids.add(n.id);
+      });
+    }
+    return Array.from(ids);
+  };
+
+  /** 선택한 문서들을 로컬 폴더 구조와 동일한 경로로 Google Drive 동기화 폴더에 업로드 */
+  const handleUploadToDrive = async (target: { kind: 'note' | 'folder'; id: string }) => {
+    const cfg = useSettings.getState().driveSyncConfig;
+    if (!cfg.enabled || !cfg.targetFolderId) {
+      toast.error('Google Drive 동기화 폴더가 연결되지 않았습니다. 우측 설정에서 먼저 연동하세요.');
+      return;
+    }
+
+    const noteIds = resolveMenuUploadNoteIds(target);
+    if (noteIds.length === 0) {
+      toast.info('업로드할 문서가 없습니다.');
+      return;
+    }
+
+    // 열려 있고 수정 중인 세션은 먼저 로컬 DB에 확정 저장
+    for (const nid of noteIds) {
+      const s = getSession(nid);
+      if (s && s.ui.dirty) {
+        await s.save();
+      }
+    }
+
+    const res = await uploadSelectedNotesToDrive(noteIds);
+    if (res.status === 'synced') {
+      if (selectedKeys.has(`${target.kind}:${target.id}`)) {
+        setSelectedKeys(new Set());
+        setIsSelectMode(false);
+      }
+      toast.success(`Google Drive에 ${res.uploadedCount}개 문서를 경로 그대로 업로드했습니다.`);
+    } else if (res.status === 'SYNC_FOLDER_MISSING') {
+      toast.error('연결된 Google Drive 폴더를 찾을 수 없습니다. 설정에서 폴더를 다시 지정해 주세요.');
+    } else {
+      toast.error(res.errorMessage ?? 'Google Drive 업로드에 실패했습니다.');
+    }
+  };
+
   /** 휴지통 복수 선택 항목 일괄 복원 */
   const restoreSelectedTrash = async () => {
     if (selectedTrashKeys.size === 0) return;
@@ -409,8 +473,8 @@ export function LeftSidebar() {
           data-testid={`folder-row-${f.id}`}
           className={`tree-row ${isChecked ? 'bg-indigo-100/90 text-indigo-900 font-medium' : selectedFolder === f.id ? 'bg-indigo-50' : ''}`}
           style={{ paddingLeft: 6 + depth * 14 }}
-          onClick={() => {
-            if (isSelectMode) {
+          onClick={(e) => {
+            if (isSelectMode || e.ctrlKey || e.metaKey) {
               toggleKey(key);
               return;
             }
@@ -472,8 +536,8 @@ export function LeftSidebar() {
         onDragStart={(e) => e.dataTransfer.setData('text/note-id', n.id)}
         className={`tree-row ${isChecked ? 'bg-indigo-100/90 text-indigo-900 font-medium' : activeId === n.id ? 'bg-indigo-100 text-indigo-800' : ''}`}
         style={{ paddingLeft: 6 + depth * 14 + 14 }}
-        onClick={() => {
-          if (isSelectMode) {
+        onClick={(e) => {
+          if (isSelectMode || e.ctrlKey || e.metaKey) {
             toggleKey(key);
             return;
           }
@@ -812,16 +876,31 @@ export function LeftSidebar() {
         </div>
       )}
 
-      {menu && (
-        <div className="fixed z-50 w-40 rounded-xl border bg-white py-1 text-sm shadow-xl" style={{ left: menu.x, top: menu.y }} onClick={(e) => e.stopPropagation()}>
-          <button className="menu-item" onClick={() => (setMenu(null), void rename(menu.kind, menu.id))}>
-            <Pencil size={13} /> 이름 변경
-          </button>
-          <button className="menu-item text-red-600" onClick={() => (setMenu(null), void trash(menu.kind, menu.id))}>
-            <Trash2 size={13} /> 휴지통으로 이동
-          </button>
-        </div>
-      )}
+      {menu && (() => {
+        const uploadCount = resolveMenuUploadNoteIds(menu).length;
+        return (
+          <div className="fixed z-50 w-52 rounded-xl border bg-white py-1 text-sm shadow-xl" style={{ left: menu.x, top: menu.y }} onClick={(e) => e.stopPropagation()}>
+            <button
+              type="button"
+              data-testid="ctx-upload-drive-btn"
+              className="menu-item text-indigo-700"
+              onClick={() => {
+                const target = menu;
+                setMenu(null);
+                void handleUploadToDrive(target);
+              }}
+            >
+              <CloudUpload size={13} /> {uploadCount > 1 ? `Google Drive에 업로드 (${uploadCount}개)` : 'Google Drive에 업로드'}
+            </button>
+            <button className="menu-item" onClick={() => (setMenu(null), void rename(menu.kind, menu.id))}>
+              <Pencil size={13} /> 이름 변경
+            </button>
+            <button className="menu-item text-red-600" onClick={() => (setMenu(null), void trash(menu.kind, menu.id))}>
+              <Trash2 size={13} /> 휴지통으로 이동
+            </button>
+          </div>
+        );
+      })()}
     </aside>
   );
 }

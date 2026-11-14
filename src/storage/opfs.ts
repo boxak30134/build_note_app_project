@@ -36,6 +36,12 @@ export async function writeAttachment(noteId: string, relPath: string, data: Blo
     const w = await fh.createWritable();
     await w.write(data);
     await w.close();
+    const key = `${noteId}/${relPath}`;
+    const prevUrl = urlCache.get(key);
+    if (prevUrl) {
+      URL.revokeObjectURL(prevUrl);
+      urlCache.delete(key);
+    }
   } catch (e) {
     // 업로드 실패 시 잔여 임시 파일 즉시 정리
     await dir.removeEntry(name).catch(() => undefined);
@@ -111,13 +117,13 @@ export async function readAttachmentBlob(noteId: string, relPath: string): Promi
   }
 }
 
-/** OPFS의 notes/<noteId>/images/ 디렉토리 내 이미지 파일 목록 반환 */
-export async function listNoteImages(
+async function listNoteDirFiles(
   noteId: string,
+  dirName: 'images' | 'attachments',
 ): Promise<Array<{ relPath: string; name: string; blob: Blob }>> {
   const out: Array<{ relPath: string; name: string; blob: Blob }> = [];
   try {
-    const dir = await dirFor(noteId, ['images'], false);
+    const dir = await dirFor(noteId, [dirName], false);
     const iterable = dir as unknown as {
       values?: () => AsyncIterable<FileSystemHandle>;
     };
@@ -125,11 +131,25 @@ export async function listNoteImages(
     for await (const handle of iterable.values()) {
       if (handle.kind === 'file') {
         const file = await (handle as FileSystemFileHandle).getFile();
-        out.push({ relPath: `images/${handle.name}`, name: handle.name, blob: file });
+        out.push({ relPath: `${dirName}/${handle.name}`, name: handle.name, blob: file });
       }
     }
   } catch {
-    // images 폴더가 아직 없으면 빈 배열 반환
+    // 폴더가 아직 없으면 빈 배열 반환
   }
   return out;
+}
+
+/** OPFS의 notes/<noteId>/images/ 디렉토리 내 이미지 파일 목록 반환 */
+export async function listNoteImages(
+  noteId: string,
+): Promise<Array<{ relPath: string; name: string; blob: Blob }>> {
+  return listNoteDirFiles(noteId, 'images');
+}
+
+/** OPFS의 notes/<noteId>/attachments/ 디렉토리 내 첨부 파일(PDF 페이지 배경 등) 목록 반환 */
+export async function listNoteAttachments(
+  noteId: string,
+): Promise<Array<{ relPath: string; name: string; blob: Blob }>> {
+  return listNoteDirFiles(noteId, 'attachments');
 }

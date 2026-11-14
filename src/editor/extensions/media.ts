@@ -192,6 +192,30 @@ export const InkTemplate = Node.create<NoteImageOptions>({
     };
   },
 
+  markdownTokenizer: {
+    name: 'inkTemplate',
+    level: 'block',
+    start: (src: string) => src.indexOf('![손글씨 페이지 '),
+    tokenize: (src: string) => {
+      const m = /^!\[손글씨 페이지\s*(\d*)\]\(([^)\n]*)\)[ \t]*(?:\r?\n|$)/.exec(src);
+      if (!m) return undefined;
+      return {
+        type: 'inkTemplate',
+        raw: m[0],
+        page: Number(m[1]) || 1,
+        src: m[2].trim(),
+      };
+    },
+  },
+
+  markdownTokenName: 'inkTemplate',
+
+  parseMarkdown: (token, h) =>
+    h.createNode('inkTemplate', {
+      page: Number(token.page) || 1,
+      src: String(token.src ?? ''),
+    }),
+
   renderMarkdown: (node) => `![손글씨 페이지 ${node.attrs?.page ?? ''}](${node.attrs?.src ?? ''})`,
 });
 
