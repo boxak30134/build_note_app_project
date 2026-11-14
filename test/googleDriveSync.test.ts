@@ -993,4 +993,139 @@ describe('REQ_google_drive_sync: Google Drive 지정 폴더 격리 동기화', (
     expect(noteStore.get('nested_note_1')?.syncDirty).toBe(false);
     expect(noteStore.get('nested_note_1')?.driveFileId).toBe(f1?.id);
   });
+
+  it('15. runDriveSync 시 루트뿐 아니라 하위 폴더를 재귀 탐색하여 내려받고 로컬 하위 폴더 노트도 경로를 유지해 업로드한다', async () => {
+    const folderStore = new Map<string, FolderRecord>([
+      ['local_fld_1', { id: 'local_fld_1', name: '로컬폴더', parentId: null, createdAt: 1000, deletedAt: null }],
+    ]);
+    vi.spyOn(db.folders, 'toArray').mockImplementation(async () => Array.from(folderStore.values()));
+    vi.spyOn(db.folders, 'put').mockImplementation(async (f: FolderRecord) => {
+      folderStore.set(f.id, f);
+      return f.id;
+    });
+
+    const localSubNote = emptyNote({
+      id: 'local_sub_note',
+      title: '로컬 하위 노트',
+      folderId: 'local_fld_1',
+      markdown: '# Local Sub Note',
+      content: { type: 'doc', content: [{ type: 'heading', attrs: { level: 1 }, content: [{ type: 'text', text: 'Local Sub Note' }] }] },
+      plainText: 'Local Sub Note',
+      syncDirty: true,
+      updatedAt: 5000,
+    });
+    noteStore.set(localSubNote.id, localSubNote);
+
+    vi.spyOn(opfsMod, 'listNoteImages').mockResolvedValue([]);
+    vi.spyOn(opfsMod, 'listNoteAttachments').mockResolvedValue([]);
+
+    const createdFolders: Array<{ id: string; name: string; parents: string[] }> = [];
+    const uploadedFiles: Array<{ id: string; name: string; parents: string[]; body: string }> = [];
+    let seq = 1;
+
+    const FOLDER_MIME = 'application/vnd.google-apps.folder';
+    const remoteEntriesByParent: Record<string, Array<{ id: string; name: string; mimeType: string; parents: string[]; modifiedTime?: string }>> = {
+      [TARGET_FOLDER_ID]: [
+        { id: IMAGES_FOLDER_ID, name: 'images', mimeType: FOLDER_MIME, parents: [TARGET_FOLDER_ID] },
+        { id: 'drv_sub_1', name: '대학원', mimeType: FOLDER_MIME, parents: [TARGET_FOLDER_ID] },
+      ],
+      drv_sub_1: [
+        { id: 'drv_sub_2', name: '선형대수', mimeType: FOLDER_MIME, parents: ['drv_sub_1'] },
+      ],
+      drv_sub_2: [
+        { id: 'drv_nested_md', name: '하위노트.md', mimeType: 'text/markdown', parents: ['drv_sub_2'], modifiedTime: '2026-11-14T12:00:00.000Z' },
+        { id: 'drv_nested_sc', name: '하위노트.eduink.json', mimeType: 'application/json', parents: ['drv_sub_2'], modifiedTime: '2026-11-14T12:00:00.000Z' },
+      ],
+      [IMAGES_FOLDER_ID]: [],
+    };
+
+    const sidecarPayload = JSON.stringify({
+      version: 1,
+      content: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: '하위 본문' }] }] },
+      strokes: [{ id: 's_sub', pageIndex: 0, tool: 'pencil', color: '#000000', width: 2, points: [{ x: 1, y: 2, p: 0.5 }] }],
+      annotations: [],
+      textObjects: [],
+      pages: [],
+    });
+
+    const mockFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+      const parsedUrl = new URL(url);
+      const qParam = parsedUrl.searchParams.get('q') ?? '';
+
+      if (parsedUrl.pathname.endsWith(`/files/${TARGET_FOLDER_ID}`)) {
+        return new Response(JSON.stringify({ id: TARGET_FOLDER_ID, name: 'EduInk Sync', trashed: false }), { status: 200 });
+      }
+      if (parsedUrl.pathname.endsWith('/files') && method === 'GET') {
+        const parentMatch = qParam.match(/'([^']+)' in parents/);
+        const parentId = parentMatch?.[1] ?? '';
+        if (qParam.includes('mimeType = ')) {
+          const nameMatch = qParam.match(/name = '([^']+)'/);
+          const name = nameMatch?.[1] ?? '';
+          const matched = [
+            ...(remoteEntriesByParent[parentId] ?? []).filter((f) => f.mimeType === FOLDER_MIME && f.name === name),
+            ...createdFolders.filter((f) => f.parents.includes(parentId) && f.name === name),
+          ];
+          return new Response(JSON.stringify({ files: matched }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ files: remoteEntriesByParent[parentId] ?? [] }), { status: 200 });
+      }
+      if (parsedUrl.pathname.endsWith('/files/drv_nested_md') && parsedUrl.searchParams.get('alt') === 'media') {
+        return new Response('# 하위노트\n\n하위 본문', { status: 200 });
+      }
+      if (parsedUrl.pathname.endsWith('/files/drv_nested_sc') && parsedUrl.searchParams.get('alt') === 'media') {
+        return new Response(sidecarPayload, { status: 200 });
+      }
+      if (!url.includes('/upload/') && parsedUrl.pathname.endsWith('/files') && method === 'POST') {
+        const payload = JSON.parse(String(init?.body ?? '{}')) as { name: string; parents: string[] };
+        const id = `drv_created_fld_${seq++}`;
+        const folderMeta = { id, name: payload.name, parents: payload.parents };
+        createdFolders.push(folderMeta);
+        return new Response(JSON.stringify(folderMeta), { status: 200 });
+      }
+      if (url.includes('/upload/drive/v3/files') && method === 'POST') {
+        const rawText = await (init?.body as Blob).text();
+        const nameMatch = rawText.match(/"name":"([^"]+)"/);
+        const parentsMatch = rawText.match(/"parents":\["([^"]+)"\]/);
+        const fileName = nameMatch?.[1] ?? `file_${seq}`;
+        const parentId = parentsMatch?.[1] ?? '';
+        const id = `drv_uploaded_${seq++}`;
+        const meta = { id, name: fileName, parents: [parentId], body: rawText, modifiedTime: '2026-11-14T13:10:00.000Z' };
+        uploadedFiles.push(meta);
+        return new Response(JSON.stringify(meta), { status: 200 });
+      }
+      return new Response('{}', { status: 404 });
+    });
+
+    const res = await runDriveSync({
+      fetchImpl: mockFetch as unknown as typeof fetch,
+      getToken: async () => 'valid-token',
+    });
+
+    expect(res.status).toBe('synced');
+    expect(res.downloadedCount).toBe(1);
+    expect(res.uploadedCount).toBe(1);
+
+    // 1. 로컬 db.folders에 대학원 -> 선형대수 계층이 생성되고 루트 images 폴더는 제외되었는지 확인
+    const folders = Array.from(folderStore.values());
+    expect(folders.some((f) => f.name === 'images')).toBe(false);
+    const grad = folders.find((f) => f.name === '대학원' && f.parentId === null);
+    const math = folders.find((f) => f.name === '선형대수' && f.parentId === grad?.id);
+    expect(grad).toBeTruthy();
+    expect(math).toBeTruthy();
+
+    // 2. 원격 하위노트가 올바른 folderId와 사이드카 strokes를 포함해 로컬 노트로 저장되었는지 확인
+    const downloadedNote = Array.from(noteStore.values()).find((n) => n.title === '하위노트');
+    expect(downloadedNote).toBeTruthy();
+    expect(downloadedNote?.folderId).toBe(math?.id);
+    expect(downloadedNote?.strokes).toHaveLength(1);
+    expect(downloadedNote?.driveFileId).toBe('drv_nested_md');
+
+    // 3. 로컬 하위 폴더 노트가 Drive의 '로컬폴더' 하위에 업로드되었는지 확인
+    const remoteLocalFld = createdFolders.find((f) => f.name === '로컬폴더' && f.parents.includes(TARGET_FOLDER_ID));
+    expect(remoteLocalFld).toBeTruthy();
+    const uploadedLocalSub = uploadedFiles.find((f) => f.name === '로컬 하위 노트.md');
+    expect(uploadedLocalSub?.parents).toEqual([remoteLocalFld!.id]);
+  });
 });
