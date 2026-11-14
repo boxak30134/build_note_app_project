@@ -32,4 +32,57 @@ describe('마크다운 직렬화 (위키링크·수식·표)', () => {
     expect(json.content[0].type).toBe('table');
     expect(jsonToMarkdown(json)).toMatch(/\|\s*a\s*\|\s*b\s*\|/);
   });
+
+  it('단일 줄바꿈·인용구·표·이중 이스케이프된 &nbsp; / &lt; / &gt; 복원 및 코드 블록 보존', () => {
+    const md = [
+      '&nbsp;',
+      '&nbsp;',
+      '그러나 &amp;lt;킹덤 오브 헤븐&amp;gt;의 보두앵 4세가',
+      '',
+      '> [!note] 제목 &lt;킹덤&gt;',
+      '> &nbsp;',
+      '> 본문 &lt;헤븐&gt;',
+      '',
+      '| 열 | 값 |',
+      '| --- | --- |',
+      '| &nbsp; | &lt;태그&gt; |',
+      '',
+      '```html',
+      '<div>&lt;코드&gt;&nbsp;</div>',
+      '```',
+      '',
+      '인라인 코드 `&lt;span&gt;&nbsp;` 유지',
+    ].join('\n');
+
+    const json = markdownToJson(md) as { content: Array<Record<string, unknown>> };
+    const serialized = JSON.stringify(json);
+
+    // 일반 문장/표/콜아웃에는 리터럴 &nbsp;, &lt;, &gt; 가 남아있지 않아야 함
+    const nonCodeNodes = json.content.filter((n) => n.type !== 'codeBlock');
+    const nonCodeText = JSON.stringify(
+      nonCodeNodes.map((n) => {
+        if (n.type === 'paragraph' && Array.isArray(n.content)) {
+          return {
+            ...n,
+            content: n.content.filter(
+              (c: Record<string, unknown>) =>
+                !Array.isArray(c.marks) || !c.marks.some((m: Record<string, unknown>) => m.type === 'code'),
+            ),
+          };
+        }
+        return n;
+      }),
+    );
+    expect(nonCodeText).not.toContain('&nbsp;');
+    expect(nonCodeText).not.toContain('&lt;');
+    expect(nonCodeText).not.toContain('&gt;');
+    expect(nonCodeText).toContain('그러나 <킹덤 오브 헤븐>의 보두앵 4세가');
+    expect(nonCodeText).toContain('제목 <킹덤>');
+    expect(nonCodeText).toContain('<태그>');
+
+    // 코드 블록과 인라인 코드는 원형 유지
+    const codeBlock = json.content.find((n) => n.type === 'codeBlock') as { content?: Array<{ text?: string }> };
+    expect(codeBlock?.content?.[0]?.text).toBe('<div>&lt;코드&gt;&nbsp;</div>');
+    expect(serialized).toContain('`&lt;span&gt;&nbsp;`'.slice(1, -1));
+  });
 });

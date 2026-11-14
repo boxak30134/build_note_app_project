@@ -3,7 +3,7 @@ import { listNoteAttachments, listNoteImages, writeAttachment } from '../../stor
 import { useSettings } from '../../store/settingsStore';
 import { getSession } from '../../session/NoteSession';
 import { plainTextOf } from '../../core/doc/blocks';
-import { jsonToMarkdown, markdownToJson } from '../../editor/extensions';
+import { jsonToMarkdown, markdownToJson, sanitizeMarkdownDocEntities } from '../../editor/extensions';
 import type { Stroke } from '../../core/strokes/StrokeStore';
 import type { NotePage } from '../../core/page/pageTypes';
 import type { NoteTextObject } from '../../core/text/textObjects';
@@ -539,14 +539,112 @@ function buildContentDocFromMarkdownText(markdown: string): unknown {
     // 파서 예외 시에만 아래 줄 단위 단락 폴백으로 안전 복구
   }
   const lines = cleanMarkdown.split(/\r?\n/);
-  return {
+  return sanitizeMarkdownDocEntities({
     type: 'doc',
     content: lines.map((line) =>
       line
         ? { type: 'paragraph', content: [{ type: 'text', text: line }] }
         : { type: 'paragraph' },
     ),
+  });
+}
+
+type RemoteTreeMdEntry = {
+  file: DriveFileMeta;
+  parentDriveId: string;
+  folderSegments: string[];
+};
+
+type RemoteDriveTree = {
+  mdEntries: RemoteTreeMdEntry[];
+  sidecarsByFolderAndTitle: Map<string, DriveFileMeta>;
+  allowedParents: string[];
+  discoveredImagesFolderId: string | null;
+  driveFolderCache: Map<string, string>;
+};
+
+async function collectRemoteDriveTree(
+  targetFolderId: string,
+  deps?: DriveFetchDeps,
+): Promise<RemoteDriveTree> {
+  const mdEntries: RemoteTreeMdEntry[] = [];
+  const sidecarsByFolderAndTitle = new Map<string, DriveFileMeta>();
+  const allowedParentSet = new Set<string>([targetFolderId]);
+  const driveFolderCache = new Map<string, string>();
+  const visitedFolderIds = new Set<string>();
+  let discoveredImagesFolderId: string | null = null;
+
+  const walk = async (currentFolderId: string, segments: string[]): Promise<void> => {
+    if (visitedFolderIds.has(currentFolderId)) return;
+    visitedFolderIds.add(currentFolderId);
+    allowedParentSet.add(currentFolderId);
+
+    const entries = await listScopedFiles(currentFolderId, undefined, deps);
+    for (const entry of entries) {
+      if (entry.mimeType === FOLDER_MIME) {
+        if (currentFolderId === targetFolderId && entry.name === 'images') {
+          discoveredImagesFolderId = entry.id;
+          continue;
+        }
+        driveFolderCache.set(`${currentFolderId}/${entry.name}`, entry.id);
+        await walk(entry.id, [...segments, entry.name]);
+        continue;
+      }
+
+      if (isSidecarFileName(entry.name)) {
+        sidecarsByFolderAndTitle.set(`${currentFolderId}/${stripSidecarExt(entry.name)}`, entry);
+      } else {
+        mdEntries.push({
+          file: entry,
+          parentDriveId: currentFolderId,
+          folderSegments: segments,
+        });
+      }
+    }
   };
+
+  await walk(targetFolderId, []);
+
+  return {
+    mdEntries,
+    sidecarsByFolderAndTitle,
+    allowedParents: Array.from(allowedParentSet),
+    discoveredImagesFolderId,
+    driveFolderCache,
+  };
+}
+
+async function ensureLocalFolderPath(
+  segments: string[],
+  folderMap: Map<string, FolderRecord>,
+  folderByKey: Map<string, FolderRecord>,
+): Promise<string | null> {
+  if (segments.length === 0) return null;
+  let parentId: string | null = null;
+  for (const seg of segments) {
+    const key = `${parentId ?? ''}::${seg}`;
+    const existing = folderByKey.get(key);
+    if (existing) {
+      parentId = existing.id;
+      continue;
+    }
+    const created: FolderRecord = {
+      id: uid('folder'),
+      name: seg,
+      parentId,
+      createdAt: Date.now(),
+      deletedAt: null,
+    };
+    try {
+      await db.folders.put(created);
+    } catch {
+      // IndexedDB 미지원 테스트 환경 등 폴백
+    }
+    folderByKey.set(key, created);
+    folderMap.set(created.id, created);
+    parentId = created.id;
+  }
+  return parentId;
 }
 
 /**
@@ -593,24 +691,10 @@ export async function runDriveSync(deps?: DriveFetchDeps): Promise<DriveSyncResu
     // 1. 지정 폴더 존재/삭제 여부 확인 (삭제 시 루트에 새 폴더 생성 절대 금지)
     await verifyTargetFolderExists(targetFolderId, deps);
 
-    // 2. 지정 폴더 내부 마크다운 파일 및 사이드카(.eduink.json) 목록 조회
-    const remoteEntries = await listScopedFiles(
-      targetFolderId,
-      `mimeType != '${FOLDER_MIME}'`,
-      deps,
-    );
-    const remoteMdFiles: DriveFileMeta[] = [];
-    const remoteSidecarsByTitle = new Map<string, DriveFileMeta>();
-    for (const entry of remoteEntries) {
-      if (isSidecarFileName(entry.name)) {
-        remoteSidecarsByTitle.set(stripSidecarExt(entry.name), entry);
-      } else {
-        remoteMdFiles.push(entry);
-      }
-    }
-
-    const allowedParents = [targetFolderId];
-    let imagesFolderId = cfg.targetImagesFolderId ?? null;
+    // 2. 지정 폴더 및 모든 하위 폴더 재귀 탐색 (.md, .eduink.json 수집, 루트 images/ 제외)
+    const tree = await collectRemoteDriveTree(targetFolderId, deps);
+    const allowedParents = tree.allowedParents;
+    let imagesFolderId = tree.discoveredImagesFolderId ?? cfg.targetImagesFolderId ?? null;
     let cachedRemoteImgs: DriveFileMeta[] | null = null;
     const downloadedDriveImgIds = new Set<string>();
 
@@ -629,8 +713,8 @@ export async function runDriveSync(deps?: DriveFetchDeps): Promise<DriveSyncResu
       return cachedRemoteImgs;
     };
 
-    const readSidecar = async (title: string): Promise<NoteSyncSidecar | null> => {
-      const meta = remoteSidecarsByTitle.get(title);
+    const readSidecar = async (parentDriveId: string, title: string): Promise<NoteSyncSidecar | null> => {
+      const meta = tree.sidecarsByFolderAndTitle.get(`${parentDriveId}/${title}`);
       if (!meta) return null;
       try {
         const raw = await readScopedDriveFileText(meta, allowedParents, deps);
@@ -681,54 +765,82 @@ export async function runDriveSync(deps?: DriveFetchDeps): Promise<DriveSyncResu
       uploadedImagesCount += res.uploadedCount;
     };
 
-    const uploadSidecarIfNeeded = async (note: NoteRecord, titleOverride?: string): Promise<void> => {
+    const uploadSidecarIfNeeded = async (
+      note: NoteRecord,
+      parentDriveId: string,
+      titleOverride?: string,
+      uploadAllowedParents: string[] = allowedParents,
+    ): Promise<void> => {
       if (!needsSyncSidecar(note)) return;
       const targetTitle = titleOverride ?? note.title;
       const sidecarName = sanitizeSidecarFileName(targetTitle);
-      const existingSidecar = remoteSidecarsByTitle.get(targetTitle) ?? null;
+      const sidecarKey = `${parentDriveId}/${targetTitle}`;
+      const existingSidecar = tree.sidecarsByFolderAndTitle.get(sidecarKey) ?? null;
       const uploadedSidecar = await createOrUpdateMultipartFile(
         {
           existingFile: existingSidecar,
           name: sidecarName,
           mimeType: 'application/json; charset=UTF-8',
-          parentId: targetFolderId,
+          parentId: parentDriveId,
           body: JSON.stringify(buildSidecarPayload(note)),
-          allowedParents,
+          allowedParents: uploadAllowedParents,
         },
         deps,
       );
-      remoteSidecarsByTitle.set(targetTitle, uploadedSidecar);
+      tree.sidecarsByFolderAndTitle.set(sidecarKey, uploadedSidecar);
     };
+
+    let allLocalFolders: FolderRecord[] = [];
+    try {
+      allLocalFolders = await db.folders.toArray();
+    } catch {
+      allLocalFolders = [];
+    }
+    const activeLocalFolders = allLocalFolders.filter((f) => !f.deletedAt);
+    const localFolderMap = new Map<string, FolderRecord>(activeLocalFolders.map((f) => [f.id, f]));
+    const localFolderByKey = new Map<string, FolderRecord>(
+      activeLocalFolders.map((f) => [`${f.parentId ?? ''}::${f.name}`, f]),
+    );
 
     const allLocalNotes = await db.notes.toArray();
     const activeLocalNotes = allLocalNotes.filter((n) => !n.deletedAt);
     const localByDriveId = new Map<string, NoteRecord>();
-    const localByTitle = new Map<string, NoteRecord>();
+    const localByFolderAndTitle = new Map<string, NoteRecord>();
     for (const n of activeLocalNotes) {
       if (n.driveFileId) localByDriveId.set(n.driveFileId, n);
-      localByTitle.set(n.title, n);
+      localByFolderAndTitle.set(`${n.folderId ?? ''}::${n.title}`, n);
     }
 
     const handledNoteIds = new Set<string>();
     const now = Date.now();
 
-    // 3. 원격 -> 로컬 동기화 및 충돌 해결
-    for (const remote of remoteMdFiles) {
+    // 3. 원격 -> 로컬 동기화 및 충돌 해결 (하위 폴더 포함)
+    for (const { file: remote, parentDriveId, folderSegments } of tree.mdEntries) {
       if (!remote.name.toLowerCase().endsWith('.md')) continue;
       assertWithinTargetFolder(remote, allowedParents);
 
+      const resolvedFolderId = await ensureLocalFolderPath(
+        folderSegments,
+        localFolderMap,
+        localFolderByKey,
+      );
       const remoteTitle = stripMdExt(remote.name);
-      const local = localByDriveId.get(remote.id) ?? localByTitle.get(remoteTitle);
+      const local =
+        localByDriveId.get(remote.id) ??
+        localByFolderAndTitle.get(`${resolvedFolderId ?? ''}::${remoteTitle}`);
       const remoteModifiedMs = remote.modifiedTime ? Date.parse(remote.modifiedTime) : now;
 
       if (!local) {
         // 원격에만 있는 신규 마크다운/필기/PDF 노트 -> 로컬 Dexie DB 및 OPFS 리소스로 가져오기
         const mdText = await readScopedDriveFileText(remote, allowedParents, deps);
-        const sidecar = await readSidecar(remoteTitle);
-        const contentDoc = sidecar?.content ?? buildContentDocFromMarkdownText(mdText);
+        const sidecar = await readSidecar(parentDriveId, remoteTitle);
+        const contentDoc = sanitizeMarkdownDocEntities(
+          sidecar?.content ?? buildContentDocFromMarkdownText(mdText),
+        );
         const newNote = emptyNote({
           id: uid('note'),
           title: remoteTitle,
+          folderId: resolvedFolderId,
           markdown: mdText,
           content: contentDoc,
           plainText: plainTextOf(contentDoc),
@@ -751,7 +863,7 @@ export async function runDriveSync(deps?: DriveFetchDeps): Promise<DriveSyncResu
       handledNoteIds.add(local.id);
       const lastSynced = local.lastSyncedAt ?? 0;
       const localChanged = Boolean(local.syncDirty) || local.updatedAt > lastSynced;
-      const remoteSidecar = remoteSidecarsByTitle.get(remoteTitle);
+      const remoteSidecar = tree.sidecarsByFolderAndTitle.get(`${parentDriveId}/${remoteTitle}`);
       const sidecarModifiedMs = remoteSidecar?.modifiedTime ? Date.parse(remoteSidecar.modifiedTime) : 0;
       const remoteChanged =
         (remoteModifiedMs > lastSynced && remote.modifiedTime !== local.remoteModifiedTime) ||
@@ -765,13 +877,13 @@ export async function runDriveSync(deps?: DriveFetchDeps): Promise<DriveSyncResu
           {
             name: conflictFileName,
             mimeType: 'text/markdown; charset=UTF-8',
-            parentId: targetFolderId,
+            parentId: parentDriveId,
             body: resolveUploadMarkdown(local),
             allowedParents,
           },
           deps,
         );
-        await uploadSidecarIfNeeded(local, conflictTitle);
+        await uploadSidecarIfNeeded(local, parentDriveId, conflictTitle);
 
         // 로컬에도 충돌 사본 노트를 별도 보존 (로컬 수정분)
         const conflictNote = emptyNote({
@@ -794,14 +906,17 @@ export async function runDriveSync(deps?: DriveFetchDeps): Promise<DriveSyncResu
 
         // 기존 노트는 원격 최신본 반영 (Undo 스택 무오염)
         const remoteMd = await readScopedDriveFileText(remote, allowedParents, deps);
-        const sidecar = await readSidecar(remoteTitle);
-        const contentDoc = sidecar?.content ?? buildContentDocFromMarkdownText(remoteMd);
+        const sidecar = await readSidecar(parentDriveId, remoteTitle);
+        const contentDoc = sanitizeMarkdownDocEntities(
+          sidecar?.content ?? buildContentDocFromMarkdownText(remoteMd),
+        );
         await downloadAssetsForDoc(local.id, contentDoc);
         const activeSession = getSession(local.id);
         if (activeSession) {
           await activeSession.applyRemoteMarkdown(remoteMd, remote.id, remote.modifiedTime ?? null, now, sidecar);
         } else {
           await db.notes.update(local.id, {
+            folderId: resolvedFolderId,
             markdown: remoteMd,
             content: contentDoc,
             plainText: plainTextOf(contentDoc),
@@ -821,14 +936,17 @@ export async function runDriveSync(deps?: DriveFetchDeps): Promise<DriveSyncResu
       } else if (remoteChanged && !localChanged) {
         // 원격만 최신 -> 로컬에 반영 (addToHistory: false)
         const remoteMd = await readScopedDriveFileText(remote, allowedParents, deps);
-        const sidecar = await readSidecar(remoteTitle);
-        const contentDoc = sidecar?.content ?? buildContentDocFromMarkdownText(remoteMd);
+        const sidecar = await readSidecar(parentDriveId, remoteTitle);
+        const contentDoc = sanitizeMarkdownDocEntities(
+          sidecar?.content ?? buildContentDocFromMarkdownText(remoteMd),
+        );
         await downloadAssetsForDoc(local.id, contentDoc);
         const activeSession = getSession(local.id);
         if (activeSession) {
           await activeSession.applyRemoteMarkdown(remoteMd, remote.id, remote.modifiedTime ?? null, now, sidecar);
         } else {
           await db.notes.update(local.id, {
+            folderId: resolvedFolderId,
             markdown: remoteMd,
             content: contentDoc,
             plainText: plainTextOf(contentDoc),
@@ -852,13 +970,13 @@ export async function runDriveSync(deps?: DriveFetchDeps): Promise<DriveSyncResu
             existingFile: remote,
             name: sanitizeMdFileName(local.title),
             mimeType: 'text/markdown; charset=UTF-8',
-            parentId: targetFolderId,
+            parentId: parentDriveId,
             body: resolveUploadMarkdown(local),
             allowedParents,
           },
           deps,
         );
-        await uploadSidecarIfNeeded(local);
+        await uploadSidecarIfNeeded(local, parentDriveId);
         await db.notes.update(local.id, {
           driveFileId: uploaded.id,
           lastSyncedAt: now,
@@ -869,7 +987,7 @@ export async function runDriveSync(deps?: DriveFetchDeps): Promise<DriveSyncResu
       }
     }
 
-    // 4. 로컬에만 있거나 신규/변경된 노트 + 첨부 이미지(images/*, attachments/*) + 사이드카 업로드
+    // 4. 로컬에만 있거나 신규/변경된 노트 + 첨부 이미지(images/*, attachments/*) + 사이드카 업로드 (하위 폴더 경로 유지)
     for (const local of activeLocalNotes) {
       const needsUpload =
         !handledNoteIds.has(local.id) &&
@@ -879,8 +997,19 @@ export async function runDriveSync(deps?: DriveFetchDeps): Promise<DriveSyncResu
 
       await uploadNoteAssets(local.id);
 
+      const segments = getFolderPathSegments(local.folderId, localFolderMap);
+      const destFolderId = await ensureDriveFolderPath(
+        targetFolderId,
+        segments,
+        tree.driveFolderCache,
+        deps,
+      );
+      const uploadAllowedParents = allowedParents.includes(destFolderId)
+        ? allowedParents
+        : [...allowedParents, destFolderId];
+
       const existingMeta = local.driveFileId
-        ? remoteMdFiles.find((f) => f.id === local.driveFileId) ?? null
+        ? tree.mdEntries.find((m) => m.file.id === local.driveFileId)?.file ?? null
         : null;
 
       const uploaded = await createOrUpdateMultipartFile(
@@ -888,13 +1017,13 @@ export async function runDriveSync(deps?: DriveFetchDeps): Promise<DriveSyncResu
           existingFile: existingMeta,
           name: sanitizeMdFileName(local.title),
           mimeType: 'text/markdown; charset=UTF-8',
-          parentId: targetFolderId,
+          parentId: destFolderId,
           body: resolveUploadMarkdown(local),
-          allowedParents,
+          allowedParents: uploadAllowedParents,
         },
         deps,
       );
-      await uploadSidecarIfNeeded(local);
+      await uploadSidecarIfNeeded(local, destFolderId, undefined, uploadAllowedParents);
 
       await db.notes.update(local.id, {
         driveFileId: uploaded.id,
