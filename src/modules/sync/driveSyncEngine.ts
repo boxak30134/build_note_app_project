@@ -3,7 +3,7 @@ import { listNoteAttachments, listNoteImages, writeAttachment } from '../../stor
 import { useSettings } from '../../store/settingsStore';
 import { getSession } from '../../session/NoteSession';
 import { plainTextOf } from '../../core/doc/blocks';
-import { jsonToMarkdown, markdownToJson } from '../../editor/extensions';
+import { jsonToMarkdown, markdownToJson, sanitizeMarkdownDocEntities } from '../../editor/extensions';
 import type { Stroke } from '../../core/strokes/StrokeStore';
 import type { NotePage } from '../../core/page/pageTypes';
 import type { NoteTextObject } from '../../core/text/textObjects';
@@ -539,14 +539,14 @@ function buildContentDocFromMarkdownText(markdown: string): unknown {
     // 파서 예외 시에만 아래 줄 단위 단락 폴백으로 안전 복구
   }
   const lines = cleanMarkdown.split(/\r?\n/);
-  return {
+  return sanitizeMarkdownDocEntities({
     type: 'doc',
     content: lines.map((line) =>
       line
         ? { type: 'paragraph', content: [{ type: 'text', text: line }] }
         : { type: 'paragraph' },
     ),
-  };
+  });
 }
 
 type RemoteTreeMdEntry = {
@@ -834,7 +834,9 @@ export async function runDriveSync(deps?: DriveFetchDeps): Promise<DriveSyncResu
         // 원격에만 있는 신규 마크다운/필기/PDF 노트 -> 로컬 Dexie DB 및 OPFS 리소스로 가져오기
         const mdText = await readScopedDriveFileText(remote, allowedParents, deps);
         const sidecar = await readSidecar(parentDriveId, remoteTitle);
-        const contentDoc = sidecar?.content ?? buildContentDocFromMarkdownText(mdText);
+        const contentDoc = sanitizeMarkdownDocEntities(
+          sidecar?.content ?? buildContentDocFromMarkdownText(mdText),
+        );
         const newNote = emptyNote({
           id: uid('note'),
           title: remoteTitle,
@@ -905,7 +907,9 @@ export async function runDriveSync(deps?: DriveFetchDeps): Promise<DriveSyncResu
         // 기존 노트는 원격 최신본 반영 (Undo 스택 무오염)
         const remoteMd = await readScopedDriveFileText(remote, allowedParents, deps);
         const sidecar = await readSidecar(parentDriveId, remoteTitle);
-        const contentDoc = sidecar?.content ?? buildContentDocFromMarkdownText(remoteMd);
+        const contentDoc = sanitizeMarkdownDocEntities(
+          sidecar?.content ?? buildContentDocFromMarkdownText(remoteMd),
+        );
         await downloadAssetsForDoc(local.id, contentDoc);
         const activeSession = getSession(local.id);
         if (activeSession) {
@@ -933,7 +937,9 @@ export async function runDriveSync(deps?: DriveFetchDeps): Promise<DriveSyncResu
         // 원격만 최신 -> 로컬에 반영 (addToHistory: false)
         const remoteMd = await readScopedDriveFileText(remote, allowedParents, deps);
         const sidecar = await readSidecar(parentDriveId, remoteTitle);
-        const contentDoc = sidecar?.content ?? buildContentDocFromMarkdownText(remoteMd);
+        const contentDoc = sanitizeMarkdownDocEntities(
+          sidecar?.content ?? buildContentDocFromMarkdownText(remoteMd),
+        );
         await downloadAssetsForDoc(local.id, contentDoc);
         const activeSession = getSession(local.id);
         if (activeSession) {

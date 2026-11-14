@@ -1128,4 +1128,76 @@ describe('REQ_google_drive_sync: Google Drive 지정 폴더 격리 동기화', (
     const uploadedLocalSub = uploadedFiles.find((f) => f.name === '로컬 하위 노트.md');
     expect(uploadedLocalSub?.parents).toEqual([remoteLocalFld!.id]);
   });
+
+  it('16. Drive 마크다운(&nbsp;, &lt;킹덤 오브 헤븐&gt;, 이중 이스케이프) 및 기존 오염된 로컬 노트를 열 때 엔티티 잔존 없이 복원한다', async () => {
+    const poisonedMd = '&nbsp;\n&nbsp;\n\n&nbsp;\n\n그러나 &amp;lt;킹덤 오브 헤븐&amp;gt;의 보두앵 4세가';
+    const mockFetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const parsedUrl = new URL(url);
+      const qParam = parsedUrl.searchParams.get('q') ?? '';
+      if (parsedUrl.pathname.endsWith(`/files/${TARGET_FOLDER_ID}`)) {
+        return new Response(JSON.stringify({ id: TARGET_FOLDER_ID, name: 'EduInk Sync', trashed: false }), { status: 200 });
+      }
+      if (parsedUrl.pathname.endsWith('/files') && qParam.includes(`'${TARGET_FOLDER_ID}' in parents`)) {
+        return new Response(
+          JSON.stringify({
+            files: [
+              {
+                id: 'remote_entity_1',
+                name: '엔티티 복원 테스트.md',
+                mimeType: 'text/markdown',
+                modifiedTime: '2026-11-15T00:10:00.000Z',
+                parents: [TARGET_FOLDER_ID],
+                trashed: false,
+              },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.includes('/files/remote_entity_1?alt=media')) {
+        return new Response(poisonedMd, { status: 200 });
+      }
+      return new Response('{}', { status: 404 });
+    });
+
+    const res = await runDriveSync({
+      fetchImpl: mockFetch as unknown as typeof fetch,
+      getToken: async () => 'valid-token',
+    });
+    expect(res.status).toBe('synced');
+
+    const downloaded = Array.from(noteStore.values()).find((n) => n.title === '엔티티 복원 테스트');
+    expect(downloaded).toBeTruthy();
+    const downloadedJson = JSON.stringify(downloaded?.content ?? {});
+    expect(downloadedJson).not.toContain('&nbsp;');
+    expect(downloadedJson).not.toContain('&lt;');
+    expect(downloadedJson).not.toContain('&gt;');
+    expect(downloadedJson).toContain('그러나 <킹덤 오브 헤븐>의 보두앵 4세가');
+
+    // 기존 IndexedDB에 이전 폴백/이중 저장으로 &nbsp;와 &lt;...&gt;가 남아 있던 노트도 세션 오픈 시 복구
+    const legacyPoisonedNote = emptyNote({
+      id: 'legacy_poisoned_note',
+      title: '기존 오염 노트',
+      driveFileId: 'remote_legacy_1',
+      markdown: '&amp;nbsp;\n\n그러나 &amp;lt;킹덤 오브 헤븐&amp;gt;의 보두앵',
+      content: {
+        type: 'doc',
+        content: [
+          { type: 'paragraph', content: [{ type: 'text', text: '&nbsp;' }] },
+          { type: 'paragraph', content: [{ type: 'text', text: '그러나 &lt;킹덤 오브 헤븐&gt;의 보두앵' }] },
+        ],
+      },
+    });
+    noteStore.set(legacyPoisonedNote.id, legacyPoisonedNote);
+
+    const { NoteSession } = await import('../src/session/NoteSession');
+    const session = new NoteSession(legacyPoisonedNote);
+    const editorText = session.editor.getText();
+    expect(editorText).not.toContain('&nbsp;');
+    expect(editorText).not.toContain('&lt;');
+    expect(editorText).not.toContain('&gt;');
+    expect(editorText).toContain('그러나 <킹덤 오브 헤븐>의 보두앵');
+    session.destroy();
+  });
 });

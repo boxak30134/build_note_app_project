@@ -11,7 +11,7 @@ import { dataUrlToBase64, PROVIDER_LABEL, streamAi } from '../ai/aiClient';
 import { BUBBLE_MAX_OUTPUT_TOKENS, GEMINI_PRIMARY_MODEL, streamGeminiTutor } from '../modules/ai';
 import { renderStrokesToDataUrl } from '../canvas/render';
 import { plainTextOf } from '../core/doc/blocks';
-import { buildExtensions, markdownToJson } from '../editor/extensions';
+import { buildExtensions, markdownToJson, preprocessMarkdownEntities, sanitizeMarkdownDocEntities } from '../editor/extensions';
 import { ASSIGN_IDS_META } from '../editor/extensions/blockId';
 import { db, uid, type NoteRecord } from '../storage/db';
 import { drafts } from '../storage/drafts';
@@ -72,6 +72,27 @@ function isDrivePlainFallbackDoc(content: unknown, markdown: string): boolean {
     if (Array.isArray(child.marks) && child.marks.length > 0) return false;
   }
   return true;
+}
+
+function hasUnescapedMarkdownEntities(node: unknown): boolean {
+  if (!node || typeof node !== 'object') return false;
+  const obj = node as Record<string, unknown>;
+  if (obj.type === 'codeBlock') return false;
+  if (obj.type === 'text') {
+    const marks = Array.isArray(obj.marks) ? obj.marks : [];
+    if (marks.some((m) => m && typeof m === 'object' && (m as { type?: unknown }).type === 'code')) {
+      return false;
+    }
+    return typeof obj.text === 'string' && /&(?:amp;)?(?:nbsp|lt|gt);/.test(obj.text);
+  }
+  if (obj.type === 'callout' && obj.attrs && typeof obj.attrs === 'object') {
+    const title = (obj.attrs as { title?: unknown }).title;
+    if (typeof title === 'string' && /&(?:amp;)?(?:nbsp|lt|gt);/.test(title)) return true;
+  }
+  if (Array.isArray(obj.content)) {
+    return obj.content.some((child) => hasUnescapedMarkdownEntities(child));
+  }
+  return false;
 }
 
 const sessions = new Map<string, NoteSession>();
@@ -170,6 +191,8 @@ export class NoteSession {
       rawContent = markdownToJson(record.markdown.replace(/^\uFEFF/, ''));
     } else if (record.driveFileId && record.markdown && isDrivePlainFallbackDoc(rawContent, record.markdown)) {
       rawContent = markdownToJson(record.markdown.replace(/^\uFEFF/, ''));
+    } else if (record.driveFileId && hasUnescapedMarkdownEntities(rawContent)) {
+      rawContent = sanitizeMarkdownDocEntities(rawContent);
     }
 
     const normalizedInitialContent = normalizePdfNoteContent(
@@ -1796,9 +1819,12 @@ export class NoteSession {
     } | null,
   ) {
     const cleanMarkdown = markdownText.replace(/^\uFEFF/, '');
-    const parsedFromMd = this.editor.markdown ? this.editor.markdown.parse(cleanMarkdown) : markdownToJson(cleanMarkdown);
+    const preprocessedMd = preprocessMarkdownEntities(cleanMarkdown);
+    const parsedFromMd = this.editor.markdown
+      ? sanitizeMarkdownDocEntities(this.editor.markdown.parse(preprocessedMd))
+      : markdownToJson(cleanMarkdown);
     const nextPages = sidecar?.pages && sidecar.pages.length > 0 ? sidecar.pages : this.ui.pages;
-    const rawDoc = sidecar?.content ?? parsedFromMd;
+    const rawDoc = sanitizeMarkdownDocEntities(sidecar?.content ?? parsedFromMd);
     const normalizedDoc = normalizePdfNoteContent(
       rawDoc as { type?: string; content?: Array<{ type?: string; attrs?: Record<string, unknown> }> },
       nextPages,
