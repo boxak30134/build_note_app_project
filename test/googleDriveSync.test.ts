@@ -23,8 +23,11 @@ import {
   listScopedFiles,
   readScopedDriveFileText,
   runDriveSync,
+  uploadSelectedNotesToDrive,
 } from '../src/modules/sync/driveSyncEngine';
-import { db, emptyNote, type NoteRecord } from '../src/storage/db';
+import { db, emptyNote, type FolderRecord, type NoteRecord } from '../src/storage/db';
+import { NoteSession } from '../src/session/NoteSession';
+import { markdownToJson } from '../src/editor/extensions';
 import * as opfsMod from '../src/storage/opfs';
 import * as secureStoreMod from '../src/storage/secureStore';
 import { DEFAULT_DRIVE_SYNC_CONFIG, useSettings } from '../src/store/settingsStore';
@@ -256,6 +259,9 @@ describe('REQ_google_drive_sync: Google Drive 지정 폴더 격리 동기화', (
     expect(downloaded).toBeDefined();
     expect(downloaded?.markdown).toContain('# 원격에서 온 노트');
     expect(downloaded?.driveFileId).toBe('remote_new_1');
+    const firstBlock = (downloaded?.content as { content?: Array<{ type?: string; attrs?: { level?: number } }> })?.content?.[0];
+    expect(firstBlock?.type).toBe('heading');
+    expect(firstBlock?.attrs?.level).toBe(1);
 
     // 로컬 노트도 업로드 후 driveFileId 기록 및 syncDirty 해제 검증
     const syncedLocal = noteStore.get(localNote.id);
@@ -571,5 +577,420 @@ describe('REQ_google_drive_sync: Google Drive 지정 폴더 격리 동기화', (
     });
     expect(useSettings.getState().driveSyncConfig.targetFolderId).toBe('custom_folder_2');
     expect(useSettings.getState().driveSyncConfig.targetFolderName).toBe('대학원 강의노트');
+  });
+
+  it('11. Drive에서 BOM 포함 마크다운(.md)을 불러오거나 기존 plain 폴백 노트를 열어도 마크다운 문법으로 렌더링된다', async () => {
+    const remoteMdWithBom = '\uFEFF# 연구 제목\n**핵심 강조**\n- 첫 번째 항목';
+    const mockFetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const parsedUrl = new URL(url);
+      const qParam = parsedUrl.searchParams.get('q') ?? '';
+      if (parsedUrl.pathname.endsWith(`/files/${TARGET_FOLDER_ID}`)) {
+        return new Response(
+          JSON.stringify({ id: TARGET_FOLDER_ID, name: '내 연구 노트', trashed: false }),
+          { status: 200 },
+        );
+      }
+      if (parsedUrl.pathname.endsWith('/files') && qParam.includes(`'${TARGET_FOLDER_ID}' in parents`)) {
+        return new Response(
+          JSON.stringify({
+            files: [
+              {
+                id: 'remote_md_bom_1',
+                name: 'BOM 마크다운 노트.md',
+                mimeType: 'text/markdown',
+                modifiedTime: '2026-11-14T10:00:00.000Z',
+                parents: [TARGET_FOLDER_ID],
+              },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.includes('/files/remote_md_bom_1?alt=media')) {
+        return new Response(remoteMdWithBom, { status: 200 });
+      }
+      return new Response('{}', { status: 404 });
+    });
+
+    const result = await runDriveSync({
+      fetchImpl: mockFetch as unknown as typeof fetch,
+      getToken: async () => 'valid-token',
+    });
+    expect(result.status).toBe('synced');
+
+    const downloaded = Array.from(noteStore.values()).find((n) => n.title === 'BOM 마크다운 노트');
+    expect(downloaded).toBeDefined();
+
+    const session1 = new NoteSession(downloaded!);
+    const html1 = session1.editor.getHTML();
+    expect(html1).toContain('<h1');
+    expect(html1).toContain('<strong>핵심 강조</strong>');
+    expect(html1).toContain('<ul');
+    expect(html1).not.toContain('# 연구 제목');
+    expect(session1.ui.dirty).toBe(false);
+    session1.destroy();
+
+    // 이전 버그로 이미 plain paragraph 로 저장되어 있던 Drive 노트도 처음 열 때 마크다운으로 복원됨
+    const legacyFallbackNote = emptyNote({
+      id: 'legacy_drive_plain_1',
+      title: '구버전 동기화 노트',
+      driveFileId: 'drive_legacy_1',
+      markdown: '# 복원될 제목\n**굵은 글씨**',
+      content: {
+        type: 'doc',
+        content: [
+          { type: 'paragraph', content: [{ type: 'text', text: '# 복원될 제목' }] },
+          { type: 'paragraph', content: [{ type: 'text', text: '**굵은 글씨**' }] },
+        ],
+      },
+    });
+    const session2 = new NoteSession(legacyFallbackNote);
+    const html2 = session2.editor.getHTML();
+    expect(html2).toContain('<h1');
+    expect(html2).toContain('<strong>굵은 글씨</strong>');
+    expect(session2.ui.dirty).toBe(false);
+    session2.destroy();
+  });
+
+  it('12. PDF 임포트 문서(inkTemplate + attachments/ 이미지 + 필기)는 Drive 왕복 동기화 후에도 빈 페이지나 깨진 이미지가 되지 않고 온전히 복원된다', async () => {
+    // 1) InkTemplate 마크다운 왕복 파싱 자체가 일반 image 가 아닌 inkTemplate 노드를 생성하는지 검증
+    const parsedFromMd = markdownToJson('![손글씨 페이지 1](attachments/lecture-p1.jpg)') as {
+      content?: Array<{ type?: string; attrs?: Record<string, unknown> }>;
+    };
+    expect(parsedFromMd.content?.[0]?.type).toBe('inkTemplate');
+    expect(parsedFromMd.content?.[0]?.attrs?.src).toBe('attachments/lecture-p1.jpg');
+
+    // 2) PDF 임포트 노트 업로드 시나리오
+    const pdfDoc = {
+      type: 'doc',
+      content: [
+        {
+          type: 'inkTemplate',
+          attrs: { src: 'attachments/lecture-p1.jpg', width: 595, height: 842, page: 1, pageId: 'p1', style: 'plain' },
+        },
+      ],
+    };
+    const pdfNote = emptyNote({
+      id: 'pdf_note_src',
+      title: '선형대수 강의안',
+      content: pdfDoc,
+      markdown: '![손글씨 페이지 1](attachments/lecture-p1.jpg)',
+      pages: [{ id: 'p1', index: 0, size: 'A4', style: 'plain', orientation: 'portrait' }],
+      strokes: [
+        {
+          id: 'stroke_pdf_1',
+          pageIndex: 0,
+          tool: 'pen',
+          color: '#000000',
+          size: 2,
+          points: [{ x: 10, y: 20, pressure: 0.5 }, { x: 40, y: 60, pressure: 0.6 }],
+        },
+      ],
+      syncDirty: true,
+    });
+    noteStore.set(pdfNote.id, pdfNote);
+
+    vi.spyOn(opfsMod, 'listNoteImages').mockResolvedValue([]);
+    vi.spyOn(opfsMod, 'listNoteAttachments').mockResolvedValue([
+      {
+        relPath: 'attachments/lecture-p1.jpg',
+        name: 'lecture-p1.jpg',
+        blob: new Blob(['fake-pdf-jpeg'], { type: 'image/jpeg' }),
+      },
+    ]);
+    const writtenAttachments: Array<{ noteId: string; relPath: string }> = [];
+    vi.spyOn(opfsMod, 'writeAttachment').mockImplementation(async (noteId, relPath) => {
+      writtenAttachments.push({ noteId, relPath });
+    });
+
+    const driveRootFiles: Array<{ id: string; name: string; mimeType: string; body: string | Blob }> = [];
+    const driveImagesFiles: Array<{ id: string; name: string; mimeType: string; body: string | Blob }> = [];
+    let nextDriveId = 1;
+
+    const mockFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+      const parsedUrl = new URL(url);
+      const qParam = parsedUrl.searchParams.get('q') ?? '';
+
+      if (parsedUrl.pathname.endsWith(`/files/${TARGET_FOLDER_ID}`)) {
+        return new Response(JSON.stringify({ id: TARGET_FOLDER_ID, name: 'EduInk Sync', trashed: false }), { status: 200 });
+      }
+      if (parsedUrl.pathname.endsWith('/files') && qParam.includes(`name = 'images'`)) {
+        return new Response(
+          JSON.stringify({
+            files: [{ id: IMAGES_FOLDER_ID, name: 'images', mimeType: 'application/vnd.google-apps.folder', parents: [TARGET_FOLDER_ID] }],
+          }),
+          { status: 200 },
+        );
+      }
+      if (parsedUrl.pathname.endsWith('/files') && qParam.includes(`'${TARGET_FOLDER_ID}' in parents`)) {
+        return new Response(
+          JSON.stringify({
+            files: driveRootFiles.map((f) => ({
+              id: f.id,
+              name: f.name,
+              mimeType: f.mimeType,
+              modifiedTime: '2026-11-14T12:00:00.000Z',
+              parents: [TARGET_FOLDER_ID],
+            })),
+          }),
+          { status: 200 },
+        );
+      }
+      if (parsedUrl.pathname.endsWith('/files') && qParam.includes(`'${IMAGES_FOLDER_ID}' in parents`)) {
+        return new Response(
+          JSON.stringify({
+            files: driveImagesFiles.map((f) => ({
+              id: f.id,
+              name: f.name,
+              mimeType: f.mimeType,
+              modifiedTime: '2026-11-14T12:00:00.000Z',
+              parents: [IMAGES_FOLDER_ID],
+            })),
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.includes('/upload/drive/v3/files') && method === 'POST') {
+        const rawText = await (init?.body as Blob).text();
+        const nameMatch = rawText.match(/"name":"([^"]+)"/);
+        const fileName = nameMatch ? nameMatch[1] : `file_${nextDriveId}`;
+        const mimeMatch = rawText.match(/"mimeType":"([^"]+)"/);
+        const mimeType = mimeMatch ? mimeMatch[1] : 'application/octet-stream';
+        const parts = rawText.split(/\r?\n\r?\n/);
+        const contentPart = parts.slice(2).join('\r\n\r\n').replace(/\r\n--eduink_sync_[^\r\n]+--\s*$/, '');
+        const id = `drv_${nextDriveId++}`;
+        if (rawText.includes(IMAGES_FOLDER_ID)) {
+          driveImagesFiles.push({ id, name: fileName, mimeType, body: contentPart });
+          return new Response(JSON.stringify({ id, name: fileName, parents: [IMAGES_FOLDER_ID], modifiedTime: '2026-11-14T12:00:00.000Z' }), { status: 200 });
+        }
+        driveRootFiles.push({ id, name: fileName, mimeType, body: contentPart });
+        return new Response(JSON.stringify({ id, name: fileName, parents: [TARGET_FOLDER_ID], modifiedTime: '2026-11-14T12:00:00.000Z' }), { status: 200 });
+      }
+      if (url.includes('?alt=media')) {
+        const fileId = decodeURIComponent(parsedUrl.pathname.split('/').pop() ?? '');
+        const found = [...driveRootFiles, ...driveImagesFiles].find((f) => f.id === fileId);
+        if (found) return new Response(found.body, { status: 200 });
+      }
+      return new Response('{}', { status: 404 });
+    });
+
+    const uploadRes = await runDriveSync({ fetchImpl: mockFetch as unknown as typeof fetch, getToken: async () => 'valid-token' });
+    expect(uploadRes.status).toBe('synced');
+    expect(uploadRes.uploadedCount).toBe(1);
+    expect(uploadRes.uploadedImagesCount).toBe(1);
+    expect(driveRootFiles.some((f) => f.name === '선형대수 강의안.eduink.json')).toBe(true);
+    expect(driveImagesFiles.some((f) => f.name === 'att__lecture-p1.jpg')).toBe(true);
+
+    // 3) 다른 기기(빈 로컬 DB + targetImagesFolderId: null)에서 다운로드 동기화
+    noteStore.clear();
+    useSettings.getState().setDriveSyncConfig({ targetImagesFolderId: null });
+
+    const downloadRes = await runDriveSync({ fetchImpl: mockFetch as unknown as typeof fetch, getToken: async () => 'valid-token' });
+    expect(downloadRes.status).toBe('synced');
+    expect(downloadRes.downloadedCount).toBe(1);
+
+    const restored = Array.from(noteStore.values());
+    expect(restored).toHaveLength(1);
+    expect(restored[0].title).toBe('선형대수 강의안');
+    expect((restored[0].content as { content?: Array<{ type?: string }> }).content?.[0]?.type).toBe('inkTemplate');
+    expect(restored[0].strokes).toHaveLength(1);
+    expect(writtenAttachments).toEqual([{ noteId: restored[0].id, relPath: 'attachments/lecture-p1.jpg' }]);
+  });
+
+  it('13. 텍스트 없이 손글씨(strokes)로만 이루어진 노트(markdown: "")도 동기화 후 빈 페이지가 아닌 필기 상태로 복원된다', async () => {
+    const handwritingNote = emptyNote({
+      id: 'handwriting_only_1',
+      title: '손글씨 전용 메모',
+      markdown: '',
+      pages: [{ id: 'hw_p1', index: 0, size: 'A4', style: 'grid', orientation: 'portrait' }],
+      strokes: [
+        {
+          id: 'hw_s1',
+          pageIndex: 0,
+          tool: 'pen',
+          color: '#EF4444',
+          size: 3,
+          points: [{ x: 50, y: 80, pressure: 0.7 }, { x: 120, y: 140, pressure: 0.8 }],
+        },
+      ],
+      syncDirty: true,
+    });
+    noteStore.set(handwritingNote.id, handwritingNote);
+
+    vi.spyOn(opfsMod, 'listNoteImages').mockResolvedValue([]);
+    vi.spyOn(opfsMod, 'listNoteAttachments').mockResolvedValue([]);
+
+    const driveRootFiles: Array<{ id: string; name: string; mimeType: string; body: string }> = [];
+    let nextId = 1;
+
+    const mockFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+      const parsedUrl = new URL(url);
+      const qParam = parsedUrl.searchParams.get('q') ?? '';
+
+      if (parsedUrl.pathname.endsWith(`/files/${TARGET_FOLDER_ID}`)) {
+        return new Response(JSON.stringify({ id: TARGET_FOLDER_ID, name: 'EduInk Sync', trashed: false }), { status: 200 });
+      }
+      if (parsedUrl.pathname.endsWith('/files') && qParam.includes(`'${TARGET_FOLDER_ID}' in parents`)) {
+        return new Response(
+          JSON.stringify({
+            files: driveRootFiles.map((f) => ({
+              id: f.id,
+              name: f.name,
+              mimeType: f.mimeType,
+              modifiedTime: '2026-11-14T12:10:00.000Z',
+              parents: [TARGET_FOLDER_ID],
+            })),
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.includes('/upload/drive/v3/files') && method === 'POST') {
+        const rawText = await (init?.body as Blob).text();
+        const nameMatch = rawText.match(/"name":"([^"]+)"/);
+        const fileName = nameMatch ? nameMatch[1] : `file_${nextId}`;
+        const mimeMatch = rawText.match(/"mimeType":"([^"]+)"/);
+        const mimeType = mimeMatch ? mimeMatch[1] : 'text/plain';
+        const parts = rawText.split(/\r?\n\r?\n/);
+        const contentPart = parts.slice(2).join('\r\n\r\n').replace(/\r\n--eduink_sync_[^\r\n]+--\s*$/, '');
+        const id = `hw_drv_${nextId++}`;
+        driveRootFiles.push({ id, name: fileName, mimeType, body: contentPart });
+        return new Response(JSON.stringify({ id, name: fileName, parents: [TARGET_FOLDER_ID], modifiedTime: '2026-11-14T12:10:00.000Z' }), { status: 200 });
+      }
+      if (url.includes('?alt=media')) {
+        const fileId = decodeURIComponent(parsedUrl.pathname.split('/').pop() ?? '');
+        const found = driveRootFiles.find((f) => f.id === fileId);
+        if (found) return new Response(found.body, { status: 200 });
+      }
+      return new Response('{}', { status: 404 });
+    });
+
+    await runDriveSync({ fetchImpl: mockFetch as unknown as typeof fetch, getToken: async () => 'valid-token' });
+    expect(driveRootFiles.some((f) => f.name === '손글씨 전용 메모.eduink.json')).toBe(true);
+
+    noteStore.clear();
+    const downRes = await runDriveSync({ fetchImpl: mockFetch as unknown as typeof fetch, getToken: async () => 'valid-token' });
+    expect(downRes.status).toBe('synced');
+    expect(downRes.downloadedCount).toBe(1);
+
+    const restored = Array.from(noteStore.values());
+    expect(restored).toHaveLength(1);
+    expect(restored[0].strokes).toHaveLength(1);
+    expect(restored[0].strokes[0].id).toBe('hw_s1');
+    expect(restored[0].pages[0].style).toBe('grid');
+  });
+
+  it('14. uploadSelectedNotesToDrive: 선택 문서를 로컬 폴더 경로(대학원/선형대수)와 동일한 Drive 하위 경로에 저장한다', async () => {
+    const folderRows: FolderRecord[] = [
+      { id: 'fld_root_1', name: '대학원', parentId: null, createdAt: 1000 },
+      { id: 'fld_sub_1', name: '선형대수', parentId: 'fld_root_1', createdAt: 1100 },
+    ];
+    vi.spyOn(db.folders, 'toArray').mockResolvedValue(folderRows);
+
+    const nestedNote1 = emptyNote({
+      id: 'nested_note_1',
+      title: '고유값 정리',
+      folderId: 'fld_sub_1',
+      markdown: '# 고유값 정리\n$Ax = \\lambda x$',
+      syncDirty: true,
+    });
+    const nestedNote2 = emptyNote({
+      id: 'nested_note_2',
+      title: '특이값 분해',
+      folderId: 'fld_sub_1',
+      markdown: '# SVD',
+      syncDirty: true,
+    });
+    const rootNote = emptyNote({
+      id: 'root_note_1',
+      title: '루트 메모',
+      folderId: null,
+      markdown: '루트 내용',
+      syncDirty: true,
+    });
+    noteStore.set(nestedNote1.id, nestedNote1);
+    noteStore.set(nestedNote2.id, nestedNote2);
+    noteStore.set(rootNote.id, rootNote);
+
+    vi.spyOn(opfsMod, 'listNoteImages').mockResolvedValue([]);
+    vi.spyOn(opfsMod, 'listNoteAttachments').mockResolvedValue([]);
+
+    const createdFolders: Array<{ id: string; name: string; parents: string[] }> = [];
+    const uploadedFiles: Array<{ id: string; name: string; parents: string[]; body: string }> = [];
+    let seq = 1;
+
+    const mockFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+      const parsedUrl = new URL(url);
+      const qParam = parsedUrl.searchParams.get('q') ?? '';
+
+      if (parsedUrl.pathname.endsWith(`/files/${TARGET_FOLDER_ID}`)) {
+        return new Response(JSON.stringify({ id: TARGET_FOLDER_ID, name: 'EduInk Sync', trashed: false }), { status: 200 });
+      }
+      if (parsedUrl.pathname.endsWith('/files') && method === 'GET') {
+        const parentMatch = qParam.match(/'([^']+)' in parents/);
+        const parentId = parentMatch?.[1] ?? '';
+        if (qParam.includes('mimeType = ')) {
+          const nameMatch = qParam.match(/name = '([^']+)'/);
+          const name = nameMatch?.[1] ?? '';
+          const matched = createdFolders.filter((f) => f.parents.includes(parentId) && f.name === name);
+          return new Response(JSON.stringify({ files: matched }), { status: 200 });
+        }
+        const filesInParent = uploadedFiles.filter((f) => f.parents.includes(parentId));
+        return new Response(JSON.stringify({ files: filesInParent }), { status: 200 });
+      }
+      if (!url.includes('/upload/') && parsedUrl.pathname.endsWith('/files') && method === 'POST') {
+        const payload = JSON.parse(String(init?.body ?? '{}')) as { name: string; parents: string[] };
+        const id = `drv_fld_${seq++}`;
+        const folderMeta = { id, name: payload.name, parents: payload.parents };
+        createdFolders.push(folderMeta);
+        return new Response(JSON.stringify(folderMeta), { status: 200 });
+      }
+      if (url.includes('/upload/drive/v3/files') && method === 'POST') {
+        const rawText = await (init?.body as Blob).text();
+        const nameMatch = rawText.match(/"name":"([^"]+)"/);
+        const parentsMatch = rawText.match(/"parents":\["([^"]+)"\]/);
+        const fileName = nameMatch?.[1] ?? `file_${seq}`;
+        const parentId = parentsMatch?.[1] ?? '';
+        const parts = rawText.split(/\r?\n\r?\n/);
+        const contentPart = parts.slice(2).join('\r\n\r\n').replace(/\r\n--eduink_sync_[^\r\n]+--\s*$/, '');
+        const id = `drv_file_${seq++}`;
+        const meta = { id, name: fileName, parents: [parentId], body: contentPart, modifiedTime: '2026-11-14T13:00:00.000Z' };
+        uploadedFiles.push(meta);
+        return new Response(JSON.stringify(meta), { status: 200 });
+      }
+      return new Response('{}', { status: 404 });
+    });
+
+    const res = await uploadSelectedNotesToDrive(['nested_note_1', 'nested_note_2', 'root_note_1'], {
+      fetchImpl: mockFetch as unknown as typeof fetch,
+      getToken: async () => 'valid-token',
+    });
+
+    expect(res.status).toBe('synced');
+    expect(res.uploadedCount).toBe(3);
+
+    // 대학원 -> 선형대수 폴더가 중복 없이 정확히 1회씩 생성되었는지 확인
+    expect(createdFolders).toHaveLength(2);
+    const gradFolder = createdFolders.find((f) => f.name === '대학원');
+    const mathFolder = createdFolders.find((f) => f.name === '선형대수');
+    expect(gradFolder?.parents).toEqual([TARGET_FOLDER_ID]);
+    expect(mathFolder?.parents).toEqual([gradFolder!.id]);
+
+    // 각 파일이 올바른 Drive 부모 폴더 아래 저장되었는지 검증
+    const f1 = uploadedFiles.find((f) => f.name === '고유값 정리.md');
+    const f2 = uploadedFiles.find((f) => f.name === '특이값 분해.md');
+    const f3 = uploadedFiles.find((f) => f.name === '루트 메모.md');
+    expect(f1?.parents).toEqual([mathFolder!.id]);
+    expect(f2?.parents).toEqual([mathFolder!.id]);
+    expect(f3?.parents).toEqual([TARGET_FOLDER_ID]);
+
+    expect(noteStore.get('nested_note_1')?.syncDirty).toBe(false);
+    expect(noteStore.get('nested_note_1')?.driveFileId).toBe(f1?.id);
   });
 });

@@ -6,7 +6,10 @@ import { translatePoints } from '../core/geometry/geometry';
 import { newTextObjectId, type NoteTextObject } from '../core/text/textObjects';
 import { UnencodableCharError } from '../core/codec/textCodec';
 import { validateImageFiles, sanitizeDocumentTitle } from '../core/files/validation';
-import { clampBubbleText } from '../core/bubble/limits';
+import { appendBubbleText, clampBubbleText, consumeAiTurn, MAX_BUBBLE_CHAR_LENGTH } from '../core/bubble/limits';
+import { dataUrlToBase64, PROVIDER_LABEL, streamAi } from '../ai/aiClient';
+import { BUBBLE_MAX_OUTPUT_TOKENS, GEMINI_PRIMARY_MODEL, streamGeminiTutor } from '../modules/ai';
+import { renderStrokesToDataUrl } from '../canvas/render';
 import { plainTextOf } from '../core/doc/blocks';
 import { buildExtensions, markdownToJson } from '../editor/extensions';
 import { ASSIGN_IDS_META } from '../editor/extensions/blockId';
@@ -19,7 +22,7 @@ import { offlineLinker, type LinkRecommendation } from '../services/offlineDocum
 import { adaptiveGlossary } from '../services/AdaptiveGlossaryService';
 import type { TranslationResolution } from '../types/adaptiveGlossary';
 import { getSessionUI, useSessions, type PendingCitation } from '../store/sessionStore';
-import { useSettings, type TranslationInsertMode } from '../store/settingsStore';
+import { useSettings, type AiProviderId, type TranslationInsertMode } from '../store/settingsStore';
 import { toast, confirmDialog } from '../store/uiStore';
 import type { Annotation, AnnotationAnchor } from '../features/annotations/types';
 import {
@@ -41,6 +44,35 @@ import {
   onNavigateRequest,
   type NavState,
 } from '../core/navigation/pageNavigation';
+
+/**
+ * 이전 Drive 동기화 폴백이 마크다운 원문을 줄 단위 plain paragraph 로 저장한 문서인지 판별한다.
+ * TipTap 에디터에서 직접 입력한 리터럴 `#` 등은 `record.markdown` 에 `\#` 로 이스케이프되므로
+ * raw 줄 텍스트가 `record.markdown` 과 1:1 일치하는 경우만 안전하게 재파싱 대상으로 본다.
+ */
+function isDrivePlainFallbackDoc(content: unknown, markdown: string): boolean {
+  if (!content || typeof content !== 'object') return false;
+  const doc = content as { type?: unknown; content?: unknown };
+  if (doc.type !== 'doc' || !Array.isArray(doc.content)) return false;
+
+  const expectedLines = markdown.replace(/^\uFEFF/, '').split(/\r?\n/);
+  if (doc.content.length !== expectedLines.length) return false;
+
+  for (let i = 0; i < doc.content.length; i++) {
+    const node = doc.content[i] as { type?: unknown; content?: unknown };
+    if (!node || node.type !== 'paragraph') return false;
+    const lineText = expectedLines[i];
+    if (!lineText) {
+      if (Array.isArray(node.content) && node.content.length > 0) return false;
+      continue;
+    }
+    if (!Array.isArray(node.content) || node.content.length !== 1) return false;
+    const child = node.content[0] as { type?: unknown; text?: unknown; marks?: unknown };
+    if (!child || child.type !== 'text' || child.text !== lineText) return false;
+    if (Array.isArray(child.marks) && child.marks.length > 0) return false;
+  }
+  return true;
+}
 
 const sessions = new Map<string, NoteSession>();
 
@@ -104,6 +136,7 @@ export class NoteSession {
   lastAutoTitle: string | null = null;
   private unsubs: Array<() => void> = [];
   private saving = false;
+  private bubbleAiControllers = new Map<string, AbortController>();
 
   constructor(record: NoteRecord) {
     this.id = record.id;
@@ -132,9 +165,11 @@ export class NoteSession {
 
     let rawContent = record.content;
     if (typeof rawContent === 'string') {
-      rawContent = markdownToJson(rawContent);
+      rawContent = markdownToJson(rawContent.replace(/^\uFEFF/, ''));
     } else if (!rawContent && record.markdown) {
-      rawContent = markdownToJson(record.markdown);
+      rawContent = markdownToJson(record.markdown.replace(/^\uFEFF/, ''));
+    } else if (record.driveFileId && record.markdown && isDrivePlainFallbackDoc(rawContent, record.markdown)) {
+      rawContent = markdownToJson(record.markdown.replace(/^\uFEFF/, ''));
     }
 
     const normalizedInitialContent = normalizePdfNoteContent(
@@ -1118,7 +1153,137 @@ export class NoteSession {
     );
   }
 
+  private setAnnotationStreaming(id: string, active: boolean) {
+    this.patch((s) => {
+      const next = { ...(s.streamingAnnotationIds ?? {}) };
+      if (active) next[id] = true;
+      else delete next[id];
+      return { streamingAnnotationIds: next };
+    });
+  }
+
+  abortAnnotationAi(id: string) {
+    const controller = this.bubbleAiControllers.get(id);
+    if (controller) {
+      controller.abort();
+      this.bubbleAiControllers.delete(id);
+    }
+    if (this.ui.streamingAnnotationIds?.[id]) {
+      this.setAnnotationStreaming(id, false);
+    }
+  }
+
+  /**
+   * 말풍선 주석 AI 질의를 세션 단위로 실행한다.
+   * 팝오버가 닫혀 컴포넌트가 언마운트되더라도 스트리밍을 중단하지 않고 해당 말풍선 body에 끝까지 기록한다.
+   */
+  async askAnnotationAi(params: {
+    annotationId: string;
+    question: string;
+    provider: AiProviderId;
+    attachments?: Array<{ kind: 'image'; name: string; dataUrl: string } | { kind: 'text'; name: string; text: string }>;
+  }): Promise<boolean> {
+    const { annotationId, provider, attachments = [] } = params;
+    const q = params.question.trim();
+    const annotation = this.ui.annotations.find((a) => a.id === annotationId);
+    if (!q || !annotation || this.bubbleAiControllers.has(annotationId)) return false;
+
+    try {
+      consumeAiTurn(annotation.turns.length);
+    } catch (err) {
+      toast.error((err as Error).message);
+      return false;
+    }
+
+    const quote = this.annotationQuote(annotation);
+    const strokeImg =
+      annotation.anchor.type === 'strokes' ? renderStrokesToDataUrl(this.getStrokesForAnnotation(annotation)) : null;
+    const parts: Array<{ type: 'text'; text: string } | { type: 'file'; mediaType: string; data: string }> = [];
+    if (quote) parts.push({ type: 'text', text: `[주석 대상 원문]\n${quote}` });
+    if (strokeImg) {
+      const { base64, mediaType } = dataUrlToBase64(strokeImg);
+      parts.push({ type: 'text', text: '[주석 대상: 올가미로 선택한 손글씨/그림 이미지]' });
+      parts.push({ type: 'file', mediaType, data: base64 });
+    }
+    for (const a of attachments) {
+      if (a.kind === 'image') {
+        const { base64, mediaType } = dataUrlToBase64(a.dataUrl);
+        parts.push({ type: 'file', mediaType, data: base64 });
+      } else {
+        parts.push({ type: 'text', text: `[첨부 문서 조각: ${a.name}]\n${a.text.slice(0, 8000)}` });
+      }
+    }
+    if (annotation.body.trim()) parts.push({ type: 'text', text: `[현재 말풍선 메모]\n${annotation.body}` });
+    parts.push({ type: 'text', text: `[질문]\n${q}` });
+
+    this.updateAnnotation(annotationId, {
+      turns: [...annotation.turns, { question: q, provider, at: Date.now() }],
+    });
+    this.setAnnotationStreaming(annotationId, true);
+
+    const header = `${annotation.body ? '\n\n' : ''}**Q.** ${q}\n**A(${PROVIDER_LABEL[provider]}).** `;
+    let { text, truncated } = appendBubbleText(annotation.body, header);
+    this.updateAnnotation(annotationId, { body: text });
+
+    const controller = new AbortController();
+    this.bubbleAiControllers.set(annotationId, controller);
+    const systemContext =
+      '[말풍선 주석 컨텍스트: 선택된 원문/수식/손글씨에 대해 학술 튜터 규칙에 따라 핵심 정의·정리·증명 아이디어를 간결하게 답변하라.]';
+
+    try {
+      if (!truncated) {
+        const stream =
+          provider === 'google'
+            ? streamGeminiTutor({
+                messages: [{ role: 'user', content: parts }],
+                systemContext,
+                target: 'bubble',
+                maxOutputTokens: BUBBLE_MAX_OUTPUT_TOKENS,
+                model: useSettings.getState().aiModels.google || GEMINI_PRIMARY_MODEL,
+                signal: controller.signal,
+              })
+            : streamAi({
+                provider,
+                target: 'bubble',
+                system: systemContext,
+                messages: [{ role: 'user', content: parts }],
+                maxOutputTokens: BUBBLE_MAX_OUTPUT_TOKENS,
+                signal: controller.signal,
+              });
+
+        for await (const delta of stream) {
+          if (controller.signal.aborted || this.editor.isDestroyed) break;
+          ({ text, truncated } = appendBubbleText(text, delta));
+          this.updateAnnotation(annotationId, { body: text });
+          if (truncated) {
+            controller.abort();
+            break;
+          }
+        }
+      }
+      if (truncated) {
+        toast.info(`말풍선 텍스트가 최대 ${MAX_BUBBLE_CHAR_LENGTH.toLocaleString()}자에 도달하여 답변이 절삭되었습니다.`);
+      }
+      return true;
+    } catch (err) {
+      if (!controller.signal.aborted && !this.editor.isDestroyed) {
+        const errMsg = (err as Error)?.message || 'AI 호출 중 알 수 없는 오류가 발생했습니다.';
+        toast.error(errMsg, 'AI 호출 실패');
+        this.updateAnnotation(annotationId, { body: appendBubbleText(text, `(⚠️ 오류: ${errMsg})`).text });
+      }
+      return false;
+    } finally {
+      if (this.bubbleAiControllers.get(annotationId) === controller) {
+        this.bubbleAiControllers.delete(annotationId);
+      }
+      if (!this.editor.isDestroyed) {
+        this.setAnnotationStreaming(annotationId, false);
+      }
+    }
+  }
+
   deleteAnnotation(id: string, recordHistory = true) {
+    this.abortAnnotationAi(id);
     const target = this.ui.annotations.find((a) => a.id === id);
     if (!target) return;
 
@@ -1622,20 +1787,47 @@ export class NoteSession {
     driveFileId: string,
     remoteModifiedTime: string | null,
     syncedAt: number,
+    sidecar?: {
+      content?: unknown;
+      strokes?: Stroke[];
+      pages?: NotePage[];
+      annotations?: Annotation[];
+      textObjects?: NoteTextObject[];
+    } | null,
   ) {
-    const json = this.editor.markdown ? this.editor.markdown.parse(markdownText) : markdownToJson(markdownText);
+    const cleanMarkdown = markdownText.replace(/^\uFEFF/, '');
+    const parsedFromMd = this.editor.markdown ? this.editor.markdown.parse(cleanMarkdown) : markdownToJson(cleanMarkdown);
+    const nextPages = sidecar?.pages && sidecar.pages.length > 0 ? sidecar.pages : this.ui.pages;
+    const rawDoc = sidecar?.content ?? parsedFromMd;
+    const normalizedDoc = normalizePdfNoteContent(
+      rawDoc as { type?: string; content?: Array<{ type?: string; attrs?: Record<string, unknown> }> },
+      nextPages,
+    );
     this.editor.view.dispatch(
       this.editor.state.tr
-        .replaceWith(0, this.editor.state.doc.content.size, this.editor.schema.nodeFromJSON(json).content)
+        .replaceWith(0, this.editor.state.doc.content.size, this.editor.schema.nodeFromJSON(normalizedDoc).content)
         .setMeta('addToHistory', false)
         .setMeta(ASSIGN_IDS_META, true),
     );
+    if (sidecar) {
+      if (sidecar.strokes) this.strokes.reset(sidecar.strokes);
+      this.patch({
+        pages: nextPages,
+        ...(sidecar.annotations ? { annotations: sidecar.annotations } : {}),
+        ...(sidecar.textObjects ? { textObjects: sidecar.textObjects } : {}),
+        currentPageIndex: Math.min(this.ui.currentPageIndex, Math.max(0, nextPages.length - 1)),
+      });
+    }
     const content = this.editor.getJSON();
     const updated: NoteRecord = {
       ...this.record,
       content,
       markdown: markdownText,
       plainText: plainTextOf(content),
+      strokes: sidecar?.strokes ?? this.strokes.getAll(),
+      pages: nextPages,
+      annotations: sidecar?.annotations ?? this.ui.annotations,
+      textObjects: sidecar?.textObjects ?? this.ui.textObjects,
       driveFileId,
       remoteModifiedTime,
       lastSyncedAt: syncedAt,
@@ -1720,6 +1912,10 @@ export class NoteSession {
 
   destroy() {
     if (this.editor.isDestroyed) return;
+    for (const controller of this.bubbleAiControllers.values()) {
+      controller.abort();
+    }
+    this.bubbleAiControllers.clear();
     this.unsubs.forEach((u) => u());
     if (this.dirtyTimer) clearTimeout(this.dirtyTimer);
     if (this.draftTimer) clearTimeout(this.draftTimer);

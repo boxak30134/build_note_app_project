@@ -4,6 +4,7 @@ import { db, emptyNote, uid, type NoteRecord } from '../../storage/db';
 import { createPage, type NotePage } from '../../core/page/pageTypes';
 import { saveAttachmentExclusive } from '../../storage/opfs';
 import { plainTextOf } from '../../core/doc/blocks';
+import { jsonToMarkdown } from '../../editor/extensions';
 import { validateFileName } from '../../core/files/validation';
 import type { PdfImportResult } from './pdfImport';
 
@@ -137,6 +138,7 @@ export async function importExternalFile(file: File, folderId: string | null, on
       title: r.title,
       folderId,
       content: r.doc,
+      markdown: jsonToMarkdown(r.doc),
       plainText: r.plainText || plainTextOf(r.doc),
       pages: r.pages,
     });

@@ -167,6 +167,8 @@ export function OverlayLayer({ session }: { session: NoteSession }) {
               if (pinEls[a.id] !== el && el) setPinEls((m) => (m[a.id] === el ? m : { ...m, [a.id]: el }));
             }}
             className={`pin pointer-events-auto absolute ${open ? 'pin-open' : ''} ${
+              ui.streamingAnnotationIds?.[a.id] ? 'animate-pulse ring-2 ring-indigo-400' : ''
+            } ${
               isDragging ? 'cursor-grabbing shadow-lg scale-110' : 'cursor-grab hover:scale-105'
             } transition-transform select-none touch-none`}
             style={{ left: p.x, top: p.y }}

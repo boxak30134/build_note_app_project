@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type MouseEvent } from 'react';
+import { useState, type FormEvent, type KeyboardEvent, type MouseEvent } from 'react';
 import { useFloating, autoUpdate, offset, flip, shift, useDismiss, useInteractions, FloatingPortal } from '@floating-ui/react';
 import { motion } from 'framer-motion';
 import { Bot, Paperclip, Send, Trash2, X, Loader2, Image as ImageIcon, FileText } from 'lucide-react';
@@ -6,23 +6,16 @@ import type { NoteSession } from '../../session/NoteSession';
 import type { Annotation } from './types';
 import {
   AI_TURN_LIMIT_MESSAGE,
-  appendBubbleText,
   canAskAi,
-  consumeAiTurn,
   MAX_AI_TURNS_PER_BUBBLE,
   MAX_BUBBLE_CHAR_LENGTH,
 } from '../../core/bubble/limits';
 import { bubbleDrafts } from '../../storage/drafts';
-import { streamAi, PROVIDER_LABEL, dataUrlToBase64 } from '../../ai/aiClient';
-import {
-  BUBBLE_MAX_OUTPUT_TOKENS,
-  GEMINI_PRIMARY_MODEL,
-  parseMathSegments,
-  streamGeminiTutor,
-} from '../../modules/ai';
+import { PROVIDER_LABEL } from '../../ai/aiClient';
+import { parseMathSegments } from '../../modules/ai';
+import { useSessions } from '../../store/sessionStore';
 import { useSettings, type AiProviderId } from '../../store/settingsStore';
 import { useConnectedProviders } from '../../ai/useConnectedProviders';
-import { renderStrokesToDataUrl } from '../../canvas/render';
 import { pickFiles } from '../../storage/localFiles';
 import { toast } from '../../store/uiStore';
 
@@ -51,10 +44,7 @@ function readAsDataUrl(f: File): Promise<string> {
 export function Bubble({ session, annotation, reference, onClose }: Props) {
   const [question, setQuestion] = useState(() => bubbleDrafts.get(annotation.id));
   const [attachments, setAttachments] = useState<Attachment[]>([]);
-  const [busy, setBusy] = useState(false);
-  const abortControllerRef = useRef<AbortController | null>(null);
-  const bodyRef = useRef(annotation.body);
-  bodyRef.current = annotation.body;
+  const busy = useSessions((s) => Boolean(s.sessions[session.id]?.streamingAnnotationIds?.[annotation.id]));
   const connected = useConnectedProviders();
   const preferred = useSettings((s) => s.aiProvider);
   const [provider, setProvider] = useState<AiProviderId | null>(null);
@@ -69,7 +59,7 @@ export function Bubble({ session, annotation, reference, onClose }: Props) {
   const { refs, floatingStyles, context } = useFloating({
     open: true,
     onOpenChange: (o) => {
-      if (!o && !busy) onClose();
+      if (!o) onClose();
     },
     placement: 'right-start',
     middleware: [offset(10), flip({ fallbackPlacements: ['left-start', 'bottom', 'top'] }), shift({ padding: 8 })],
@@ -78,16 +68,9 @@ export function Bubble({ session, annotation, reference, onClose }: Props) {
     elements: { reference },
   });
   const dismiss = useDismiss(context, {
-    outsidePress: (e) => !busy && !(e.target as HTMLElement).closest('[data-pin]'),
+    outsidePress: (e) => !(e.target as HTMLElement).closest('[data-pin]'),
   });
   const { getFloatingProps } = useInteractions([dismiss]);
-
-  // 컴포넌트 언마운트(unmount) 시점에만 진행 중인 요청을 abort 하도록 격리
-  useEffect(() => {
-    return () => {
-      abortControllerRef.current?.abort();
-    };
-  }, []);
 
   const turns = annotation.turns.length;
   const limitReached = !canAskAi(turns);
@@ -106,96 +89,18 @@ export function Bubble({ session, annotation, reference, onClose }: Props) {
       toast.error('연결된 AI 서비스가 없습니다. 우측 사이드바에서 API Key를 등록하세요.');
       return;
     }
-    try {
-      consumeAiTurn(turns);
-    } catch (err) {
-      toast.error((err as Error).message);
-      return;
-    }
 
-    // 주석 원문(텍스트) 또는 올가미 캡처 손글씨 이미지를 자동으로 컨텍스트에 포함
-    const quote = session.annotationQuote(annotation);
-    const strokeImg = annotation.anchor.type === 'strokes' ? renderStrokesToDataUrl(session.getStrokesForAnnotation(annotation)) : null;
-    const parts: Array<{ type: 'text'; text: string } | { type: 'file'; mediaType: string; data: string }> = [];
-    if (quote) parts.push({ type: 'text', text: `[주석 대상 원문]\n${quote}` });
-    if (strokeImg) {
-      const { base64, mediaType } = dataUrlToBase64(strokeImg);
-      parts.push({ type: 'text', text: '[주석 대상: 올가미로 선택한 손글씨/그림 이미지]' });
-      parts.push({ type: 'file', mediaType, data: base64 });
-    }
-    for (const a of attachments) {
-      if (a.kind === 'image') {
-        const { base64, mediaType } = dataUrlToBase64(a.dataUrl);
-        parts.push({ type: 'file', mediaType, data: base64 });
-      } else parts.push({ type: 'text', text: `[첨부 문서 조각: ${a.name}]\n${a.text.slice(0, 8000)}` });
-    }
-    if (annotation.body.trim()) parts.push({ type: 'text', text: `[현재 말풍선 메모]\n${annotation.body}` });
-    parts.push({ type: 'text', text: `[질문]\n${q}` });
-
-    session.updateAnnotation(annotation.id, { turns: [...annotation.turns, { question: q, provider: activeProvider, at: Date.now() }] });
+    const pendingAttachments = attachments;
     setQuestion('');
     bubbleDrafts.set(annotation.id, '');
     setAttachments([]);
-    setBusy(true);
-    const header = `${bodyRef.current ? '\n\n' : ''}**Q.** ${q}\n**A(${PROVIDER_LABEL[activeProvider]}).** `;
-    let { text, truncated } = appendBubbleText(bodyRef.current, header);
-    setBody(text);
 
-    const controller = new AbortController();
-    abortControllerRef.current = controller;
-    const systemContext =
-      '[말풍선 주석 컨텍스트: 선택된 원문/수식/손글씨에 대해 학술 튜터 규칙에 따라 핵심 정의·정리·증명 아이디어를 간결하게 답변하라.]';
-
-    try {
-      if (!truncated) {
-        if (activeProvider === 'google') {
-          const modelId = useSettings.getState().aiModels.google || GEMINI_PRIMARY_MODEL;
-          for await (const delta of streamGeminiTutor({
-            messages: [{ role: 'user', content: parts }],
-            systemContext,
-            target: 'bubble',
-            maxOutputTokens: BUBBLE_MAX_OUTPUT_TOKENS,
-            model: modelId,
-            signal: controller.signal,
-          })) {
-            ({ text, truncated } = appendBubbleText(text, delta));
-            setBody(text);
-            if (truncated) {
-              controller.abort();
-              break;
-            }
-          }
-        } else {
-          for await (const delta of streamAi({
-            provider: activeProvider,
-            target: 'bubble',
-            system: systemContext,
-            messages: [{ role: 'user', content: parts }],
-            maxOutputTokens: BUBBLE_MAX_OUTPUT_TOKENS,
-            signal: controller.signal,
-          })) {
-            ({ text, truncated } = appendBubbleText(text, delta));
-            setBody(text);
-            if (truncated) {
-              controller.abort();
-              break;
-            }
-          }
-        }
-      }
-      if (truncated) toast.info(`말풍선 텍스트가 최대 ${MAX_BUBBLE_CHAR_LENGTH.toLocaleString()}자에 도달하여 답변이 절삭되었습니다.`);
-    } catch (err) {
-      if (!controller.signal.aborted) {
-        const errMsg = (err as Error)?.message || 'AI 호출 중 알 수 없는 오류가 발생했습니다.';
-        toast.error(errMsg, 'AI 호출 실패');
-        setBody(appendBubbleText(text, `(⚠️ 오류: ${errMsg})`).text);
-      }
-    } finally {
-      setBusy(false);
-      if (abortControllerRef.current === controller) {
-        abortControllerRef.current = null;
-      }
-    }
+    await session.askAnnotationAi({
+      annotationId: annotation.id,
+      question: q,
+      provider: activeProvider,
+      attachments: pendingAttachments,
+    });
   };
 
   const attach = async (kind: 'image' | 'text') => {

@@ -30,6 +30,8 @@ export interface SessionUI {
   external: null | 'modified' | 'deleted';
   annotations: Annotation[];
   openAnnotationId: string | null;
+  /** 백그라운드에서 AI 스트리밍 응답이 진행 중인 말풍선 ID 맵 */
+  streamingAnnotationIds?: Record<string, boolean>;
   /** 페이지 앵커 기반 독립형 텍스트 객체 목록 및 현재 편집 중인 텍스트 객체 ID */
   textObjects: NoteTextObject[];
   editingTextObjectId: string | null;
@@ -56,6 +58,7 @@ const emptySession = (): SessionUI => ({
   external: null,
   annotations: [],
   openAnnotationId: null,
+  streamingAnnotationIds: {},
   textObjects: [],
   editingTextObjectId: null,
   lassoIds: [],
