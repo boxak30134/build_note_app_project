@@ -614,6 +614,14 @@ async function collectRemoteDriveTree(
   };
 }
 
+async function safeReadFolders(): Promise<FolderRecord[]> {
+  try {
+    return await db.folders.toArray();
+  } catch {
+    return [];
+  }
+}
+
 async function ensureLocalFolderPath(
   segments: string[],
   folderMap: Map<string, FolderRecord>,
@@ -647,10 +655,56 @@ async function ensureLocalFolderPath(
   return parentId;
 }
 
+function computeSyncedAt(
+  mdModifiedTime?: string | null,
+  sidecarModifiedTime?: string | null,
+): number {
+  const mdMs = mdModifiedTime ? Date.parse(mdModifiedTime) : 0;
+  const scMs = sidecarModifiedTime ? Date.parse(sidecarModifiedTime) : 0;
+  return Math.max(Date.now(), Number.isFinite(mdMs) ? mdMs : 0, Number.isFinite(scMs) ? scMs : 0);
+}
+
+async function persistSyncedNoteState(
+  noteId: string,
+  meta: {
+    driveFileId: string;
+    lastSyncedAt: number;
+    remoteModifiedTime: string | null;
+    remoteSidecarModifiedTime?: string | null;
+  },
+): Promise<void> {
+  await db.notes.update(noteId, {
+    driveFileId: meta.driveFileId,
+    lastSyncedAt: meta.lastSyncedAt,
+    syncDirty: false,
+    remoteModifiedTime: meta.remoteModifiedTime,
+    ...(meta.remoteSidecarModifiedTime !== undefined
+      ? { remoteSidecarModifiedTime: meta.remoteSidecarModifiedTime }
+      : {}),
+  });
+  getSession(noteId)?.markDriveSynced(meta);
+}
+
+let inFlightSync: Promise<DriveSyncResult> | null = null;
+
 /**
  * 지정 폴더(targetFolderId)와의 로컬 우선(Local-First) 양방향 증분 동기화를 실행한다.
+ * 사용자가 명시적으로 동기화 버튼을 누른 경우에만 호출되며 동시 중복 실행을 방지한다.
  */
 export async function runDriveSync(deps?: DriveFetchDeps): Promise<DriveSyncResult> {
+  if (inFlightSync) {
+    return inFlightSync;
+  }
+  const promise = executeDriveSync(deps).finally(() => {
+    if (inFlightSync === promise) {
+      inFlightSync = null;
+    }
+  });
+  inFlightSync = promise;
+  return promise;
+}
+
+async function executeDriveSync(deps?: DriveFetchDeps): Promise<DriveSyncResult> {
   const settings = useSettings.getState();
   const cfg = settings.driveSyncConfig;
 
@@ -668,7 +722,7 @@ export async function runDriveSync(deps?: DriveFetchDeps): Promise<DriveSyncResu
   if (typeof navigator !== 'undefined' && navigator.onLine === false) {
     settings.setDriveSyncConfig({
       syncStatus: 'offline',
-      lastError: '오프라인 상태입니다. 네트워크 복구 시 자동 동기화됩니다.',
+      lastError: '오프라인 상태입니다. 네트워크 연결 후 [지금 동기화] 버튼을 눌러 주세요.',
     });
     return {
       status: 'offline',
@@ -770,8 +824,8 @@ export async function runDriveSync(deps?: DriveFetchDeps): Promise<DriveSyncResu
       parentDriveId: string,
       titleOverride?: string,
       uploadAllowedParents: string[] = allowedParents,
-    ): Promise<void> => {
-      if (!needsSyncSidecar(note)) return;
+    ): Promise<DriveFileMeta | null> => {
+      if (!needsSyncSidecar(note)) return null;
       const targetTitle = titleOverride ?? note.title;
       const sidecarName = sanitizeSidecarFileName(targetTitle);
       const sidecarKey = `${parentDriveId}/${targetTitle}`;
@@ -788,14 +842,10 @@ export async function runDriveSync(deps?: DriveFetchDeps): Promise<DriveSyncResu
         deps,
       );
       tree.sidecarsByFolderAndTitle.set(sidecarKey, uploadedSidecar);
+      return uploadedSidecar;
     };
 
-    let allLocalFolders: FolderRecord[] = [];
-    try {
-      allLocalFolders = await db.folders.toArray();
-    } catch {
-      allLocalFolders = [];
-    }
+    const allLocalFolders = await safeReadFolders();
     const activeLocalFolders = allLocalFolders.filter((f) => !f.deletedAt);
     const localFolderMap = new Map<string, FolderRecord>(activeLocalFolders.map((f) => [f.id, f]));
     const localFolderByKey = new Map<string, FolderRecord>(
@@ -830,6 +880,9 @@ export async function runDriveSync(deps?: DriveFetchDeps): Promise<DriveSyncResu
         localByFolderAndTitle.get(`${resolvedFolderId ?? ''}::${remoteTitle}`);
       const remoteModifiedMs = remote.modifiedTime ? Date.parse(remote.modifiedTime) : now;
 
+      const remoteSidecarMeta = tree.sidecarsByFolderAndTitle.get(`${parentDriveId}/${remoteTitle}`);
+      const remoteSidecarModifiedTime = remoteSidecarMeta?.modifiedTime ?? null;
+
       if (!local) {
         // 원격에만 있는 신규 마크다운/필기/PDF 노트 -> 로컬 Dexie DB 및 OPFS 리소스로 가져오기
         const mdText = await readScopedDriveFileText(remote, allowedParents, deps);
@@ -837,6 +890,7 @@ export async function runDriveSync(deps?: DriveFetchDeps): Promise<DriveSyncResu
         const contentDoc = sanitizeMarkdownDocEntities(
           sidecar?.content ?? buildContentDocFromMarkdownText(mdText),
         );
+        const syncedAt = computeSyncedAt(remote.modifiedTime, remoteSidecarModifiedTime);
         const newNote = emptyNote({
           id: uid('note'),
           title: remoteTitle,
@@ -849,9 +903,10 @@ export async function runDriveSync(deps?: DriveFetchDeps): Promise<DriveSyncResu
           ...(sidecar?.annotations ? { annotations: sidecar.annotations } : {}),
           ...(sidecar?.textObjects ? { textObjects: sidecar.textObjects } : {}),
           driveFileId: remote.id,
-          lastSyncedAt: now,
+          lastSyncedAt: syncedAt,
           syncDirty: false,
-          remoteModifiedTime: remote.modifiedTime ?? new Date(now).toISOString(),
+          remoteModifiedTime: remote.modifiedTime ?? new Date(syncedAt).toISOString(),
+          remoteSidecarModifiedTime,
           updatedAt: remoteModifiedMs,
         });
         await downloadAssetsForDoc(newNote.id, contentDoc);
@@ -863,11 +918,15 @@ export async function runDriveSync(deps?: DriveFetchDeps): Promise<DriveSyncResu
       handledNoteIds.add(local.id);
       const lastSynced = local.lastSyncedAt ?? 0;
       const localChanged = Boolean(local.syncDirty) || local.updatedAt > lastSynced;
-      const remoteSidecar = tree.sidecarsByFolderAndTitle.get(`${parentDriveId}/${remoteTitle}`);
-      const sidecarModifiedMs = remoteSidecar?.modifiedTime ? Date.parse(remoteSidecar.modifiedTime) : 0;
-      const remoteChanged =
-        (remoteModifiedMs > lastSynced && remote.modifiedTime !== local.remoteModifiedTime) ||
-        sidecarModifiedMs > lastSynced;
+      const sidecarModifiedMs = remoteSidecarModifiedTime ? Date.parse(remoteSidecarModifiedTime) : 0;
+      const mdRemoteChanged =
+        remoteModifiedMs > lastSynced && remote.modifiedTime !== local.remoteModifiedTime;
+      const sidecarRemoteChanged = Boolean(
+        remoteSidecarMeta &&
+          sidecarModifiedMs > lastSynced &&
+          remoteSidecarModifiedTime !== local.remoteSidecarModifiedTime,
+      );
+      const remoteChanged = mdRemoteChanged || sidecarRemoteChanged;
 
       if (localChanged && remoteChanged) {
         // 양방향 동시 수정 충돌 -> 덮어쓰지 않고 (충돌 사본 YYYYMMDD-HHmm).md 로 분기 저장
@@ -883,7 +942,11 @@ export async function runDriveSync(deps?: DriveFetchDeps): Promise<DriveSyncResu
           },
           deps,
         );
-        await uploadSidecarIfNeeded(local, parentDriveId, conflictTitle);
+        const uploadedConflictSidecar = await uploadSidecarIfNeeded(local, parentDriveId, conflictTitle);
+        const conflictSyncedAt = computeSyncedAt(
+          uploadedConflict.modifiedTime,
+          uploadedConflictSidecar?.modifiedTime,
+        );
 
         // 로컬에도 충돌 사본 노트를 별도 보존 (로컬 수정분)
         const conflictNote = emptyNote({
@@ -898,9 +961,10 @@ export async function runDriveSync(deps?: DriveFetchDeps): Promise<DriveSyncResu
           textObjects: local.textObjects,
           pages: local.pages,
           driveFileId: uploadedConflict.id,
-          lastSyncedAt: now,
+          lastSyncedAt: conflictSyncedAt,
           syncDirty: false,
-          remoteModifiedTime: uploadedConflict.modifiedTime ?? new Date(now).toISOString(),
+          remoteModifiedTime: uploadedConflict.modifiedTime ?? new Date(conflictSyncedAt).toISOString(),
+          remoteSidecarModifiedTime: uploadedConflictSidecar?.modifiedTime ?? null,
         });
         await db.notes.put(conflictNote);
 
@@ -910,10 +974,18 @@ export async function runDriveSync(deps?: DriveFetchDeps): Promise<DriveSyncResu
         const contentDoc = sanitizeMarkdownDocEntities(
           sidecar?.content ?? buildContentDocFromMarkdownText(remoteMd),
         );
+        const syncedAt = computeSyncedAt(remote.modifiedTime, remoteSidecarModifiedTime);
         await downloadAssetsForDoc(local.id, contentDoc);
         const activeSession = getSession(local.id);
         if (activeSession) {
-          await activeSession.applyRemoteMarkdown(remoteMd, remote.id, remote.modifiedTime ?? null, now, sidecar);
+          await activeSession.applyRemoteMarkdown(
+            remoteMd,
+            remote.id,
+            remote.modifiedTime ?? null,
+            syncedAt,
+            sidecar,
+            remoteSidecarModifiedTime,
+          );
         } else {
           await db.notes.update(local.id, {
             folderId: resolvedFolderId,
@@ -925,9 +997,10 @@ export async function runDriveSync(deps?: DriveFetchDeps): Promise<DriveSyncResu
             ...(sidecar?.annotations ? { annotations: sidecar.annotations } : {}),
             ...(sidecar?.textObjects ? { textObjects: sidecar.textObjects } : {}),
             driveFileId: remote.id,
-            lastSyncedAt: now,
+            lastSyncedAt: syncedAt,
             syncDirty: false,
             remoteModifiedTime: remote.modifiedTime ?? null,
+            remoteSidecarModifiedTime,
             updatedAt: remoteModifiedMs,
           });
         }
@@ -940,10 +1013,18 @@ export async function runDriveSync(deps?: DriveFetchDeps): Promise<DriveSyncResu
         const contentDoc = sanitizeMarkdownDocEntities(
           sidecar?.content ?? buildContentDocFromMarkdownText(remoteMd),
         );
+        const syncedAt = computeSyncedAt(remote.modifiedTime, remoteSidecarModifiedTime);
         await downloadAssetsForDoc(local.id, contentDoc);
         const activeSession = getSession(local.id);
         if (activeSession) {
-          await activeSession.applyRemoteMarkdown(remoteMd, remote.id, remote.modifiedTime ?? null, now, sidecar);
+          await activeSession.applyRemoteMarkdown(
+            remoteMd,
+            remote.id,
+            remote.modifiedTime ?? null,
+            syncedAt,
+            sidecar,
+            remoteSidecarModifiedTime,
+          );
         } else {
           await db.notes.update(local.id, {
             folderId: resolvedFolderId,
@@ -955,9 +1036,10 @@ export async function runDriveSync(deps?: DriveFetchDeps): Promise<DriveSyncResu
             ...(sidecar?.annotations ? { annotations: sidecar.annotations } : {}),
             ...(sidecar?.textObjects ? { textObjects: sidecar.textObjects } : {}),
             driveFileId: remote.id,
-            lastSyncedAt: now,
+            lastSyncedAt: syncedAt,
             syncDirty: false,
             remoteModifiedTime: remote.modifiedTime ?? null,
+            remoteSidecarModifiedTime,
             updatedAt: remoteModifiedMs,
           });
         }
@@ -976,22 +1058,23 @@ export async function runDriveSync(deps?: DriveFetchDeps): Promise<DriveSyncResu
           },
           deps,
         );
-        await uploadSidecarIfNeeded(local, parentDriveId);
-        await db.notes.update(local.id, {
+        const uploadedSidecar = await uploadSidecarIfNeeded(local, parentDriveId);
+        await persistSyncedNoteState(local.id, {
           driveFileId: uploaded.id,
-          lastSyncedAt: now,
-          syncDirty: false,
+          lastSyncedAt: computeSyncedAt(uploaded.modifiedTime, uploadedSidecar?.modifiedTime),
           remoteModifiedTime: uploaded.modifiedTime ?? null,
+          remoteSidecarModifiedTime: uploadedSidecar?.modifiedTime ?? remoteSidecarModifiedTime,
         });
         uploadedCount++;
       }
     }
 
-    // 4. 로컬에만 있거나 신규/변경된 노트 + 첨부 이미지(images/*, attachments/*) + 사이드카 업로드 (하위 폴더 경로 유지)
+    // 4. 이미 Drive와 연결된(driveFileId 보유) 로컬 수정분만 재업로드 (미업로드 로컬 전용 노트는 자동 업로드·삭제 금지)
     for (const local of activeLocalNotes) {
       const needsUpload =
         !handledNoteIds.has(local.id) &&
-        (!local.driveFileId || Boolean(local.syncDirty) || local.updatedAt > (local.lastSyncedAt ?? 0));
+        Boolean(local.driveFileId) &&
+        (Boolean(local.syncDirty) || local.updatedAt > (local.lastSyncedAt ?? 0));
 
       if (!needsUpload) continue;
 
@@ -1023,13 +1106,13 @@ export async function runDriveSync(deps?: DriveFetchDeps): Promise<DriveSyncResu
         },
         deps,
       );
-      await uploadSidecarIfNeeded(local, destFolderId, undefined, uploadAllowedParents);
+      const uploadedSidecar = await uploadSidecarIfNeeded(local, destFolderId, undefined, uploadAllowedParents);
 
-      await db.notes.update(local.id, {
+      await persistSyncedNoteState(local.id, {
         driveFileId: uploaded.id,
-        lastSyncedAt: now,
-        syncDirty: false,
+        lastSyncedAt: computeSyncedAt(uploaded.modifiedTime, uploadedSidecar?.modifiedTime),
         remoteModifiedTime: uploaded.modifiedTime ?? null,
+        remoteSidecarModifiedTime: uploadedSidecar?.modifiedTime ?? null,
       });
       uploadedCount++;
     }
@@ -1156,7 +1239,7 @@ export async function uploadSelectedNotesToDrive(
   try {
     await verifyTargetFolderExists(targetFolderId, deps);
 
-    const allFolders = await db.folders.toArray();
+    const allFolders = await safeReadFolders();
     const folderMap = new Map(allFolders.filter((f) => !f.deletedAt).map((f) => [f.id, f]));
     const allNotes = await db.notes.toArray();
     const noteMap = new Map(allNotes.filter((n) => !n.deletedAt).map((n) => [n.id, n]));
@@ -1225,10 +1308,11 @@ export async function uploadSelectedNotesToDrive(
       if (mdIdx >= 0) destFiles[mdIdx] = uploadedMd;
       else destFiles.push(uploadedMd);
 
+      let uploadedSidecar: DriveFileMeta | null = null;
       if (needsSyncSidecar(note)) {
         const sidecarName = sanitizeSidecarFileName(note.title);
         const existingSidecar = destFiles.find((f) => f.name === sidecarName) ?? null;
-        const uploadedSidecar = await createOrUpdateMultipartFile(
+        uploadedSidecar = await createOrUpdateMultipartFile(
           {
             existingFile: existingSidecar,
             name: sidecarName,
@@ -1239,16 +1323,16 @@ export async function uploadSelectedNotesToDrive(
           },
           deps,
         );
-        const scIdx = destFiles.findIndex((f) => f.id === uploadedSidecar.id || f.name === uploadedSidecar.name);
+        const scIdx = destFiles.findIndex((f) => f.id === uploadedSidecar!.id || f.name === uploadedSidecar!.name);
         if (scIdx >= 0) destFiles[scIdx] = uploadedSidecar;
         else destFiles.push(uploadedSidecar);
       }
 
-      await db.notes.update(note.id, {
+      await persistSyncedNoteState(note.id, {
         driveFileId: uploadedMd.id,
-        lastSyncedAt: now,
-        syncDirty: false,
+        lastSyncedAt: computeSyncedAt(uploadedMd.modifiedTime, uploadedSidecar?.modifiedTime),
         remoteModifiedTime: uploadedMd.modifiedTime ?? null,
+        remoteSidecarModifiedTime: uploadedSidecar?.modifiedTime ?? null,
       });
       uploadedCount++;
     }
@@ -1307,33 +1391,17 @@ export async function uploadSelectedNotesToDrive(
   }
 }
 
-let autoSyncTimer: ReturnType<typeof setTimeout> | null = null;
-
 /**
- * 로컬 저장 후 백그라운드 디바운스 동기화 예약 (S-Pen 렌더링 루프 무간섭)
+ * 자동 백그라운드 동기화는 비활성화되었습니다. (사용자가 직접 버튼을 누를 때만 동기화 실행)
  */
-export function scheduleBackgroundDriveSync(delayMs = 2500): void {
-  const cfg = useSettings.getState().driveSyncConfig;
-  if (!cfg.enabled || !cfg.targetFolderId) return;
-  if (autoSyncTimer) clearTimeout(autoSyncTimer);
-  autoSyncTimer = setTimeout(() => {
-    autoSyncTimer = null;
-    void runDriveSync();
-  }, delayMs);
+export function scheduleBackgroundDriveSync(_delayMs = 2500): void {
+  // no-op: manual button-only sync policy
 }
 
 /**
- * window 'online' 복귀 시 자동 재동기화 리스너 등록
+ * 네트워크 복귀 시 자동 동기화는 비활성화되었습니다. (사용자가 직접 버튼을 누를 때만 동기화 실행)
  */
 export function registerDriveOnlineSyncListener(): () => void {
-  if (typeof window === 'undefined') return () => undefined;
-  const onOnline = () => {
-    const cfg = useSettings.getState().driveSyncConfig;
-    if (cfg.enabled && cfg.targetFolderId) {
-      void runDriveSync();
-    }
-  };
-  window.addEventListener('online', onOnline);
-  return () => window.removeEventListener('online', onOnline);
+  return () => undefined;
 }
 

@@ -107,7 +107,7 @@ export function DriveSyncSettingsSection() {
       } else if (res.status === 'SYNC_FOLDER_MISSING') {
         toast.error('지정된 Google Drive 폴더를 찾을 수 없습니다. 폴더를 다시 지정해 주세요.');
       } else if (res.status === 'offline') {
-        toast.info('오프라인 상태입니다. 네트워크 연결 시 자동 동기화됩니다.');
+        toast.info('오프라인 상태입니다. 네트워크 연결 후 [지금 동기화] 버튼을 눌러 주세요.');
       } else {
         toast.error(res.errorMessage || '동기화 실패');
       }

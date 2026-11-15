@@ -45,6 +45,7 @@ export interface NoteRecord {
   lastSyncedAt?: number | null;
   syncDirty?: boolean;
   remoteModifiedTime?: string | null;
+  remoteSidecarModifiedTime?: string | null;
   createdAt: number;
   updatedAt: number;
   deletedAt?: number | null;

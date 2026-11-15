@@ -1793,15 +1793,29 @@ export class NoteSession {
       this.captureClean();
       indexNote(updated);
       this.refreshRelatedNotes();
-      if (useSettings.getState().driveSyncConfig.enabled) {
-        void import('../modules/sync/driveSyncEngine')
-          .then((m) => m.scheduleBackgroundDriveSync())
-          .catch(() => undefined);
-      }
       return true;
     } finally {
       this.saving = false;
     }
+  }
+
+  /** 동기화 완료 후 활성 세션의 Drive 메타데이터를 DB와 일치시킨다 */
+  markDriveSynced(meta: {
+    driveFileId: string;
+    lastSyncedAt: number;
+    remoteModifiedTime: string | null;
+    remoteSidecarModifiedTime?: string | null;
+  }) {
+    this.record = {
+      ...this.record,
+      driveFileId: meta.driveFileId,
+      lastSyncedAt: meta.lastSyncedAt,
+      syncDirty: false,
+      remoteModifiedTime: meta.remoteModifiedTime,
+      ...(meta.remoteSidecarModifiedTime !== undefined
+        ? { remoteSidecarModifiedTime: meta.remoteSidecarModifiedTime }
+        : {}),
+    };
   }
 
   /** 원격 Google Drive 변경 사항을 Undo 스택 오염 없이(addToHistory: false) 안전하게 반영 */
@@ -1817,6 +1831,7 @@ export class NoteSession {
       annotations?: Annotation[];
       textObjects?: NoteTextObject[];
     } | null,
+    remoteSidecarModifiedTime?: string | null,
   ) {
     const cleanMarkdown = markdownText.replace(/^\uFEFF/, '');
     const preprocessedMd = preprocessMarkdownEntities(cleanMarkdown);
@@ -1856,6 +1871,7 @@ export class NoteSession {
       textObjects: sidecar?.textObjects ?? this.ui.textObjects,
       driveFileId,
       remoteModifiedTime,
+      ...(remoteSidecarModifiedTime !== undefined ? { remoteSidecarModifiedTime } : {}),
       lastSyncedAt: syncedAt,
       syncDirty: false,
       updatedAt: syncedAt,
