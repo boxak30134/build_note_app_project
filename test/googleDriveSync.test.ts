@@ -245,14 +245,22 @@ describe('REQ_google_drive_sync: Google Drive 지정 폴더 격리 동기화', (
       return new Response('{}', { status: 404 });
     });
 
+    const uploadResult = await uploadSelectedNotesToDrive([localNote.id], {
+      fetchImpl: mockFetch as unknown as typeof fetch,
+      getToken: async () => 'valid-token',
+    });
+
+    expect(uploadResult.status).toBe('synced');
+    expect(uploadResult.uploadedCount).toBe(1);
+    expect(uploadResult.uploadedImagesCount).toBe(1);
+
     const result = await runDriveSync({
       fetchImpl: mockFetch as unknown as typeof fetch,
       getToken: async () => 'valid-token',
     });
 
     expect(result.status).toBe('synced');
-    expect(result.uploadedCount).toBe(1);
-    expect(result.uploadedImagesCount).toBe(1);
+    expect(result.uploadedCount).toBe(0);
     expect(result.downloadedCount).toBe(1);
 
     // 로컬 DB에 원격 신규 노트가 추가되었는지 검증
@@ -270,7 +278,7 @@ describe('REQ_google_drive_sync: Google Drive 지정 폴더 격리 동기화', (
     expect(syncedLocal?.syncDirty).toBe(false);
   });
 
-  it('5. 양방향 동시 수정 충돌 분기: 로컬·원격 모두 수정된 경우 덮어쓰지 않고 (충돌 사본) 파일을 생성한다', async () => {
+  it('5. 작성 중 파일 보호: 로컬·원격 모두 수정된 경우에도 (충돌 사본)을 생성하거나 로컬을 덮어쓰지 않고 보존한다', async () => {
     const baseSyncTime = Date.parse('2026-11-13T07:00:00.000Z');
     const conflictingNote = emptyNote({
       id: 'conflict_note_1',
@@ -347,15 +355,14 @@ describe('REQ_google_drive_sync: Google Drive 지정 폴더 격리 동기화', (
     });
 
     expect(result.status).toBe('synced');
-    expect(result.conflictCount).toBe(1);
+    expect(result.conflictCount).toBe(0);
+    expect(result.uploadedCount).toBe(0);
 
     const allNotes = Array.from(noteStore.values());
-    const conflictBranch = allNotes.find((n) => n.title.includes('충돌 사본'));
-    expect(conflictBranch).toBeDefined();
-    expect(conflictBranch?.markdown).toContain('로컬에서 수정한 문장');
+    expect(allNotes.some((n) => n.title.includes('충돌 사본'))).toBe(false);
 
-    // 기존 노트는 원격 최신본이 안전하게 반영됨
-    expect(noteStore.get(conflictingNote.id)?.markdown).toContain('원격에서 수정한 문장');
+    // 작성 중이던 로컬 노트는 덮어쓰이지 않고 그대로 보존됨
+    expect(noteStore.get(conflictingNote.id)?.markdown).toContain('로컬에서 수정한 문장');
   });
 
   it('6. 지정 폴더 삭제 감지 및 안전 중단: 폴더 404/trashed 시 루트에 새 폴더를 만들지 않고 SYNC_FOLDER_MISSING 전환', async () => {
@@ -677,15 +684,14 @@ describe('REQ_google_drive_sync: Google Drive 지정 폴더 격리 동기화', (
       title: '선형대수 강의안',
       content: pdfDoc,
       markdown: '![손글씨 페이지 1](attachments/lecture-p1.jpg)',
-      pages: [{ id: 'p1', index: 0, size: 'A4', style: 'plain', orientation: 'portrait' }],
+      pages: [{ id: 'p1', size: 'A4', style: 'plain', orientation: 'portrait' }],
       strokes: [
         {
           id: 'stroke_pdf_1',
-          pageIndex: 0,
-          tool: 'pen',
+          tool: 'pencil',
           color: '#000000',
           size: 2,
-          points: [{ x: 10, y: 20, pressure: 0.5 }, { x: 40, y: 60, pressure: 0.6 }],
+          points: [[10, 20, 0.5], [40, 60, 0.6]],
         },
       ],
       syncDirty: true,
@@ -806,15 +812,14 @@ describe('REQ_google_drive_sync: Google Drive 지정 폴더 격리 동기화', (
       id: 'handwriting_only_1',
       title: '손글씨 전용 메모',
       markdown: '',
-      pages: [{ id: 'hw_p1', index: 0, size: 'A4', style: 'grid', orientation: 'portrait' }],
+      pages: [{ id: 'hw_p1', size: 'A4', style: 'grid', orientation: 'portrait' }],
       strokes: [
         {
           id: 'hw_s1',
-          pageIndex: 0,
-          tool: 'pen',
+          tool: 'pencil',
           color: '#EF4444',
           size: 3,
-          points: [{ x: 50, y: 80, pressure: 0.7 }, { x: 120, y: 140, pressure: 0.8 }],
+          points: [[50, 80, 0.7], [120, 140, 0.8]],
         },
       ],
       syncDirty: true,
@@ -882,7 +887,7 @@ describe('REQ_google_drive_sync: Google Drive 지정 폴더 격리 동기화', (
     expect(restored).toHaveLength(1);
     expect(restored[0].strokes).toHaveLength(1);
     expect(restored[0].strokes[0].id).toBe('hw_s1');
-    expect(restored[0].pages[0].style).toBe('grid');
+    expect(restored[0].pages?.[0]?.style).toBe('grid');
   });
 
   it('14. uploadSelectedNotesToDrive: 선택 문서를 로컬 폴더 경로(대학원/선형대수)와 동일한 Drive 하위 경로에 저장한다', async () => {
@@ -995,15 +1000,19 @@ describe('REQ_google_drive_sync: Google Drive 지정 폴더 격리 동기화', (
     expect(noteStore.get('nested_note_1')?.driveFileId).toBe(f1?.id);
   });
 
-  it('15. runDriveSync 시 루트뿐 아니라 하위 폴더를 재귀 탐색하여 내려받고 로컬 하위 폴더 노트도 경로를 유지해 업로드한다', async () => {
+  it('15. runDriveSync 시 하위 폴더를 재귀 탐색해 내려받고, 로컬 하위 폴더 노트는 자동 업로드 없이 수동 업로드 시에만 경로를 유지한다', async () => {
     const folderStore = new Map<string, FolderRecord>([
       ['local_fld_1', { id: 'local_fld_1', name: '로컬폴더', parentId: null, createdAt: 1000, deletedAt: null }],
     ]);
-    vi.spyOn(db.folders, 'toArray').mockImplementation(async () => Array.from(folderStore.values()));
-    vi.spyOn(db.folders, 'put').mockImplementation(async (f: FolderRecord) => {
-      folderStore.set(f.id, f);
-      return f.id;
-    });
+    vi.spyOn(db.folders, 'toArray').mockImplementation(
+      (async () => Array.from(folderStore.values())) as unknown as typeof db.folders.toArray,
+    );
+    vi.spyOn(db.folders, 'put').mockImplementation(
+      (async (f: FolderRecord) => {
+        folderStore.set(f.id, f);
+        return f.id;
+      }) as unknown as typeof db.folders.put,
+    );
 
     const localSubNote = emptyNote({
       id: 'local_sub_note',
@@ -1107,7 +1116,7 @@ describe('REQ_google_drive_sync: Google Drive 지정 폴더 격리 동기화', (
 
     expect(res.status).toBe('synced');
     expect(res.downloadedCount).toBe(1);
-    expect(res.uploadedCount).toBe(1);
+    expect(res.uploadedCount).toBe(0);
 
     // 1. 로컬 db.folders에 대학원 -> 선형대수 계층이 생성되고 루트 images 폴더는 제외되었는지 확인
     const folders = Array.from(folderStore.values());
@@ -1124,7 +1133,14 @@ describe('REQ_google_drive_sync: Google Drive 지정 폴더 격리 동기화', (
     expect(downloadedNote?.strokes).toHaveLength(1);
     expect(downloadedNote?.driveFileId).toBe('drv_nested_md');
 
-    // 3. 로컬 하위 폴더 노트가 Drive의 '로컬폴더' 하위에 업로드되었는지 확인
+    // 3. runDriveSync만으로는 로컬 하위 노트가 자동 업로드되지 않으며, 수동 업로드 호출 시에만 Drive 경로에 저장됨
+    expect(uploadedFiles.find((f) => f.name === '로컬 하위 노트.md')).toBeUndefined();
+    const manualUpload = await uploadSelectedNotesToDrive([localSubNote.id], {
+      fetchImpl: mockFetch as unknown as typeof fetch,
+      getToken: async () => 'valid-token',
+    });
+    expect(manualUpload.uploadedCount).toBe(1);
+
     const remoteLocalFld = createdFolders.find((f) => f.name === '로컬폴더' && f.parents.includes(TARGET_FOLDER_ID));
     expect(remoteLocalFld).toBeTruthy();
     const uploadedLocalSub = uploadedFiles.find((f) => f.name === '로컬 하위 노트.md');
@@ -1268,11 +1284,10 @@ describe('REQ_google_drive_sync: Google Drive 지정 폴더 격리 동기화', (
       strokes: [
         {
           id: 'st_1',
-          pageIndex: 0,
-          tool: 'pen',
+          tool: 'pencil',
           color: '#000000',
           size: 2,
-          points: [{ x: 1, y: 1, pressure: 0.5 }, { x: 10, y: 10, pressure: 0.5 }],
+          points: [[1, 1, 0.5], [10, 10, 0.5]],
         },
       ],
       syncDirty: true,
@@ -1350,11 +1365,10 @@ describe('REQ_google_drive_sync: Google Drive 지정 폴더 격리 동기화', (
           ...cur.strokes,
           {
             id: `st_round_${round}`,
-            pageIndex: 0,
-            tool: 'pen',
+            tool: 'pencil',
             color: '#EF4444',
             size: 2,
-            points: [{ x: 5 * round, y: 5, pressure: 0.6 }],
+            points: [[5 * round, 5, 0.6]],
           },
         ],
         syncDirty: true,
@@ -1367,7 +1381,15 @@ describe('REQ_google_drive_sync: Google Drive 지정 폴더 격리 동기화', (
       });
       expect(syncRes.status).toBe('synced');
       expect(syncRes.conflictCount).toBe(0);
-      expect(syncRes.uploadedCount).toBe(1);
+      expect(syncRes.uploadedCount).toBe(0);
+
+      const uploadRes = await uploadSelectedNotesToDrive([note.id], {
+        fetchImpl: mockFetch as unknown as typeof fetch,
+        getToken: async () => 'valid-token',
+      });
+      expect(uploadRes.status).toBe('synced');
+      expect(uploadRes.conflictCount).toBe(0);
+      expect(uploadRes.uploadedCount).toBe(1);
     }
 
     expect(Array.from(noteStore.values()).filter((n) => n.title.includes('충돌 사본'))).toHaveLength(0);

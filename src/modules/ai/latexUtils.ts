@@ -14,7 +14,10 @@ export type MathSegment =
   | { type: 'inline-math'; latex: string; html: string }
   | { type: 'block-math'; latex: string; html: string };
 
-function safeKatexToString(latex: string, displayMode: boolean): string {
+/**
+ * LaTeX 수식을 안전하게 KaTeX HTML 문자열로 렌더링한다.
+ */
+export function renderLatexHtml(latex: string, displayMode: boolean): string {
   try {
     return katex.renderToString(normalizeAcademicLatex(latex.trim()), {
       throwOnError: false,
@@ -44,14 +47,14 @@ export function parseMathSegments(rawText: string): MathSegment[] {
       segments.push({
         type: 'block-math',
         latex,
-        html: safeKatexToString(latex, true),
+        html: renderLatexHtml(latex, true),
       });
     } else if (match[2] !== undefined) {
       const latex = match[2].trim();
       segments.push({
         type: 'inline-math',
         latex,
-        html: safeKatexToString(latex, false),
+        html: renderLatexHtml(latex, false),
       });
     }
     lastIndex = idx + match[0].length;

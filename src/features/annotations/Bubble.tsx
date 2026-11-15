@@ -1,7 +1,7 @@
-import { useState, type FormEvent, type KeyboardEvent, type MouseEvent } from 'react';
+import { useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type MouseEvent } from 'react';
 import { useFloating, autoUpdate, offset, flip, shift, useDismiss, useInteractions, FloatingPortal } from '@floating-ui/react';
 import { motion } from 'framer-motion';
-import { Bot, Paperclip, Send, Trash2, X, Loader2, Image as ImageIcon, FileText } from 'lucide-react';
+import { Bot, Eye, Paperclip, Pencil, Send, Trash2, X, Loader2, Image as ImageIcon, FileText } from 'lucide-react';
 import type { NoteSession } from '../../session/NoteSession';
 import type { Annotation } from './types';
 import {
@@ -12,7 +12,8 @@ import {
 } from '../../core/bubble/limits';
 import { bubbleDrafts } from '../../storage/drafts';
 import { PROVIDER_LABEL } from '../../ai/aiClient';
-import { parseMathSegments } from '../../modules/ai';
+import { parseBubbleBlocks } from './bubbleMarkdownParser';
+import { BubbleMarkdown } from './BubbleMarkdown';
 import { useSessions } from '../../store/sessionStore';
 import { useSettings, type AiProviderId } from '../../store/settingsStore';
 import { useConnectedProviders } from '../../ai/useConnectedProviders';
@@ -44,7 +45,14 @@ function readAsDataUrl(f: File): Promise<string> {
 export function Bubble({ session, annotation, reference, onClose }: Props) {
   const [question, setQuestion] = useState(() => bubbleDrafts.get(annotation.id));
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [mode, setMode] = useState<'preview' | 'edit'>(() => (annotation.body.trim().length > 0 ? 'preview' : 'edit'));
+  const questionRefs = useRef<Map<number, HTMLDivElement>>(new Map());
   const busy = useSessions((s) => Boolean(s.sessions[session.id]?.streamingAnnotationIds?.[annotation.id]));
+  const blocks = useMemo(() => parseBubbleBlocks(annotation.body), [annotation.body]);
+  const questionBlocks = useMemo(
+    () => blocks.filter((b): b is Extract<typeof b, { kind: 'question' }> => b.kind === 'question'),
+    [blocks],
+  );
   const connected = useConnectedProviders();
   const preferred = useSettings((s) => s.aiProvider);
   const [provider, setProvider] = useState<AiProviderId | null>(null);
@@ -94,6 +102,7 @@ export function Bubble({ session, annotation, reference, onClose }: Props) {
     setQuestion('');
     bubbleDrafts.set(annotation.id, '');
     setAttachments([]);
+    setMode('preview');
 
     await session.askAnnotationAi({
       annotationId: annotation.id,
@@ -101,6 +110,18 @@ export function Bubble({ session, annotation, reference, onClose }: Props) {
       provider: activeProvider,
       attachments: pendingAttachments,
     });
+  };
+
+  const scrollToQuestion = (index: number) => {
+    const focusEl = () => {
+      questionRefs.current.get(index)?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+    };
+    if (mode !== 'preview') {
+      setMode('preview');
+      requestAnimationFrame(focusEl);
+    } else {
+      focusEl();
+    }
   };
 
   const attach = async (kind: 'image' | 'text') => {
@@ -134,7 +155,7 @@ export function Bubble({ session, annotation, reference, onClose }: Props) {
         initial={{ opacity: 0, scale: 0.9 }}
         animate={{ opacity: 1, scale: 1 }}
         transition={{ type: 'spring', stiffness: 420, damping: 30 }}
-        className="z-50 w-[340px] rounded-2xl border border-amber-200 bg-white shadow-2xl"
+        className="z-50 w-[360px] max-w-[calc(100vw-24px)] rounded-2xl border border-amber-200 bg-white shadow-2xl"
         onPointerDown={(e) => e.stopPropagation()}
       >
         <div className="flex items-center gap-2 border-b border-amber-100 bg-amber-50 px-3 py-2 rounded-t-2xl">
@@ -150,29 +171,177 @@ export function Bubble({ session, annotation, reference, onClose }: Props) {
           </button>
         </div>
 
-        <div className="max-h-[280px] overflow-y-auto px-3 pt-2">
-          <textarea
-            className="min-h-[90px] w-full resize-none bg-transparent text-sm leading-relaxed outline-none"
-            placeholder="메모를 입력하거나 아래에서 AI에게 질문하세요. (마크다운 편집 가능)"
-            value={annotation.body}
-            maxLength={MAX_BUBBLE_CHAR_LENGTH}
-            onChange={(e) => setBody(e.target.value)}
-            rows={Math.min(14, Math.max(4, annotation.body.split('\n').length + 1))}
-          />
-          {annotation.body.includes('$') && (
-            <div className="mt-1 border-t border-amber-100 pt-1.5 pb-1 text-xs leading-relaxed text-slate-700">
-              <div className="mb-0.5 text-[10px] font-medium text-amber-700">KaTeX 수식 미리보기</div>
-              <div className="whitespace-pre-wrap break-words">
-                {parseMathSegments(annotation.body).map((seg, idx) =>
-                  seg.type === 'text' ? (
-                    <span key={idx}>{seg.content}</span>
-                  ) : seg.type === 'block-math' ? (
-                    <div key={idx} className="my-1 overflow-x-auto" dangerouslySetInnerHTML={{ __html: seg.html }} />
-                  ) : (
-                    <span key={idx} dangerouslySetInnerHTML={{ __html: seg.html }} />
-                  ),
-                )}
-              </div>
+        <div className="flex items-center justify-between gap-2 border-b border-slate-100 bg-slate-50/80 px-3 py-1.5">
+          {questionBlocks.length >= 2 ? (
+            <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto" data-testid="bubble-question-nav">
+              <span className="shrink-0 text-[10px] font-medium text-slate-500">질문 {questionBlocks.length}개</span>
+              {questionBlocks.map((qb) => (
+                <button
+                  key={qb.index}
+                  type="button"
+                  title={qb.content}
+                  onClick={() => scrollToQuestion(qb.index)}
+                  className="shrink-0 rounded-full bg-indigo-100 px-2 py-0.5 text-[10px] font-bold text-indigo-700 transition-colors hover:bg-indigo-200"
+                >
+                  Q{qb.index}
+                </button>
+              ))}
+            </div>
+          ) : (
+            <span className="text-[10px] font-medium text-slate-400">
+              {mode === 'edit' ? '마크다운 편집 모드' : '마크다운 보기 모드'}
+            </span>
+          )}
+          <button
+            type="button"
+            data-bubble-mode-toggle="true"
+            onClick={() => setMode((m) => (m === 'preview' ? 'edit' : 'preview'))}
+            className="inline-flex shrink-0 items-center gap-1 rounded-md border border-slate-200 bg-white px-2 py-0.5 text-[10px] font-medium text-slate-600 transition-colors hover:bg-slate-100"
+            title={mode === 'preview' ? '원문 마크다운 편집' : '마크다운 렌더링 보기'}
+          >
+            {mode === 'preview' ? (
+              <>
+                <Pencil size={10} />
+                편집
+              </>
+            ) : (
+              <>
+                <Eye size={10} />
+                보기
+              </>
+            )}
+          </button>
+        </div>
+
+        <div className="max-h-[340px] overflow-y-auto px-3 py-2.5">
+          {mode === 'edit' ? (
+            <>
+              <textarea
+                className="min-h-[100px] w-full resize-none bg-transparent text-sm leading-relaxed outline-none"
+                placeholder="메모를 입력하거나 아래에서 AI에게 질문하세요. (마크다운 편집 가능)"
+                value={annotation.body}
+                maxLength={MAX_BUBBLE_CHAR_LENGTH}
+                onChange={(e) => setBody(e.target.value)}
+                onKeyDown={(e) => {
+                  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter' && !e.nativeEvent.isComposing && annotation.body.trim()) {
+                    e.preventDefault();
+                    setMode('preview');
+                  }
+                }}
+                onBlur={(e) => {
+                  const nextTarget = e.relatedTarget as HTMLElement | null;
+                  if (nextTarget?.closest('[data-bubble-mode-toggle]')) return;
+                  if (annotation.body.trim().length > 0) {
+                    setMode('preview');
+                  }
+                }}
+                rows={Math.min(14, Math.max(4, annotation.body.split('\n').length + 1))}
+              />
+              {blocks.length > 0 && (
+                <div
+                  data-testid="bubble-live-preview"
+                  className="mt-1.5 border-t border-amber-100 pt-2 pb-1 text-xs leading-relaxed text-slate-700"
+                >
+                  <div className="mb-1 text-[10px] font-medium text-amber-700">마크다운 실시간 미리보기</div>
+                  <div className="space-y-2">
+                    {blocks.map((block, idx) =>
+                      block.kind === 'memo' ? (
+                        <div key={`live-memo-${idx}`} className="rounded-lg bg-amber-50/40 px-2 py-1.5 text-[12.5px] text-slate-800">
+                          <BubbleMarkdown text={block.content} />
+                        </div>
+                      ) : block.kind === 'question' ? (
+                        <div key={`live-q-${idx}`} className="rounded-lg border border-indigo-200 bg-indigo-50/80 px-2 py-1.5">
+                          <span className="mr-1.5 rounded bg-indigo-600 px-1 py-0.5 text-[9px] font-bold text-white">Q{block.index}</span>
+                          <BubbleMarkdown text={block.content} className="mt-1 text-[12px] text-slate-900" />
+                        </div>
+                      ) : (
+                        <div key={`live-a-${idx}`} className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-1.5">
+                          <BubbleMarkdown text={block.content} className="text-[12px] text-slate-800" />
+                        </div>
+                      ),
+                    )}
+                  </div>
+                </div>
+              )}
+            </>
+          ) : blocks.length === 0 ? (
+            <button
+              type="button"
+              onClick={() => setMode('edit')}
+              className="w-full rounded-xl border border-dashed border-slate-200 px-3 py-5 text-center text-xs text-slate-400 transition-colors hover:border-amber-300 hover:text-slate-600"
+            >
+              메모가 비어 있습니다. 눌러서 마크다운을 입력하거나 아래에서 AI에게 질문하세요.
+            </button>
+          ) : (
+            <div className="space-y-2.5" data-testid="bubble-preview">
+              {blocks.map((block, idx) => {
+                if (block.kind === 'memo') {
+                  return (
+                    <div
+                      key={`memo-${idx}`}
+                      data-bubble-role="memo"
+                      title="클릭하여 마크다운 편집"
+                      onClick={(e) => {
+                        if ((e.target as HTMLElement).closest('a')) return;
+                        setMode('edit');
+                      }}
+                      className="cursor-text rounded-lg bg-amber-50/40 px-2 py-1.5 text-[13px] text-slate-800 transition-colors hover:bg-amber-50/80"
+                    >
+                      <BubbleMarkdown text={block.content} />
+                    </div>
+                  );
+                }
+
+                if (block.kind === 'question') {
+                  return (
+                    <div
+                      key={`q-${block.index}-${idx}`}
+                      ref={(el) => {
+                        if (el) questionRefs.current.set(block.index, el);
+                        else questionRefs.current.delete(block.index);
+                      }}
+                      data-bubble-role="question"
+                      data-question-index={block.index}
+                      className={block.index > 1 ? 'mt-3 border-t-2 border-dashed border-slate-200 pt-2.5' : undefined}
+                    >
+                      <div className="rounded-xl border border-indigo-200 border-l-4 border-l-indigo-500 bg-indigo-50/90 px-2.5 py-2 shadow-xs">
+                        <div className="flex items-center gap-1.5">
+                          <span className="inline-flex items-center rounded-md bg-indigo-600 px-1.5 py-0.5 text-[10px] font-bold tracking-tight text-white">
+                            Q{block.index}
+                          </span>
+                          <span className="text-[10px] font-semibold text-indigo-800">질문</span>
+                        </div>
+                        <BubbleMarkdown text={block.content} className="mt-1 text-[13px] font-medium text-slate-900" />
+                      </div>
+                    </div>
+                  );
+                }
+
+                return (
+                  <div
+                    key={`a-${block.index}-${idx}`}
+                    data-bubble-role="answer"
+                    data-answer-index={block.index}
+                    className="rounded-xl border border-slate-200 bg-slate-50/95 px-2.5 py-2"
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <Bot size={12} className="shrink-0 text-emerald-600" />
+                      <span className="text-[10px] font-semibold text-emerald-700">AI 답변</span>
+                      <span className="rounded border border-slate-200 bg-white px-1.5 py-0.5 text-[10px] font-medium text-slate-500">
+                        {block.providerLabel}
+                      </span>
+                      {busy && idx === blocks.length - 1 && (
+                        <Loader2 size={11} className="ml-auto animate-spin text-indigo-500" />
+                      )}
+                    </div>
+                    {block.content.trim() ? (
+                      <BubbleMarkdown text={block.content} className="mt-1.5 text-[12.5px] text-slate-800" />
+                    ) : busy && idx === blocks.length - 1 ? (
+                      <p className="mt-1.5 text-xs text-slate-400">답변을 작성하고 있습니다…</p>
+                    ) : null}
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>

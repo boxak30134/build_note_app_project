@@ -803,48 +803,6 @@ async function executeDriveSync(deps?: DriveFetchDeps): Promise<DriveSyncResult>
       }
     };
 
-    const uploadNoteAssets = async (noteId: string): Promise<void> => {
-      const res = await uploadNoteAssetsToImagesFolder(
-        noteId,
-        targetFolderId,
-        imagesFolderId,
-        async (imgFolderId) => {
-          imagesFolderId = imgFolderId;
-          return getRemoteImages();
-        },
-        downloadedDriveImgIds,
-        deps,
-      );
-      imagesFolderId = res.imagesFolderId;
-      uploadedImagesCount += res.uploadedCount;
-    };
-
-    const uploadSidecarIfNeeded = async (
-      note: NoteRecord,
-      parentDriveId: string,
-      titleOverride?: string,
-      uploadAllowedParents: string[] = allowedParents,
-    ): Promise<DriveFileMeta | null> => {
-      if (!needsSyncSidecar(note)) return null;
-      const targetTitle = titleOverride ?? note.title;
-      const sidecarName = sanitizeSidecarFileName(targetTitle);
-      const sidecarKey = `${parentDriveId}/${targetTitle}`;
-      const existingSidecar = tree.sidecarsByFolderAndTitle.get(sidecarKey) ?? null;
-      const uploadedSidecar = await createOrUpdateMultipartFile(
-        {
-          existingFile: existingSidecar,
-          name: sidecarName,
-          mimeType: 'application/json; charset=UTF-8',
-          parentId: parentDriveId,
-          body: JSON.stringify(buildSidecarPayload(note)),
-          allowedParents: uploadAllowedParents,
-        },
-        deps,
-      );
-      tree.sidecarsByFolderAndTitle.set(sidecarKey, uploadedSidecar);
-      return uploadedSidecar;
-    };
-
     const allLocalFolders = await safeReadFolders();
     const activeLocalFolders = allLocalFolders.filter((f) => !f.deletedAt);
     const localFolderMap = new Map<string, FolderRecord>(activeLocalFolders.map((f) => [f.id, f]));
@@ -861,10 +819,9 @@ async function executeDriveSync(deps?: DriveFetchDeps): Promise<DriveSyncResult>
       localByFolderAndTitle.set(`${n.folderId ?? ''}::${n.title}`, n);
     }
 
-    const handledNoteIds = new Set<string>();
     const now = Date.now();
 
-    // 3. 원격 -> 로컬 동기화 및 충돌 해결 (하위 폴더 포함)
+    // 3. 원격 -> 로컬 동기화 (하위 폴더 포함, 로컬 작성 중 노트는 보호)
     for (const { file: remote, parentDriveId, folderSegments } of tree.mdEntries) {
       if (!remote.name.toLowerCase().endsWith('.md')) continue;
       assertWithinTargetFolder(remote, allowedParents);
@@ -915,7 +872,6 @@ async function executeDriveSync(deps?: DriveFetchDeps): Promise<DriveSyncResult>
         continue;
       }
 
-      handledNoteIds.add(local.id);
       const lastSynced = local.lastSyncedAt ?? 0;
       const localChanged = Boolean(local.syncDirty) || local.updatedAt > lastSynced;
       const sidecarModifiedMs = remoteSidecarModifiedTime ? Date.parse(remoteSidecarModifiedTime) : 0;
@@ -928,85 +884,13 @@ async function executeDriveSync(deps?: DriveFetchDeps): Promise<DriveSyncResult>
       );
       const remoteChanged = mdRemoteChanged || sidecarRemoteChanged;
 
-      if (localChanged && remoteChanged) {
-        // 양방향 동시 수정 충돌 -> 덮어쓰지 않고 (충돌 사본 YYYYMMDD-HHmm).md 로 분기 저장
-        const conflictFileName = buildConflictFileName(local.title, new Date(now));
-        const conflictTitle = stripMdExt(conflictFileName);
-        const uploadedConflict = await createOrUpdateMultipartFile(
-          {
-            name: conflictFileName,
-            mimeType: 'text/markdown; charset=UTF-8',
-            parentId: parentDriveId,
-            body: resolveUploadMarkdown(local),
-            allowedParents,
-          },
-          deps,
-        );
-        const uploadedConflictSidecar = await uploadSidecarIfNeeded(local, parentDriveId, conflictTitle);
-        const conflictSyncedAt = computeSyncedAt(
-          uploadedConflict.modifiedTime,
-          uploadedConflictSidecar?.modifiedTime,
-        );
+      // 로컬에서 작성·수정 중인 노트는 충돌 사본을 만들거나 자동 업로드/덮어쓰기하지 않고 그대로 보존한다.
+      // Drive 반영은 사용자가 직접 'Google Drive에 업로드' 버튼을 눌렀을 때만 수행한다.
+      if (localChanged) {
+        continue;
+      }
 
-        // 로컬에도 충돌 사본 노트를 별도 보존 (로컬 수정분)
-        const conflictNote = emptyNote({
-          id: uid('note'),
-          title: conflictTitle,
-          folderId: local.folderId,
-          markdown: local.markdown,
-          content: local.content,
-          plainText: local.plainText,
-          strokes: local.strokes,
-          annotations: local.annotations,
-          textObjects: local.textObjects,
-          pages: local.pages,
-          driveFileId: uploadedConflict.id,
-          lastSyncedAt: conflictSyncedAt,
-          syncDirty: false,
-          remoteModifiedTime: uploadedConflict.modifiedTime ?? new Date(conflictSyncedAt).toISOString(),
-          remoteSidecarModifiedTime: uploadedConflictSidecar?.modifiedTime ?? null,
-        });
-        await db.notes.put(conflictNote);
-
-        // 기존 노트는 원격 최신본 반영 (Undo 스택 무오염)
-        const remoteMd = await readScopedDriveFileText(remote, allowedParents, deps);
-        const sidecar = await readSidecar(parentDriveId, remoteTitle);
-        const contentDoc = sanitizeMarkdownDocEntities(
-          sidecar?.content ?? buildContentDocFromMarkdownText(remoteMd),
-        );
-        const syncedAt = computeSyncedAt(remote.modifiedTime, remoteSidecarModifiedTime);
-        await downloadAssetsForDoc(local.id, contentDoc);
-        const activeSession = getSession(local.id);
-        if (activeSession) {
-          await activeSession.applyRemoteMarkdown(
-            remoteMd,
-            remote.id,
-            remote.modifiedTime ?? null,
-            syncedAt,
-            sidecar,
-            remoteSidecarModifiedTime,
-          );
-        } else {
-          await db.notes.update(local.id, {
-            folderId: resolvedFolderId,
-            markdown: remoteMd,
-            content: contentDoc,
-            plainText: plainTextOf(contentDoc),
-            ...(sidecar?.strokes ? { strokes: sidecar.strokes } : {}),
-            ...(sidecar?.pages && sidecar.pages.length > 0 ? { pages: sidecar.pages } : {}),
-            ...(sidecar?.annotations ? { annotations: sidecar.annotations } : {}),
-            ...(sidecar?.textObjects ? { textObjects: sidecar.textObjects } : {}),
-            driveFileId: remote.id,
-            lastSyncedAt: syncedAt,
-            syncDirty: false,
-            remoteModifiedTime: remote.modifiedTime ?? null,
-            remoteSidecarModifiedTime,
-            updatedAt: remoteModifiedMs,
-          });
-        }
-        conflictCount++;
-        downloadedCount++;
-      } else if (remoteChanged && !localChanged) {
+      if (remoteChanged) {
         // 원격만 최신 -> 로컬에 반영 (addToHistory: false)
         const remoteMd = await readScopedDriveFileText(remote, allowedParents, deps);
         const sidecar = await readSidecar(parentDriveId, remoteTitle);
@@ -1044,78 +928,10 @@ async function executeDriveSync(deps?: DriveFetchDeps): Promise<DriveSyncResult>
           });
         }
         downloadedCount++;
-      } else if (localChanged && !remoteChanged) {
-        // 로컬만 변경됨 -> 원격 업데이트 (리소스 + 마크다운 + 사이드카)
-        await uploadNoteAssets(local.id);
-        const uploaded = await createOrUpdateMultipartFile(
-          {
-            existingFile: remote,
-            name: sanitizeMdFileName(local.title),
-            mimeType: 'text/markdown; charset=UTF-8',
-            parentId: parentDriveId,
-            body: resolveUploadMarkdown(local),
-            allowedParents,
-          },
-          deps,
-        );
-        const uploadedSidecar = await uploadSidecarIfNeeded(local, parentDriveId);
-        await persistSyncedNoteState(local.id, {
-          driveFileId: uploaded.id,
-          lastSyncedAt: computeSyncedAt(uploaded.modifiedTime, uploadedSidecar?.modifiedTime),
-          remoteModifiedTime: uploaded.modifiedTime ?? null,
-          remoteSidecarModifiedTime: uploadedSidecar?.modifiedTime ?? remoteSidecarModifiedTime,
-        });
-        uploadedCount++;
       }
     }
 
-    // 4. 이미 Drive와 연결된(driveFileId 보유) 로컬 수정분만 재업로드 (미업로드 로컬 전용 노트는 자동 업로드·삭제 금지)
-    for (const local of activeLocalNotes) {
-      const needsUpload =
-        !handledNoteIds.has(local.id) &&
-        Boolean(local.driveFileId) &&
-        (Boolean(local.syncDirty) || local.updatedAt > (local.lastSyncedAt ?? 0));
-
-      if (!needsUpload) continue;
-
-      await uploadNoteAssets(local.id);
-
-      const segments = getFolderPathSegments(local.folderId, localFolderMap);
-      const destFolderId = await ensureDriveFolderPath(
-        targetFolderId,
-        segments,
-        tree.driveFolderCache,
-        deps,
-      );
-      const uploadAllowedParents = allowedParents.includes(destFolderId)
-        ? allowedParents
-        : [...allowedParents, destFolderId];
-
-      const existingMeta = local.driveFileId
-        ? tree.mdEntries.find((m) => m.file.id === local.driveFileId)?.file ?? null
-        : null;
-
-      const uploaded = await createOrUpdateMultipartFile(
-        {
-          existingFile: existingMeta,
-          name: sanitizeMdFileName(local.title),
-          mimeType: 'text/markdown; charset=UTF-8',
-          parentId: destFolderId,
-          body: resolveUploadMarkdown(local),
-          allowedParents: uploadAllowedParents,
-        },
-        deps,
-      );
-      const uploadedSidecar = await uploadSidecarIfNeeded(local, destFolderId, undefined, uploadAllowedParents);
-
-      await persistSyncedNoteState(local.id, {
-        driveFileId: uploaded.id,
-        lastSyncedAt: computeSyncedAt(uploaded.modifiedTime, uploadedSidecar?.modifiedTime),
-        remoteModifiedTime: uploaded.modifiedTime ?? null,
-        remoteSidecarModifiedTime: uploadedSidecar?.modifiedTime ?? null,
-      });
-      uploadedCount++;
-    }
+    // 4. (수동 업로드 전용) 로컬 수정분의 Google Drive 업로드는 사용자가 'Google Drive에 업로드' 버튼을 직접 눌렀을 때만 수행한다.
 
     // 5. 특정 노트에 매칭되지 않은 잔여 원격 images/ 파일 보조 다운로드 (하위 호환)
     if (imagesFolderId && activeLocalNotes.length > 0) {

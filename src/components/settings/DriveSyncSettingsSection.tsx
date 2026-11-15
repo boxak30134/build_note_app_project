@@ -100,8 +100,8 @@ export function DriveSyncSettingsSection() {
       const res = await runDriveSync();
       if (res.status === 'synced') {
         toast.success(
-          `동기화 완료 (업로드 ${res.uploadedCount}, 다운로드 ${res.downloadedCount}${
-            res.conflictCount > 0 ? `, 충돌 사본 ${res.conflictCount}` : ''
+          `동기화 완료 (다운로드 ${res.downloadedCount}${
+            res.uploadedCount > 0 ? `, 업로드 ${res.uploadedCount}` : ''
           })`,
         );
       } else if (res.status === 'SYNC_FOLDER_MISSING') {
