@@ -24,7 +24,7 @@ describe('REQ_BUBBLE_MARKDOWN_AND_QA_LAYOUT: 말풍선 마크다운 렌더링 �
   it('1. 말풍선 본문의 마크다운 문법과 KaTeX 수식이 함께 렌더링되고 위험 링크는 차단된다', () => {
     const note = emptyNote({ id: 'note-md-1', title: '마크다운 테스트' });
     const session = new NoteSession(note);
-    session.createAnnotation({ pageIndex: 0, x: 50, y: 50 });
+    session.createAnnotation({ x: 50, y: 50 });
     const annId = session.ui.annotations[0].id;
     session.updateAnnotation(annId, {
       body: [
@@ -67,7 +67,7 @@ describe('REQ_BUBBLE_MARKDOWN_AND_QA_LAYOUT: 말풍선 마크다운 렌더링 �
   it('2. 질문(Q)과 AI 답변(A)을 별도 카드로 분리하고 2번째·3번째 질문 배지 및 퀵 점프를 제공한다', () => {
     const note = emptyNote({ id: 'note-qa-1', title: 'Q&A 분리 테스트' });
     const session = new NoteSession(note);
-    session.createAnnotation({ pageIndex: 0, x: 80, y: 120 });
+    session.createAnnotation({ x: 80, y: 120 });
     const annId = session.ui.annotations[0].id;
     session.updateAnnotation(annId, {
       body: [
@@ -123,7 +123,7 @@ describe('REQ_BUBBLE_MARKDOWN_AND_QA_LAYOUT: 말풍선 마크다운 렌더링 �
 
     const note = emptyNote({ id: 'note-toggle-1', title: '편집 토글 테스트' });
     const session = new NoteSession(note);
-    session.createAnnotation({ pageIndex: 0, x: 40, y: 40 });
+    session.createAnnotation({ x: 40, y: 40 });
     const annId = session.ui.annotations[0].id;
 
     const { rerender } = render(
