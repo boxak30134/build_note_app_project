@@ -1244,7 +1244,8 @@ export class NoteSession {
     });
     this.setAnnotationStreaming(annotationId, true);
 
-    const header = `${annotation.body ? '\n\n' : ''}**Q.** ${q}\n**A(${PROVIDER_LABEL[provider]}).** `;
+    const separator = annotation.body.trim() ? '\n\n---\n\n' : '';
+    const header = `${separator}**Q.** ${q}\n**A(${PROVIDER_LABEL[provider]}).** `;
     let { text, truncated } = appendBubbleText(annotation.body, header);
     this.updateAnnotation(annotationId, { body: text });
 
