@@ -114,8 +114,8 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
     if (pageW <= 0 || pageH <= 0) return null;
 
     const rawDpr = window.devicePixelRatio || 1;
-    // 다중 페이지에서도 DPR 다운스케일을 완전 차단하고 무손실 최고 해상도(최소 1.0, 최대 3.0) 유지
-    const dpr = Math.min(Math.max(rawDpr, 1), 3.0);
+    // 1x~1.5x 화면에서도 대각선 계단 현상을 막기 위해 최소 2.0x 슈퍼샘플링(최대 3.0x) 유지
+    const dpr = Math.min(Math.max(rawDpr, 2.0), 3.0);
     return { pageW, pageH, dpr, z, viewport, page };
   }, [session, viewportRef]);
 
@@ -154,6 +154,8 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
       }
       const ctx = getStandardContext(canvas);
       if (!ctx) return null;
+      ctx.imageSmoothingEnabled = true;
+      if ('imageSmoothingQuality' in ctx) ctx.imageSmoothingQuality = 'high';
       ctx.setTransform(dpr, 0, 0, dpr, 0, -topY * dpr);
       if (shouldClear) {
         ctx.clearRect(0, topY, pageW, chunkH);
@@ -197,6 +199,8 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
 
       const ctx = getLowLatencyContext(canvas);
       if (!ctx) return null;
+      ctx.imageSmoothingEnabled = true;
+      if ('imageSmoothingQuality' in ctx) ctx.imageSmoothingQuality = 'high';
       ctx.setTransform(dpr, 0, 0, dpr, 0, -wetTop * dpr);
       if (shouldClear) {
         ctx.clearRect(0, wetTop, pageW, wetHeight);
@@ -846,7 +850,7 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
 
           // 3) Committed Canvas(청크 타일)에 세그먼트 반영 및 베이킹
           const dims = getPageDimensions();
-          const dpr = dims?.dpr || window.devicePixelRatio || 1;
+          const dpr = dims?.dpr || Math.min(Math.max(window.devicePixelRatio || 1, 2.0), 3.0);
           const pageH = dims?.pageH || 0;
           const sBounds = cachedBounds(finalStroke);
           const startChunk = Math.max(0, Math.floor(sBounds.minY / CHUNK_HEIGHT));
@@ -887,6 +891,8 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
               const sw = Math.min(wetCanvas.width, chunkCanvas.width);
 
               chunkCtx.save();
+              chunkCtx.imageSmoothingEnabled = true;
+              if ('imageSmoothingQuality' in chunkCtx) chunkCtx.imageSmoothingQuality = 'high';
               chunkCtx.setTransform(1, 0, 0, 1, 0, 0); // [핵심 1] 1:1 디바이스 픽셀 전사 (DPR 중복 스케일링 완전 차단)
               if (c === 0 && sy === 0 && dy === 0 && chunkCanvas.width === wetCanvas.width) {
                 // 단일 청크 1:1 원점 전사

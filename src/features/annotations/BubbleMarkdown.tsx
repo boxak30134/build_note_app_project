@@ -59,6 +59,8 @@ function renderInlineNodes(nodes: InlineNode[], keyPrefix: string) {
             {node.label}
           </a>
         );
+      case 'break':
+        return <br key={key} />;
     }
   });
 }
@@ -121,16 +123,38 @@ function renderBlock(block: MarkdownBlock, idx: number) {
       );
     case 'list': {
       const ListTag = block.ordered ? 'ol' : 'ul';
+      const hasAnyTask = Boolean(block.checks?.some((c) => c !== null));
       const listCls = block.ordered
         ? 'list-decimal pl-4 space-y-0.5 leading-relaxed'
-        : 'list-disc pl-4 space-y-0.5 leading-relaxed';
+        : hasAnyTask
+          ? 'space-y-0.5 leading-relaxed'
+          : 'list-disc pl-4 space-y-0.5 leading-relaxed';
       return (
         <ListTag key={key} className={listCls}>
-          {block.items.map((item, itemIdx) => (
-            <li key={`${key}-i${itemIdx}`} className="break-words">
-              {renderInlineNodes(parseInlineMarkdown(item), `${key}-i${itemIdx}`)}
-            </li>
-          ))}
+          {block.items.map((item, itemIdx) => {
+            const checkVal = block.checks?.[itemIdx];
+            if (checkVal !== null && checkVal !== undefined) {
+              return (
+                <li key={`${key}-i${itemIdx}`} className="flex items-start gap-1.5 break-words">
+                  <input
+                    type="checkbox"
+                    checked={checkVal}
+                    readOnly
+                    aria-label={checkVal ? '완료됨' : '미완료'}
+                    className="mt-1 h-3 w-3 shrink-0 accent-indigo-600 pointer-events-none"
+                  />
+                  <span className={checkVal ? 'line-through text-slate-400' : undefined}>
+                    {renderInlineNodes(parseInlineMarkdown(item), `${key}-i${itemIdx}`)}
+                  </span>
+                </li>
+              );
+            }
+            return (
+              <li key={`${key}-i${itemIdx}`} className={`break-words ${hasAnyTask ? 'ml-4 list-disc' : ''}`}>
+                {renderInlineNodes(parseInlineMarkdown(item), `${key}-i${itemIdx}`)}
+              </li>
+            );
+          })}
         </ListTag>
       );
     }

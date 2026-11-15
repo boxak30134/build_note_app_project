@@ -12,7 +12,6 @@ import {
 } from '../../core/bubble/limits';
 import { bubbleDrafts } from '../../storage/drafts';
 import { PROVIDER_LABEL } from '../../ai/aiClient';
-import { parseMathSegments } from '../../modules/ai';
 import { parseBubbleBlocks } from './bubbleMarkdownParser';
 import { BubbleMarkdown } from './BubbleMarkdown';
 import { useSessions } from '../../store/sessionStore';
@@ -195,6 +194,7 @@ export function Bubble({ session, annotation, reference, onClose }: Props) {
           )}
           <button
             type="button"
+            data-bubble-mode-toggle="true"
             onClick={() => setMode((m) => (m === 'preview' ? 'edit' : 'preview'))}
             className="inline-flex shrink-0 items-center gap-1 rounded-md border border-slate-200 bg-white px-2 py-0.5 text-[10px] font-medium text-slate-600 transition-colors hover:bg-slate-100"
             title={mode === 'preview' ? '원문 마크다운 편집' : '마크다운 렌더링 보기'}
@@ -222,19 +222,42 @@ export function Bubble({ session, annotation, reference, onClose }: Props) {
                 value={annotation.body}
                 maxLength={MAX_BUBBLE_CHAR_LENGTH}
                 onChange={(e) => setBody(e.target.value)}
+                onKeyDown={(e) => {
+                  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter' && !e.nativeEvent.isComposing && annotation.body.trim()) {
+                    e.preventDefault();
+                    setMode('preview');
+                  }
+                }}
+                onBlur={(e) => {
+                  const nextTarget = e.relatedTarget as HTMLElement | null;
+                  if (nextTarget?.closest('[data-bubble-mode-toggle]')) return;
+                  if (annotation.body.trim().length > 0) {
+                    setMode('preview');
+                  }
+                }}
                 rows={Math.min(14, Math.max(4, annotation.body.split('\n').length + 1))}
               />
-              {annotation.body.includes('$') && (
-                <div className="mt-1 border-t border-amber-100 pt-1.5 pb-1 text-xs leading-relaxed text-slate-700">
-                  <div className="mb-0.5 text-[10px] font-medium text-amber-700">KaTeX 수식 미리보기</div>
-                  <div className="whitespace-pre-wrap break-words">
-                    {parseMathSegments(annotation.body).map((seg, idx) =>
-                      seg.type === 'text' ? (
-                        <span key={idx}>{seg.content}</span>
-                      ) : seg.type === 'block-math' ? (
-                        <div key={idx} className="my-1 overflow-x-auto" dangerouslySetInnerHTML={{ __html: seg.html }} />
+              {blocks.length > 0 && (
+                <div
+                  data-testid="bubble-live-preview"
+                  className="mt-1.5 border-t border-amber-100 pt-2 pb-1 text-xs leading-relaxed text-slate-700"
+                >
+                  <div className="mb-1 text-[10px] font-medium text-amber-700">마크다운 실시간 미리보기</div>
+                  <div className="space-y-2">
+                    {blocks.map((block, idx) =>
+                      block.kind === 'memo' ? (
+                        <div key={`live-memo-${idx}`} className="rounded-lg bg-amber-50/40 px-2 py-1.5 text-[12.5px] text-slate-800">
+                          <BubbleMarkdown text={block.content} />
+                        </div>
+                      ) : block.kind === 'question' ? (
+                        <div key={`live-q-${idx}`} className="rounded-lg border border-indigo-200 bg-indigo-50/80 px-2 py-1.5">
+                          <span className="mr-1.5 rounded bg-indigo-600 px-1 py-0.5 text-[9px] font-bold text-white">Q{block.index}</span>
+                          <BubbleMarkdown text={block.content} className="mt-1 text-[12px] text-slate-900" />
+                        </div>
                       ) : (
-                        <span key={idx} dangerouslySetInnerHTML={{ __html: seg.html }} />
+                        <div key={`live-a-${idx}`} className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-1.5">
+                          <BubbleMarkdown text={block.content} className="text-[12px] text-slate-800" />
+                        </div>
                       ),
                     )}
                   </div>
@@ -257,7 +280,12 @@ export function Bubble({ session, annotation, reference, onClose }: Props) {
                     <div
                       key={`memo-${idx}`}
                       data-bubble-role="memo"
-                      className="rounded-lg bg-amber-50/40 px-2 py-1.5 text-[13px] text-slate-800"
+                      title="클릭하여 마크다운 편집"
+                      onClick={(e) => {
+                        if ((e.target as HTMLElement).closest('a')) return;
+                        setMode('edit');
+                      }}
+                      className="cursor-text rounded-lg bg-amber-50/40 px-2 py-1.5 text-[13px] text-slate-800 transition-colors hover:bg-amber-50/80"
                     >
                       <BubbleMarkdown text={block.content} />
                     </div>

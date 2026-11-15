@@ -26,6 +26,11 @@ import { RgbColorPickerModal } from './RgbColorPickerModal';
 import { useTabs } from '../store/tabsStore';
 import { useSessionUI } from '../store/sessionStore';
 import { getSession } from '../session/NoteSession';
+import {
+  FONT_SIZE_QUICK_PRESETS,
+  clampFontSizePx,
+  readCursorFontSizePx,
+} from '../editor/extensions/fontSize';
 import { toast } from '../store/uiStore';
 import { db } from '../storage/db';
 import {
@@ -563,17 +568,48 @@ function FontSelector({ activeId }: { activeId: string | null }) {
 const FONT_SIZE_PRESETS = [10, 11, 12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 48];
 
 /**
- * 폰트 크기 조절 메뉴 (스텝퍼 + 드롭다운 + 직접 입력)
+ * 폰트 크기 조절 메뉴 (스텝퍼 + 드롭다운 + 퀵 프리셋/보통 초기화 + 직접 입력 + 실시간 커서 동기화)
  */
 function FontSizeSelector({ activeId }: { activeId: string | null }) {
   const { fontSize, setFontSize } = useSettings();
   const [open, setOpen] = useState(false);
-  const [customInput, setCustomInput] = useState(String(fontSize));
+  const [cursorFontSize, setCursorFontSize] = useState<number | null>(null);
+  const effectiveFontSize = cursorFontSize ?? fontSize;
+  const [customInput, setCustomInput] = useState(String(effectiveFontSize));
   const btnRef = useRef<HTMLButtonElement>(null);
 
+  const session = getSession(activeId);
+  const editor = session?.editor;
+
   useEffect(() => {
-    setCustomInput(String(fontSize));
-  }, [fontSize]);
+    const syncCursorFontSize = () => {
+      if (session?.getCursorFontSize) {
+        setCursorFontSize(session.getCursorFontSize());
+      } else if (editor?.state) {
+        setCursorFontSize(readCursorFontSizePx(editor.state));
+      } else {
+        setCursorFontSize(null);
+      }
+    };
+
+    syncCursorFontSize();
+    if (!editor || typeof editor.on !== 'function' || typeof editor.off !== 'function') {
+      return;
+    }
+
+    editor.on('selectionUpdate', syncCursorFontSize);
+    editor.on('transaction', syncCursorFontSize);
+    editor.on('focus', syncCursorFontSize);
+    return () => {
+      editor.off('selectionUpdate', syncCursorFontSize);
+      editor.off('transaction', syncCursorFontSize);
+      editor.off('focus', syncCursorFontSize);
+    };
+  }, [activeId, session, editor]);
+
+  useEffect(() => {
+    setCustomInput(String(effectiveFontSize));
+  }, [effectiveFontSize]);
 
   const { refs, floatingStyles, context } = useFloating({
     open,
@@ -587,9 +623,26 @@ function FontSizeSelector({ activeId }: { activeId: string | null }) {
   const { getFloatingProps } = useInteractions([useDismiss(context)]);
 
   const applySize = (size: number) => {
-    const clamped = Math.max(8, Math.min(72, Math.round(size)));
-    setFontSize(clamped);
-    getSession(activeId)?.applyFontSize(clamped);
+    const clamped = clampFontSizePx(size);
+    const currentSession = getSession(activeId);
+    if (currentSession?.editor) {
+      currentSession.applyFontSize(clamped);
+      setCursorFontSize(currentSession.getCursorFontSize?.() ?? clamped);
+    } else {
+      setFontSize(clamped);
+      currentSession?.applyFontSize(clamped);
+    }
+  };
+
+  const onResetDefault = () => {
+    const currentSession = getSession(activeId);
+    if (currentSession?.resetFontSize) {
+      currentSession.resetFontSize();
+    } else {
+      currentSession?.applyFontSize(null);
+    }
+    setCursorFontSize(currentSession?.getCursorFontSize?.() ?? null);
+    setOpen(false);
   };
 
   const onSelectPreset = (size: number) => {
@@ -598,13 +651,13 @@ function FontSizeSelector({ activeId }: { activeId: string | null }) {
   };
 
   const onDec = () => {
-    const lower = [...FONT_SIZE_PRESETS].reverse().find((s) => s < fontSize);
-    applySize(lower ?? Math.max(8, fontSize - 2));
+    const lower = [...FONT_SIZE_PRESETS].reverse().find((s) => s < effectiveFontSize);
+    applySize(lower ?? Math.max(8, effectiveFontSize - 2));
   };
 
   const onInc = () => {
-    const higher = FONT_SIZE_PRESETS.find((s) => s > fontSize);
-    applySize(higher ?? Math.min(72, fontSize + 2));
+    const higher = FONT_SIZE_PRESETS.find((s) => s > effectiveFontSize);
+    applySize(higher ?? Math.min(72, effectiveFontSize + 2));
   };
 
   const onSubmitCustom = (e: React.FormEvent) => {
@@ -622,7 +675,8 @@ function FontSizeSelector({ activeId }: { activeId: string | null }) {
         type="button"
         data-testid="font-size-dec-btn"
         className="tool-btn h-6 w-6 text-xs font-bold text-slate-600 hover:bg-slate-100 disabled:opacity-40"
-        disabled={fontSize <= 8}
+        disabled={effectiveFontSize <= 8}
+        onMouseDown={(e) => e.preventDefault()}
         onClick={onDec}
         title="글자 크기 축소 (-)"
       >
@@ -632,18 +686,23 @@ function FontSizeSelector({ activeId }: { activeId: string | null }) {
         ref={btnRef}
         type="button"
         data-testid="font-size-dropdown-btn"
-        className="flex h-6 min-w-[42px] items-center justify-center gap-0.5 rounded px-1 text-[11px] font-medium text-slate-700 hover:bg-slate-100"
+        data-active-cursor-size={cursorFontSize !== null ? String(cursorFontSize) : 'default'}
+        className={`flex h-6 min-w-[44px] items-center justify-center gap-0.5 rounded px-1 text-[11px] font-medium hover:bg-slate-100 ${
+          cursorFontSize !== null ? 'bg-indigo-50 text-indigo-700 font-semibold' : 'text-slate-700'
+        }`}
+        onMouseDown={(e) => e.preventDefault()}
         onClick={() => setOpen((o) => !o)}
-        title="글자 크기 선택 및 설정"
+        title={cursorFontSize !== null ? `현재 커서 글자 크기: ${cursorFontSize}px` : `기본 글자 크기: ${fontSize}px`}
       >
-        <span>{fontSize}px</span>
+        <span>{effectiveFontSize}px</span>
         <ChevronDown size={11} className="text-slate-400" />
       </button>
       <button
         type="button"
         data-testid="font-size-inc-btn"
         className="tool-btn h-6 w-6 text-xs font-bold text-slate-600 hover:bg-slate-100 disabled:opacity-40"
-        disabled={fontSize >= 72}
+        disabled={effectiveFontSize >= 72}
+        onMouseDown={(e) => e.preventDefault()}
         onClick={onInc}
         title="글자 크기 확대 (+)"
       >
@@ -659,10 +718,73 @@ function FontSizeSelector({ activeId }: { activeId: string | null }) {
             initial={{ opacity: 0, y: -4 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.15 }}
-            className="z-50 w-48 rounded-xl border border-slate-200 bg-white p-2.5 shadow-2xl"
+            className="z-50 w-56 rounded-xl border border-slate-200 bg-white p-2.5 shadow-2xl"
             data-testid="font-size-dropdown"
           >
-            <div className="mb-2 text-[11px] font-semibold text-slate-500">글자 크기 (폰트 크기)</div>
+            <div className="mb-1.5 flex items-center justify-between text-[11px] font-semibold text-slate-500">
+              <span>글자 크기 (커서/선택)</span>
+              <span className="text-[10px] font-normal text-slate-400">
+                {cursorFontSize !== null ? `${cursorFontSize}px 적용중` : `기본 ${fontSize}px`}
+              </span>
+            </div>
+            <div className="mb-2 grid grid-cols-4 gap-1" data-testid="font-size-quick-presets">
+              <button
+                type="button"
+                data-testid="font-size-quick-small"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => onSelectPreset(FONT_SIZE_QUICK_PRESETS[0].size)}
+                className={`rounded px-1 py-1 text-[11px] font-medium transition ${
+                  cursorFontSize === FONT_SIZE_QUICK_PRESETS[0].size
+                    ? 'bg-indigo-600 text-white font-semibold'
+                    : 'bg-slate-50 text-slate-700 hover:bg-slate-100'
+                }`}
+                title="작게 (13px)"
+              >
+                작게
+              </button>
+              <button
+                type="button"
+                data-testid="font-size-reset-btn"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={onResetDefault}
+                className={`rounded px-1 py-1 text-[11px] font-medium transition ${
+                  cursorFontSize === null
+                    ? 'bg-indigo-600 text-white font-semibold'
+                    : 'bg-slate-50 text-slate-700 hover:bg-slate-100'
+                }`}
+                title={`기본 크기(${fontSize}px)로 초기화`}
+              >
+                보통
+              </button>
+              <button
+                type="button"
+                data-testid="font-size-quick-large"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => onSelectPreset(FONT_SIZE_QUICK_PRESETS[1].size)}
+                className={`rounded px-1 py-1 text-[11px] font-medium transition ${
+                  cursorFontSize === FONT_SIZE_QUICK_PRESETS[1].size
+                    ? 'bg-indigo-600 text-white font-semibold'
+                    : 'bg-slate-50 text-slate-700 hover:bg-slate-100'
+                }`}
+                title="크게 (20px)"
+              >
+                크게
+              </button>
+              <button
+                type="button"
+                data-testid="font-size-quick-xlarge"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => onSelectPreset(FONT_SIZE_QUICK_PRESETS[2].size)}
+                className={`rounded px-1 py-1 text-[11px] font-medium transition ${
+                  cursorFontSize === FONT_SIZE_QUICK_PRESETS[2].size
+                    ? 'bg-indigo-600 text-white font-semibold'
+                    : 'bg-slate-50 text-slate-700 hover:bg-slate-100'
+                }`}
+                title="특대 (26px)"
+              >
+                특대
+              </button>
+            </div>
             <form onSubmit={onSubmitCustom} className="mb-2.5 flex items-center gap-1">
               <input
                 type="number"
@@ -684,12 +806,13 @@ function FontSizeSelector({ activeId }: { activeId: string | null }) {
             </form>
             <div className="grid grid-cols-3 gap-1 border-t border-slate-100 pt-2">
               {FONT_SIZE_PRESETS.map((sz) => {
-                const isSelected = fontSize === sz;
+                const isSelected = effectiveFontSize === sz;
                 return (
                   <button
                     key={sz}
                     type="button"
                     data-testid={`font-size-preset-${sz}`}
+                    onMouseDown={(e) => e.preventDefault()}
                     className={`flex items-center justify-center rounded py-1 text-xs font-medium transition ${
                       isSelected
                         ? 'bg-indigo-600 text-white font-semibold'

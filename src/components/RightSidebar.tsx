@@ -14,10 +14,10 @@ import {
   clearGeminiClientCache,
   GEMINI_FALLBACK_MODEL,
   GEMINI_PRIMARY_MODEL,
-  parseMathSegments,
   SIDEBAR_MAX_OUTPUT_TOKENS,
   streamGeminiTutor,
 } from '../modules/ai';
+import { BubbleMarkdown } from '../features/annotations/BubbleMarkdown';
 import { getSession } from '../session/NoteSession';
 import { openWikiTarget } from './WikiPreview';
 import { toast } from '../store/uiStore';
@@ -462,7 +462,7 @@ function Chat({ connected, onConnect }: { connected: AiProviderId[]; onConnect: 
   // 주의: 최신 Chrome 에서 scrollIntoView() 는 Promise 를 반환한다.
   // 화살표 함수 축약형으로 쓰면 effect 가 Promise 를 반환해 React 가 cleanup 으로 호출하다 오류가 나므로 블록으로 감싼다.
   useEffect(() => {
-    void endRef.current?.scrollIntoView({ block: 'end' });
+    void endRef.current?.scrollIntoView?.({ block: 'end' });
   }, [msgs]);
 
   const handleSendMessage = async (
@@ -650,18 +650,17 @@ function Chat({ connected, onConnect }: { connected: AiProviderId[]; onConnect: 
       <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-2">
         {msgs.length === 0 && <p className="mt-6 text-center text-xs text-slate-400">현재 노트 전체 문맥을 바탕으로 학술 정의·정리·증명·수식에 대해 질문하세요.</p>}
         {msgs.map((m, i) => (
-          <div key={i} className={`whitespace-pre-wrap break-words rounded-xl px-3 py-2 text-xs leading-relaxed ${m.role === 'user' ? 'ml-6 bg-indigo-600 text-white' : 'mr-4 bg-slate-100 text-slate-800'}`}>
+          <div
+            key={i}
+            data-testid={`ai-chat-msg-${m.role}`}
+            className={`break-words rounded-xl px-3 py-2 text-xs leading-relaxed ${m.role === 'user' ? 'ml-6 whitespace-pre-wrap bg-indigo-600 text-white' : 'mr-4 bg-slate-100 text-slate-800'
+              }`}
+          >
             {m.content ? (
-              m.role === 'assistant' && m.content.includes('$') ? (
-                parseMathSegments(m.content).map((seg, idx) =>
-                  seg.type === 'text' ? (
-                    <span key={idx}>{seg.content}</span>
-                  ) : seg.type === 'block-math' ? (
-                    <div key={idx} className="my-1.5 overflow-x-auto" dangerouslySetInnerHTML={{ __html: seg.html }} />
-                  ) : (
-                    <span key={idx} dangerouslySetInnerHTML={{ __html: seg.html }} />
-                  ),
-                )
+              m.role === 'assistant' ? (
+                <div data-testid="ai-chat-assistant-markdown">
+                  <BubbleMarkdown text={m.content} className="text-xs text-slate-800" />
+                </div>
               ) : (
                 m.content
               )

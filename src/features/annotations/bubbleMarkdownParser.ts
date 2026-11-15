@@ -9,7 +9,7 @@ export type MarkdownBlock =
   | { kind: 'code'; lang: string; code: string }
   | { kind: 'block-math'; latex: string }
   | { kind: 'blockquote'; lines: string[] }
-  | { kind: 'list'; ordered: boolean; items: string[] }
+  | { kind: 'list'; ordered: boolean; items: string[]; checks?: Array<boolean | null> }
   | { kind: 'table'; headers: string[]; rows: string[][] }
   | { kind: 'hr' };
 
@@ -20,16 +20,19 @@ export type InlineNode =
   | { type: 'strong'; children: InlineNode[] }
   | { type: 'em'; children: InlineNode[] }
   | { type: 'del'; children: InlineNode[] }
-  | { type: 'link'; label: string; href: string };
+  | { type: 'link'; label: string; href: string }
+  | { type: 'break' };
 
 const QUESTION_LINE_RE = /^\*\*Q(?:\d+)?\.\*\*\s*(.*)$/;
 const ANSWER_PROVIDER_LINE_RE = /^\*\*A\(([^)]+)\)\.\*\*\s*(.*)$/;
 const ANSWER_PLAIN_LINE_RE = /^\*\*A\.\*\*\s*(.*)$/;
 const HR_LINE_RE = /^\s*(?:-{3,}|_{3,}|\*{3,})\s*$/;
 const HEADING_RE = /^(#{1,6})\s+(.+)$/;
+const TASK_ITEM_RE = /^\s*[-*+]\s+\[([ xX])\]\s+(.+)$/;
 const UL_ITEM_RE = /^\s*[-*+]\s+(.+)$/;
 const OL_ITEM_RE = /^\s*\d+\.\s+(.+)$/;
 const TABLE_SEP_RE = /^\s*\|?(?:\s*:?-{2,}:?\s*\|)+(?:\s*:?-{2,}:?\s*)?\|?\s*$/;
+const FENCE_START_RE = /^(`{3,}|~{3,})(.*)$/;
 
 function stripTrailingSeparator(text: string): string {
   const lines = text.split('\n');
@@ -105,7 +108,7 @@ export function parseBubbleBlocks(body: string): BubbleBlock[] {
       }
     }
 
-    if (trimmed.startsWith('```')) {
+    if (trimmed.startsWith('```') || trimmed.startsWith('~~~')) {
       inFence = !inFence;
     }
 
@@ -130,7 +133,7 @@ function isBlockStarter(lines: string[], idx: number): boolean {
   const line = lines[idx];
   const trimmed = line.trim();
   if (!trimmed) return true;
-  if (trimmed.startsWith('```') || trimmed.startsWith('$$')) return true;
+  if (trimmed.startsWith('```') || trimmed.startsWith('~~~') || trimmed.startsWith('$$')) return true;
   if (HR_LINE_RE.test(trimmed) || HEADING_RE.test(trimmed)) return true;
   if (/^\s*>/.test(line)) return true;
   if (UL_ITEM_RE.test(line) || OL_ITEM_RE.test(line)) return true;
@@ -157,16 +160,20 @@ export function parseMarkdownBlocks(markdown: string): MarkdownBlock[] {
       continue;
     }
 
-    // Fenced code block
-    if (trimmed.startsWith('```')) {
-      const lang = trimmed.slice(3).trim();
+    // Fenced code block (``` or ~~~)
+    const fenceMatch = FENCE_START_RE.exec(trimmed);
+    if (fenceMatch) {
+      const fenceChar = fenceMatch[1][0];
+      const fenceLen = fenceMatch[1].length;
+      const lang = fenceMatch[2].trim();
+      const closeRe = new RegExp(`^${fenceChar}{${fenceLen},}\\s*$`);
       const codeLines: string[] = [];
       i += 1;
-      while (i < lines.length && !lines[i].trim().startsWith('```')) {
+      while (i < lines.length && !closeRe.test(lines[i].trim())) {
         codeLines.push(lines[i]);
         i += 1;
       }
-      if (i < lines.length && lines[i].trim().startsWith('```')) {
+      if (i < lines.length && closeRe.test(lines[i].trim())) {
         i += 1;
       }
       blocks.push({ kind: 'code', lang, code: codeLines.join('\n') });
@@ -238,16 +245,29 @@ export function parseMarkdownBlocks(markdown: string): MarkdownBlock[] {
       continue;
     }
 
-    // Unordered or ordered list
+    // Unordered, task-checkbox, or ordered list
     const isUl = UL_ITEM_RE.test(line);
     const isOl = OL_ITEM_RE.test(line);
     if (isUl || isOl) {
       const ordered = isOl;
       const itemRe = ordered ? OL_ITEM_RE : UL_ITEM_RE;
       const items: string[] = [];
+      const checks: Array<boolean | null> = [];
+      let hasTask = false;
       while (i < lines.length) {
+        if (!ordered) {
+          const taskMatch = TASK_ITEM_RE.exec(lines[i]);
+          if (taskMatch) {
+            hasTask = true;
+            checks.push(taskMatch[1].toLowerCase() === 'x');
+            items.push(taskMatch[2].trim());
+            i += 1;
+            continue;
+          }
+        }
         const match = itemRe.exec(lines[i]);
         if (match) {
+          checks.push(null);
           items.push(match[1].trim());
           i += 1;
           continue;
@@ -260,7 +280,7 @@ export function parseMarkdownBlocks(markdown: string): MarkdownBlock[] {
         }
         break;
       }
-      blocks.push({ kind: 'list', ordered, items });
+      blocks.push(hasTask ? { kind: 'list', ordered, items, checks } : { kind: 'list', ordered, items });
       continue;
     }
 
@@ -373,6 +393,26 @@ export function parseInlineMarkdown(input: string): InlineNode[] {
       if (closeIdx !== -1 && closeIdx > pos + 2) {
         nodes.push({ type: 'strong', children: parseInlineMarkdown(input.slice(pos + 2, closeIdx)) });
         pos = closeIdx + 2;
+        continue;
+      }
+    }
+
+    // Bold __...__
+    if (input.startsWith('__', pos)) {
+      const closeIdx = input.indexOf('__', pos + 2);
+      if (closeIdx !== -1 && closeIdx > pos + 2) {
+        nodes.push({ type: 'strong', children: parseInlineMarkdown(input.slice(pos + 2, closeIdx)) });
+        pos = closeIdx + 2;
+        continue;
+      }
+    }
+
+    // Safe inline line break <br> / <br />
+    if (ch === '<') {
+      const brMatch = /^<br\s*\/?>/i.exec(input.slice(pos));
+      if (brMatch) {
+        nodes.push({ type: 'break' });
+        pos += brMatch[0].length;
         continue;
       }
     }

@@ -152,10 +152,144 @@ export function drawStroke(
   ctx.restore();
 }
 
+type RenderPoint = [number, number, number];
+
+function getStreamlineAlpha(penType: Stroke['penType']): number {
+  switch (penType) {
+    case 'brush':
+      return 0.45;
+    case 'fountain-sharp':
+    case 'fountain-flat':
+      return 0.52;
+    case 'ballpoint':
+      return 0.62;
+    case 'pencil':
+    default:
+      return 0.58;
+  }
+}
+
+/**
+ * 인과적(Causal) 렌더 스무딩 필터:
+ * 원시 좌표(stroke.points)는 변조하지 않고 렌더링 시점에만 [0..i] 과거 샘플을 이용해
+ * 대각선 디지타이저 양자화 노이즈·계단 지터를 완화한다. (거리가 큰 빠른 획은 자동으로 반응성 유지)
+ */
+export function computeCausalSmoothedPoints(
+  pts: ReadonlyArray<readonly number[]>,
+  penType: Stroke['penType'],
+): RenderPoint[] {
+  const n = pts.length;
+  if (n === 0) return [];
+  const baseAlpha = getStreamlineAlpha(penType);
+  const out: RenderPoint[] = [[pts[0][0], pts[0][1], pts[0][2] ?? 0.5]];
+
+  for (let i = 1; i < n; i++) {
+    const prev = out[i - 1];
+    const rx = pts[i][0];
+    const ry = pts[i][1];
+    const rp = pts[i][2] ?? 0.5;
+    const dist = Math.hypot(rx - prev[0], ry - prev[1]);
+    const alpha = Math.min(0.92, baseAlpha + Math.min(0.32, dist / 45));
+    out.push([
+      prev[0] + (rx - prev[0]) * alpha,
+      prev[1] + (ry - prev[1]) * alpha,
+      prev[2] + (rp - prev[2]) * 0.65,
+    ]);
+  }
+  return out;
+}
+
+/**
+ * 5종 펜(뾰족 만년필·뭉툭 만년필·볼펜·연필·붓)의 필압·속도·닙 각도 특성을 인과적으로 계산한다.
+ */
+export function computeCausalStrokeWidths(
+  stroke: Pick<Stroke, 'size' | 'penType'>,
+  smoothed: ReadonlyArray<RenderPoint>,
+): number[] {
+  const n = smoothed.length;
+  if (n === 0) return [];
+  const penType = stroke.penType || 'pencil';
+  const baseSize = Math.max(0.8, stroke.size);
+
+  const p0 = naturalPenEasing(smoothed[0][2]);
+  let startScale = 0.4 + 0.6 * p0;
+  if (penType === 'fountain-sharp') startScale = 0.32 + 0.55 * p0;
+  else if (penType === 'brush') startScale = 0.28 + 0.68 * p0;
+  else if (penType === 'ballpoint') startScale = 0.8 + 0.16 * p0;
+
+  const widths: number[] = [Math.max(0.7, baseSize * startScale)];
+
+  for (let i = 1; i < n; i++) {
+    const a = smoothed[i - 1];
+    const b = smoothed[i];
+    const dx = b[0] - a[0];
+    const dy = b[1] - a[1];
+    const dist = Math.hypot(dx, dy);
+    const speedNorm = Math.min(1, dist / 24);
+    const avgP = naturalPenEasing((a[2] + b[2]) * 0.5);
+    const entryTaper = i <= 2 ? 0.68 + 0.16 * i : 1;
+
+    let rawScale: number;
+    switch (penType) {
+      case 'fountain-sharp': {
+        const velScale = 1 - 0.36 * speedNorm;
+        rawScale = (0.26 + 0.88 * avgP) * velScale * entryTaper;
+        break;
+      }
+      case 'fountain-flat': {
+        // 45도 사선 닙: 진행 방향과 닙 각도 차이에 따라 획 굵기 강약 표현
+        const strokeAngle = Math.atan2(dy, dx);
+        const nibFactor = dist > 0.2 ? 0.44 + 0.56 * Math.abs(Math.sin(strokeAngle + Math.PI / 4)) : 0.72;
+        rawScale = (0.72 + 0.34 * avgP) * nibFactor;
+        break;
+      }
+      case 'brush': {
+        const velScale = 1 - 0.42 * speedNorm;
+        rawScale = (0.2 + 1.18 * Math.pow(avgP, 1.15)) * velScale * entryTaper;
+        break;
+      }
+      case 'ballpoint': {
+        rawScale = 0.8 + 0.18 * avgP;
+        break;
+      }
+      case 'pencil':
+      default: {
+        const velScale = 1 - 0.16 * speedNorm;
+        const pencilEntry = i === 1 ? 0.85 : 1;
+        rawScale = (0.32 + 0.72 * avgP) * velScale * pencilEntry;
+        break;
+      }
+    }
+
+    const targetW = Math.max(0.7, baseSize * rawScale);
+    const prevW = widths[i - 1];
+    widths.push(prevW + (targetW - prevW) * 0.58);
+  }
+
+  return widths;
+}
+
+function evalQuadraticAt(
+  ax: number,
+  ay: number,
+  cx: number,
+  cy: number,
+  bx: number,
+  by: number,
+  t: number,
+): [number, number] {
+  const mt = 1 - t;
+  return [
+    mt * mt * ax + 2 * mt * t * cx + t * t * bx,
+    mt * mt * ay + 2 * mt * t * cy + t * t * by,
+  ];
+}
+
 /**
  * 실시간 활성 획(Active Canvas) 전용 증분(Incremental) 세그먼트 드로잉:
  * - pointermove 도중 clearRect()를 호출하지 않고 새로 유입된 샘플 구간(fromIndex ~ n-1)만
- *   Midpoint Quadratic Bezier 곡선으로 즉시 이어 그려 깜빡임(Flickering/Tearing)을 원천 차단한다.
+ *   인과적 스무딩 + Midpoint Quadratic Bezier + 5종 펜 필압·속도·닙 각도 보간으로 그려
+ *   대각선 계단 현상과 깜빡임을 동시에 차단한다.
  * @returns 렌더링 완료된 최신 점 개수 (다음 호출의 fromIndex)
  */
 export function drawIncrementalStrokeSegment(
@@ -163,11 +297,18 @@ export function drawIncrementalStrokeSegment(
   stroke: Stroke,
   fromIndex: number,
 ): number {
-  const pts = stroke.points;
-  const n = pts.length;
+  const rawPts = stroke.points;
+  const n = rawPts.length;
   if (n === 0 || fromIndex >= n) return n;
 
+  const pts = computeCausalSmoothedPoints(rawPts, stroke.penType);
+
   ctx.save();
+  ctx.imageSmoothingEnabled = true;
+  if ('imageSmoothingQuality' in ctx) {
+    ctx.imageSmoothingQuality = 'high';
+  }
+
   if (stroke.tool === 'highlighter') {
     // Active Canvas 자체가 opacity: 0.35 + multiply 블렌딩으로 표시되므로 내부 세그먼트는 불투명하게 이어 그린다
     ctx.strokeStyle = stroke.color;
@@ -199,6 +340,7 @@ export function drawIncrementalStrokeSegment(
     }
     ctx.stroke();
   } else {
+    const widths = computeCausalStrokeWidths(stroke, pts);
     ctx.strokeStyle = stroke.color;
     ctx.fillStyle = stroke.color;
     ctx.lineCap = 'round';
@@ -206,7 +348,7 @@ export function drawIncrementalStrokeSegment(
 
     if (fromIndex === 0 && n >= 1) {
       const p0 = pts[0];
-      const r = Math.max(0.6, stroke.size * (0.4 + 0.6 * naturalPenEasing(p0[2] ?? 0.5)) * 0.5);
+      const r = Math.max(0.5, widths[0] * 0.5);
       ctx.beginPath();
       ctx.arc(p0[0], p0[1], r, 0, Math.PI * 2);
       ctx.fill();
@@ -221,18 +363,53 @@ export function drawIncrementalStrokeSegment(
       const m1y = (p0[1] + p1[1]) * 0.5;
       const m2x = (p1[0] + p2[0]) * 0.5;
       const m2y = (p1[1] + p2[1]) * 0.5;
-      const avgPressure = ((p1[2] ?? 0.5) + (p2[2] ?? 0.5)) * 0.5;
-      const widthScale = stroke.penType === 'ballpoint' ? 0.85 : 0.35 + 0.65 * naturalPenEasing(avgPressure);
-      ctx.lineWidth = Math.max(0.8, stroke.size * widthScale);
-      ctx.beginPath();
+      const w0 = widths[i - 1];
+      const w1 = widths[i];
+      const wDelta = Math.abs(w1 - w0);
+
       if (i === 1) {
-        ctx.moveTo(p1[0], p1[1]);
-        ctx.lineTo(m2x, m2y);
+        const segLen = Math.hypot(m2x - p1[0], m2y - p1[1]);
+        const steps = wDelta > 0.14 || segLen > 6 ? Math.min(3, Math.max(2, Math.ceil(segLen / 4))) : 1;
+        for (let s = 0; s < steps; s++) {
+          const t0 = s / steps;
+          const t1 = (s + 1) / steps;
+          ctx.lineWidth = w0 + (w1 - w0) * ((t0 + t1) * 0.5);
+          ctx.beginPath();
+          ctx.moveTo(p1[0] + (m2x - p1[0]) * t0, p1[1] + (m2y - p1[1]) * t0);
+          ctx.lineTo(p1[0] + (m2x - p1[0]) * t1, p1[1] + (m2y - p1[1]) * t1);
+          ctx.stroke();
+        }
       } else {
-        ctx.moveTo(m1x, m1y);
-        ctx.quadraticCurveTo(p1[0], p1[1], m2x, m2y);
+        const segLen = Math.hypot(m2x - m1x, m2y - m1y);
+        const steps =
+          wDelta > 0.12 || segLen > 5
+            ? Math.min(4, Math.max(2, Math.ceil(Math.max(segLen / 3.5, wDelta / 0.15))))
+            : 1;
+        if (steps === 1) {
+          ctx.lineWidth = (w0 + w1) * 0.5;
+          ctx.beginPath();
+          ctx.moveTo(m1x, m1y);
+          ctx.quadraticCurveTo(p1[0], p1[1], m2x, m2y);
+          ctx.stroke();
+        } else {
+          for (let s = 0; s < steps; s++) {
+            const t0 = s / steps;
+            const t1 = (s + 1) / steps;
+            const tm = (t0 + t1) * 0.5;
+            const [sx, sy] = evalQuadraticAt(m1x, m1y, p1[0], p1[1], m2x, m2y, t0);
+            const [ex, ey] = evalQuadraticAt(m1x, m1y, p1[0], p1[1], m2x, m2y, t1);
+            // 서브구간 중점(tm)을 통과하도록 2차 베지어 제어점 역산: ctrl = 2*B(tm) - 0.5*(B(t0)+B(t1))
+            const [mx, my] = evalQuadraticAt(m1x, m1y, p1[0], p1[1], m2x, m2y, tm);
+            const cx = 2 * mx - 0.5 * (sx + ex);
+            const cy = 2 * my - 0.5 * (sy + ey);
+            ctx.lineWidth = w0 + (w1 - w0) * tm;
+            ctx.beginPath();
+            ctx.moveTo(sx, sy);
+            ctx.quadraticCurveTo(cx, cy, ex, ey);
+            ctx.stroke();
+          }
+        }
       }
-      ctx.stroke();
     }
   }
   ctx.restore();
@@ -266,6 +443,8 @@ export function renderStrokesToDataUrl(strokes: Stroke[], pad = 16): string | nu
   canvas.width = Math.max(1, Math.round(w * scale));
   canvas.height = Math.max(1, Math.round(h * scale));
   const ctx = canvas.getContext('2d')!;
+  ctx.imageSmoothingEnabled = true;
+  if ('imageSmoothingQuality' in ctx) ctx.imageSmoothingQuality = 'high';
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   ctx.scale(scale, scale);

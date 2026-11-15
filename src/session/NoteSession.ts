@@ -13,6 +13,12 @@ import { renderStrokesToDataUrl } from '../canvas/render';
 import { plainTextOf } from '../core/doc/blocks';
 import { buildExtensions, markdownToJson, preprocessMarkdownEntities, sanitizeMarkdownDocEntities } from '../editor/extensions';
 import { ASSIGN_IDS_META } from '../editor/extensions/blockId';
+import {
+  applyOrQueueFontSize,
+  fontSizeImePluginKey,
+  normalizeFontSizeCss,
+  readCursorFontSizePx,
+} from '../editor/extensions/fontSize';
 import { db, uid, type NoteRecord } from '../storage/db';
 import { drafts } from '../storage/drafts';
 import { readHandle, writeHandle } from '../storage/localFiles';
@@ -1101,16 +1107,31 @@ export class NoteSession {
     }
   }
 
-  applyFontSize(size: number | string) {
-    if (!this.editor) return;
-    const sizeStr = typeof size === 'number' ? `${size}px` : size;
-    const { empty } = this.editor.state.selection;
+  applyFontSize(size: number | string | null) {
+    if (!this.editor?.view) return;
+    const normalized =
+      size === null || size === 'default' || size === 'reset'
+        ? null
+        : normalizeFontSizeCss(size);
+    if (size !== null && size !== 'default' && size !== 'reset' && !normalized) return;
+
+    const imeState = fontSizeImePluginKey.getState(this.editor.state);
+    const isComposing = this.editor.view.composing || Boolean(imeState?.composing);
     const isTextMode = useSettings.getState().tool === 'none';
-    if (!empty) {
-      this.editor.chain().focus().setMark('fontSize', { size: sizeStr }).run();
-    } else if (isTextMode) {
-      this.editor.chain().focus().setMark('fontSize', { size: sizeStr }).run();
+
+    if (!isComposing && isTextMode && !this.editor.isFocused) {
+      this.editor.commands.focus();
     }
+    applyOrQueueFontSize(this.editor.view, normalized);
+  }
+
+  resetFontSize() {
+    this.applyFontSize(null);
+  }
+
+  getCursorFontSize(): number | null {
+    if (!this.editor) return null;
+    return readCursorFontSizePx(this.editor.state);
   }
 
   applyTextColor(color: string) {

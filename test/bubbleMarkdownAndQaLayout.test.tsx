@@ -163,4 +163,77 @@ describe('REQ_BUBBLE_MARKDOWN_AND_QA_LAYOUT: 말풍선 마크다운 렌더링 �
 
     session.destroy();
   });
+
+  it('4. 사용자가 말풍선 편집 중 입력한 마크다운이 실시간 미리보기로 렌더링되고 blur 시 보기 모드로 자동 전환된다', () => {
+    const note = emptyNote({ id: 'note-user-md-1', title: '사용자 메모 마크다운' });
+    const session = new NoteSession(note);
+    session.createAnnotation({ x: 30, y: 30 });
+    const annId = session.ui.annotations[0].id;
+
+    const { rerender } = render(
+      <Bubble session={session} annotation={session.ui.annotations[0]} reference={null} onClose={vi.fn()} />,
+    );
+
+    const textarea = screen.getByPlaceholderText(/메모를 입력하거나/) as HTMLTextAreaElement;
+    const typedMd = [
+      '## 내 학습 메모',
+      '__굵은 핵심__과 *강조*',
+      '- [x] 복습 완료',
+      '- [ ] 문제 풀이',
+      '~~~ts',
+      'const ok = true;',
+      '~~~',
+    ].join('\n');
+
+    fireEvent.change(textarea, { target: { value: typedMd } });
+    const updated = session.ui.annotations.find((a) => a.id === annId)!;
+    rerender(<Bubble session={session} annotation={updated} reference={null} onClose={vi.fn()} />);
+
+    // 편집 중 실시간 미리보기에 마크다운 DOM이 바로 렌더링됨
+    const livePreview = screen.getByTestId('bubble-live-preview');
+    expect(livePreview.querySelector('h2')?.textContent).toBe('내 학습 메모');
+    expect(livePreview.querySelector('strong')?.textContent).toBe('굵은 핵심');
+    expect(livePreview.querySelectorAll('input[type="checkbox"]').length).toBe(2);
+    expect(livePreview.querySelector('pre code')?.textContent).toContain('const ok = true;');
+
+    // 포커스 이탈(blur) 시 자동으로 보기 모드(bubble-preview)로 전환됨
+    fireEvent.blur(textarea);
+    const preview = screen.getByTestId('bubble-preview');
+    expect(preview.querySelector('h2')?.textContent).toBe('내 학습 메모');
+    expect(preview.querySelector('em')?.textContent).toBe('강조');
+
+    session.destroy();
+  });
+
+  it('5. AI 답변 첫 줄/다중 줄에 포함된 마크다운(헤딩·목록·표·수식)도 정상 렌더링된다', () => {
+    const note = emptyNote({ id: 'note-ai-md-1', title: 'AI 답변 마크다운' });
+    const session = new NoteSession(note);
+    session.createAnnotation({ x: 60, y: 60 });
+    const annId = session.ui.annotations[0].id;
+    session.updateAnnotation(annId, {
+      body: [
+        '**Q.** **군(Group)** 의 정의를 알려줘',
+        '**A(Gemini).** ### 핵심 정의',
+        '- 항등원 $e$ 존재',
+        '- 결합법칙 성립',
+        '',
+        '| 공리 | 의미 |',
+        '| --- | --- |',
+        '| 결합법칙 | $(ab)c = a(bc)$ |',
+      ].join('\n'),
+    });
+
+    const ann = session.ui.annotations.find((a) => a.id === annId)!;
+    render(<Bubble session={session} annotation={ann} reference={null} onClose={vi.fn()} />);
+
+    const qCard = document.body.querySelector('[data-bubble-role="question"]')!;
+    const aCard = document.body.querySelector('[data-bubble-role="answer"]')!;
+    expect(qCard.querySelector('strong')?.textContent).toBe('군(Group)');
+    expect(aCard.querySelector('h3')?.textContent).toBe('핵심 정의');
+    expect(aCard.querySelectorAll('li').length).toBe(2);
+    expect(aCard.querySelector('table')).not.toBeNull();
+    expect(aCard.querySelector('.katex')).not.toBeNull();
+
+    session.destroy();
+  });
 });
