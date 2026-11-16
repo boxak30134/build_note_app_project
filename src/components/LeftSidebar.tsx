@@ -27,7 +27,14 @@ import { useTabs } from '../store/tabsStore';
 import { confirmDialog, promptDialog, toast } from '../store/uiStore';
 import { validateFileName } from '../core/files/validation';
 import { forceCloseTab } from '../features/tabActions';
-import { openLocalFiles, importDirectory, fsAccessSupported, pickFiles } from '../storage/localFiles';
+import {
+  openLocalFiles,
+  importDirectory,
+  importMarkdownFiles,
+  fsAccessSupported,
+  pickFiles,
+  PDF_AND_MD_ACCEPT_ATTR,
+} from '../storage/localFiles';
 import { markdownToJson } from '../editor/extensions';
 import { indexNote, unindexNote } from '../search/searchClient';
 import { deleteAttachmentsOf } from '../storage/attachmentsCleanup';
@@ -428,12 +435,22 @@ export function LeftSidebar() {
     }
   };
 
-  /** PDF 문서 가져오기 */
+  /** PDF 및 Markdown(.md) 문서 가져오기 */
   const importExternal = async () => {
-    const files = await pickFiles('application/pdf,.pdf', true);
+    const files = await pickFiles(PDF_AND_MD_ACCEPT_ATTR, true);
     if (files.length === 0) return;
-    const { importExternalFile } = await import('../features/import/importer');
+    const { detectImportKind, importExternalFile } = await import('../features/import/importer');
+    const mdFiles: File[] = [];
     for (const f of files) {
+      const kind = detectImportKind(f);
+      if (kind === 'markdown') {
+        mdFiles.push(f);
+        continue;
+      }
+      if (kind !== 'pdf') {
+        toast.error(`지원하지 않는 파일 형식입니다: ${f.name}`);
+        continue;
+      }
       setImporting(`${f.name} — PDF 준비 중...`);
       try {
         const r = await importExternalFile(f, selectedFolder, (msg) => setImporting(`${f.name} — ${msg}`));
@@ -443,6 +460,22 @@ export function LeftSidebar() {
         toast.success(`'${r.note.title}' 가져오기 완료\n${detail}`);
       } catch (e) {
         toast.error((e as Error).message || '알 수 없는 오류가 발생했습니다.', `${f.name} 가져오기 실패`);
+      }
+    }
+    if (mdFiles.length > 0) {
+      try {
+        const created = await importMarkdownFiles(mdFiles, markdownToJson, selectedFolder);
+        created.forEach((n) => {
+          indexNote(n);
+          openTab(n.id);
+        });
+        if (created.length === 1) {
+          toast.success(`'${created[0].title}' Markdown 가져오기 완료`);
+        } else if (created.length > 1) {
+          toast.success(`Markdown 문서 ${created.length}개를 가져왔습니다.`);
+        }
+      } catch (e) {
+        toast.error((e as Error).message || 'Markdown 가져오기 실패');
       }
     }
     setImporting(null);
@@ -692,8 +725,14 @@ export function LeftSidebar() {
                 </div>
               </div>
             )}
-            <button className="btn-ghost mt-1 w-full justify-center border border-dashed border-slate-300" onClick={() => void importExternal()} disabled={!!importing} title="PDF 파일을 새 노트로 가져옵니다">
-              {importing ? <Loader2 size={14} className="animate-spin" /> : <Import size={14} />} PDF 가져오기
+            <button
+              className="btn-ghost mt-1 w-full justify-center border border-dashed border-slate-300"
+              data-testid="import-external-btn"
+              onClick={() => void importExternal()}
+              disabled={!!importing}
+              title="PDF 또는 Markdown(.md) 파일을 새 노트로 가져옵니다"
+            >
+              {importing ? <Loader2 size={14} className="animate-spin" /> : <Import size={14} />} PDF / MD 가져오기
             </button>
             {importing && <div className="mt-1 truncate text-[10px] text-indigo-500" data-testid="import-progress">{importing}</div>}
             {selectedFolder && <div className="mt-1 truncate text-[10px] text-slate-400">새 항목 위치: {folders.find((f) => f.id === selectedFolder)?.name}</div>}

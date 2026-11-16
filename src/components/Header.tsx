@@ -10,7 +10,7 @@ import { useUi, toast } from '../store/uiStore';
 import { db } from '../storage/db';
 import { getSession } from '../session/NoteSession';
 import { validateFileName } from '../core/files/validation';
-import { pickFiles } from '../storage/localFiles';
+import { MD_ACCEPT_ATTR, pickFiles } from '../storage/localFiles';
 
 export async function captureFromCamera() {
   const s = getSession(useTabs.getState().activeTabId);
@@ -140,6 +140,14 @@ function AttachMenu() {
       run: withSession(async (s) => {
         const [f] = await pickFiles('application/pdf,.pdf', false);
         if (f) await s.insertPdf(f);
+      }),
+    },
+    {
+      icon: <FileText size={15} />,
+      label: 'Markdown (.md)',
+      run: withSession(async (s) => {
+        const [f] = await pickFiles(MD_ACCEPT_ATTR, false);
+        if (f) await s.insertMarkdownFile(f);
       }),
     },
     {

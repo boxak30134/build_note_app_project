@@ -4,7 +4,7 @@ import { CompositeHistoryManager, newCommandId } from '../core/history/Composite
 import { StrokeStore, newStrokeId, type Stroke } from '../core/strokes/StrokeStore';
 import { translatePoints } from '../core/geometry/geometry';
 import { newTextObjectId, type NoteTextObject } from '../core/text/textObjects';
-import { UnencodableCharError } from '../core/codec/textCodec';
+import { decodeText, UnencodableCharError } from '../core/codec/textCodec';
 import { validateImageFiles, sanitizeDocumentTitle } from '../core/files/validation';
 import { appendBubbleText, clampBubbleText, consumeAiTurn, MAX_BUBBLE_CHAR_LENGTH } from '../core/bubble/limits';
 import { dataUrlToBase64, PROVIDER_LABEL, streamAi } from '../ai/aiClient';
@@ -1729,6 +1729,26 @@ export class NoteSession {
       this.editor.chain().focus().insertContent([{ type: 'pdfEmbed', attrs: { src: rel, name: file.name } }, { type: 'paragraph' }]).run();
     } catch (e) {
       toast.error(`PDF 저장 실패: ${(e as Error).message || '알 수 없는 오류'}`);
+    }
+  }
+
+  async insertMarkdownFile(file: File) {
+    const isMd = file.type === 'text/markdown' || /\.(md|markdown|txt)$/i.test(file.name.trim());
+    if (!isMd) {
+      toast.error(`지원하지 않는 파일 형식입니다: ${file.name}`);
+      return;
+    }
+    try {
+      const decoded = decodeText(new Uint8Array(await file.arrayBuffer()));
+      const parsed = sanitizeMarkdownDocEntities(markdownToJson(decoded.text)) as {
+        content?: unknown[];
+      };
+      const nodes = Array.isArray(parsed?.content) && parsed.content.length > 0
+        ? parsed.content
+        : [{ type: 'paragraph' }];
+      this.editor.chain().focus().insertContent(nodes as never).run();
+    } catch (e) {
+      toast.error(`Markdown 삽입 실패: ${(e as Error).message || '알 수 없는 오류'}`);
     }
   }
 

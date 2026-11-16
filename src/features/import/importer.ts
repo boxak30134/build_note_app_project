@@ -8,7 +8,7 @@ import { jsonToMarkdown } from '../../editor/extensions';
 import { validateFileName } from '../../core/files/validation';
 import type { PdfImportResult } from './pdfImport';
 
-export type ImportKind = 'pdf';
+export type ImportKind = 'pdf' | 'markdown';
 
 export interface ImportSummary {
   note: NoteRecord;
@@ -24,6 +24,7 @@ export const IMPORT_MAX_BYTES = 200 * 1024 * 1024;
 export function detectImportKind(file: { name: string; type: string }): ImportKind | null {
   const normalizedName = file.name.trim().toLowerCase();
   if (file.type === 'application/pdf' || normalizedName.endsWith('.pdf')) return 'pdf';
+  if (file.type === 'text/markdown' || /\.(md|markdown|txt)$/i.test(normalizedName)) return 'markdown';
   return null;
 }
 
