@@ -1,16 +1,16 @@
 /**
  * Google Drive 지정 폴더 격리 및 최소 권한 가드
- * - drive / drive.readonly 스코프 사용을 원천 차단하고 drive.file 만 허용한다.
- * - 모든 조회·업로드·수정·삭제 전 대상 파일의 parents가 승인된 targetFolderId(또는 직계 images 폴더) 내부인지 검증한다.
+ * - 전체 쓰기/삭제 권한(drive 등) 사용을 원천 차단하고, drive.file + 지정 폴더 조회용 drive.readonly만 허용한다.
+ * - 모든 조회·업로드·수정·삭제 전 대상 파일의 parents가 승인된 targetFolderId(또는 하위 폴더) 내부인지 검증한다.
  */
 
 export const DRIVE_FILE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
+export const DRIVE_READONLY_SCOPE = 'https://www.googleapis.com/auth/drive.readonly';
 export const DRIVE_USERINFO_SCOPE = 'https://www.googleapis.com/auth/userinfo.email';
 export const DRIVE_PROFILE_SCOPE = 'https://www.googleapis.com/auth/userinfo.profile';
 
 export const FORBIDDEN_DRIVE_SCOPES = [
   'https://www.googleapis.com/auth/drive',
-  'https://www.googleapis.com/auth/drive.readonly',
   'https://www.googleapis.com/auth/drive.metadata',
   'https://www.googleapis.com/auth/drive.metadata.readonly',
 ] as const;
