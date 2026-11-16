@@ -5,6 +5,15 @@ import { db, emptyNote, uid, type NoteRecord } from './db';
 
 const TEXT_TYPES = [{ description: 'Markdown / Text', accept: { 'text/markdown': ['.md', '.markdown'], 'text/plain': ['.txt'] } }];
 
+export const MD_ACCEPT_ATTR = 'text/markdown,text/plain,.md,.markdown,.txt';
+export const PDF_AND_MD_ACCEPT_ATTR = 'application/pdf,.pdf,text/markdown,text/plain,.md,.markdown,.txt';
+
+export function isMarkdownFile(file: { name: string; type?: string }): boolean {
+  const lower = file.name.trim().toLowerCase();
+  if (/\.(md|markdown|txt)$/i.test(lower)) return true;
+  return file.type === 'text/markdown';
+}
+
 export const fsAccessSupported = typeof window !== 'undefined' && !!window.showOpenFilePicker;
 
 export async function readHandle(handle: FileSystemFileHandle): Promise<DecodedText & { lastModified: number }> {
@@ -48,9 +57,24 @@ async function noteFromText(name: string, decoded: DecodedText, parse: MarkdownP
   });
 }
 
+/** 선택된 File[] (.md/.markdown/.txt)을 디코딩·파싱하여 새 노트로 일괄 등록한다. */
+export async function importMarkdownFiles(
+  files: File[],
+  parse: MarkdownParser,
+  folderId: string | null,
+): Promise<NoteRecord[]> {
+  if (files.length === 0) return [];
+  const created: NoteRecord[] = [];
+  for (const f of files) {
+    const d = decodeText(new Uint8Array(await f.arrayBuffer()));
+    created.push(await noteFromText(f.name, d, parse, { folderId }));
+  }
+  await db.notes.bulkAdd(created);
+  return created;
+}
+
 /** 로컬 파일 열기 → 노트로 등록 (핸들 보존 시 원본 파일과 연결) */
 export async function openLocalFiles(parse: MarkdownParser, folderId: string | null): Promise<NoteRecord[]> {
-  const created: NoteRecord[] = [];
   if (window.showOpenFilePicker) {
     let handles: FileSystemFileHandle[];
     try {
@@ -58,19 +82,16 @@ export async function openLocalFiles(parse: MarkdownParser, folderId: string | n
     } catch {
       return [];
     }
+    const created: NoteRecord[] = [];
     for (const h of handles) {
       const d = await readHandle(h);
       created.push(await noteFromText(h.name, d, parse, { fileHandle: h, fileLastModified: d.lastModified, folderId }));
     }
-  } else {
-    const files = await pickFiles('.md,.markdown,.txt', true);
-    for (const f of files) {
-      const d = decodeText(new Uint8Array(await f.arrayBuffer()));
-      created.push(await noteFromText(f.name, d, parse, { folderId }));
-    }
+    await db.notes.bulkAdd(created);
+    return created;
   }
-  await db.notes.bulkAdd(created);
-  return created;
+  const files = await pickFiles(MD_ACCEPT_ATTR, true);
+  return importMarkdownFiles(files, parse, folderId);
 }
 
 /** 폴더 가져오기: 하위 .md/.txt 를 재귀 스캔(숨김/빌드 폴더 제외)하여 폴더 트리로 등록 */
