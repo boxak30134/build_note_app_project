@@ -356,21 +356,32 @@ export async function listScopedFiles(
   deps?: DriveFetchDeps,
 ): Promise<DriveFileMeta[]> {
   const q = buildScopedDriveQuery(targetFolderId, extraConditions);
-  const params = new URLSearchParams({
-    q,
-    fields: 'files(id,name,mimeType,modifiedTime,parents,trashed)',
-    pageSize: '1000',
-  });
-  const res = await driveFetch(`${DRIVE_API_BASE}/files?${params.toString()}`, { method: 'GET' }, deps);
-  if (!res.ok) {
-    throw new Error(`Drive 파일 목록 조회 실패 (${res.status})`);
-  }
-  const data = (await res.json()) as { files?: DriveFileMeta[] };
-  const files = data.files ?? [];
-  for (const file of files) {
-    assertWithinTargetFolder(file, [targetFolderId]);
-  }
-  return files;
+  const allFiles: DriveFileMeta[] = [];
+  let pageToken: string | undefined;
+
+  do {
+    const params = new URLSearchParams({
+      q,
+      fields: 'nextPageToken,files(id,name,mimeType,modifiedTime,parents,trashed)',
+      pageSize: '1000',
+    });
+    if (pageToken) {
+      params.set('pageToken', pageToken);
+    }
+    const res = await driveFetch(`${DRIVE_API_BASE}/files?${params.toString()}`, { method: 'GET' }, deps);
+    if (!res.ok) {
+      throw new Error(`Drive 파일 목록 조회 실패 (${res.status})`);
+    }
+    const data = (await res.json()) as { files?: DriveFileMeta[]; nextPageToken?: string };
+    const files = data.files ?? [];
+    for (const file of files) {
+      assertWithinTargetFolder(file, [targetFolderId]);
+      allFiles.push(file);
+    }
+    pageToken = data.nextPageToken || undefined;
+  } while (pageToken);
+
+  return allFiles;
 }
 
 /**
@@ -557,6 +568,7 @@ type RemoteTreeMdEntry = {
 
 type RemoteDriveTree = {
   mdEntries: RemoteTreeMdEntry[];
+  folderPaths: string[][];
   sidecarsByFolderAndTitle: Map<string, DriveFileMeta>;
   allowedParents: string[];
   discoveredImagesFolderId: string | null;
@@ -568,6 +580,7 @@ async function collectRemoteDriveTree(
   deps?: DriveFetchDeps,
 ): Promise<RemoteDriveTree> {
   const mdEntries: RemoteTreeMdEntry[] = [];
+  const folderPaths: string[][] = [];
   const sidecarsByFolderAndTitle = new Map<string, DriveFileMeta>();
   const allowedParentSet = new Set<string>([targetFolderId]);
   const driveFolderCache = new Map<string, string>();
@@ -587,7 +600,9 @@ async function collectRemoteDriveTree(
           continue;
         }
         driveFolderCache.set(`${currentFolderId}/${entry.name}`, entry.id);
-        await walk(entry.id, [...segments, entry.name]);
+        const nextSegments = [...segments, entry.name];
+        folderPaths.push(nextSegments);
+        await walk(entry.id, nextSegments);
         continue;
       }
 
@@ -607,6 +622,7 @@ async function collectRemoteDriveTree(
 
   return {
     mdEntries,
+    folderPaths,
     sidecarsByFolderAndTitle,
     allowedParents: Array.from(allowedParentSet),
     discoveredImagesFolderId,
@@ -821,7 +837,11 @@ async function executeDriveSync(deps?: DriveFetchDeps): Promise<DriveSyncResult>
 
     const now = Date.now();
 
-    // 3. 원격 -> 로컬 동기화 (하위 폴더 포함, 로컬 작성 중 노트는 보호)
+    // 3. 원격 -> 로컬 동기화 (빈 폴더 포함 하위 폴더 구조 선행 생성 후 .md 반영, 로컬 작성 중 노트는 보호)
+    for (const folderSegments of tree.folderPaths) {
+      await ensureLocalFolderPath(folderSegments, localFolderMap, localFolderByKey);
+    }
+
     for (const { file: remote, parentDriveId, folderSegments } of tree.mdEntries) {
       if (!remote.name.toLowerCase().endsWith('.md')) continue;
       assertWithinTargetFolder(remote, allowedParents);

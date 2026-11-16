@@ -7,6 +7,7 @@ import {
   assertWithinTargetFolder,
   buildScopedDriveQuery,
   DRIVE_FILE_SCOPE,
+  DRIVE_READONLY_SCOPE,
   SecurityBoundaryError,
 } from '../src/modules/sync/driveFolderGuard';
 import {
@@ -75,7 +76,7 @@ describe('REQ_google_drive_sync: Google Drive 지정 폴더 격리 동기화', (
     vi.restoreAllMocks();
   });
 
-  it('1. OAuth 스코프 제한 검증: drive.file만 포함되고 상위 권한(drive, drive.readonly)은 차단된다', () => {
+  it('1. OAuth 스코프 제한 검증: drive.file + drive.readonly만 포함되고 전체 쓰기 권한(drive)은 차단된다', () => {
     const authUrl = buildGoogleOAuthUrl({
       clientId: 'my-client-id.apps.googleusercontent.com',
       redirectUri: 'https://eduink.local/oauth/callback',
@@ -86,10 +87,10 @@ describe('REQ_google_drive_sync: Google Drive 지정 폴더 격리 동기화', (
     const scopes = scope.split(/\s+/);
 
     expect(scopes).toContain(DRIVE_FILE_SCOPE);
+    expect(scopes).toContain(DRIVE_READONLY_SCOPE);
     expect(scopes).not.toContain('https://www.googleapis.com/auth/drive');
-    expect(scopes).not.toContain('https://www.googleapis.com/auth/drive.readonly');
 
-    // 상위 스코프 유입 시 즉시 SecurityBoundaryError 발생 검증
+    // 전체 쓰기 스코프 유입 또는 drive.file 누락 시 즉시 SecurityBoundaryError 발생 검증
     expect(() =>
       assertMinimalDriveScope('https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive'),
     ).toThrow(SecurityBoundaryError);
@@ -1394,5 +1395,157 @@ describe('REQ_google_drive_sync: Google Drive 지정 폴더 격리 동기화', (
 
     expect(Array.from(noteStore.values()).filter((n) => n.title.includes('충돌 사본'))).toHaveLength(0);
     expect(driveFiles.filter((f) => f.name.includes('충돌 사본'))).toHaveLength(0);
+  });
+
+  it('15. 원격 빈 하위 폴더와 중첩 폴더 내 .md 파일 모두 동기화 시 로컬 db.folders/db.notes로 내려받는다', async () => {
+    const folderStore = new Map<string, FolderRecord>();
+    const noteStore = new Map<string, NoteRecord>();
+    vi.spyOn(db.folders, 'toArray').mockImplementation(
+      (async () => Array.from(folderStore.values())) as unknown as typeof db.folders.toArray,
+    );
+    vi.spyOn(db.folders, 'put').mockImplementation(
+      (async (f: FolderRecord) => {
+        folderStore.set(f.id, f);
+        return f.id;
+      }) as unknown as typeof db.folders.put,
+    );
+    vi.spyOn(db.notes, 'toArray').mockImplementation(
+      (async () => Array.from(noteStore.values())) as unknown as typeof db.notes.toArray,
+    );
+    vi.spyOn(db.notes, 'put').mockImplementation(
+      (async (n: NoteRecord) => {
+        noteStore.set(n.id, n);
+        return n.id;
+      }) as unknown as typeof db.notes.put,
+    );
+
+    const driveItems: Array<{
+      id: string;
+      name: string;
+      mimeType: string;
+      modifiedTime: string;
+      parents: string[];
+      content?: string;
+    }> = [
+      {
+        id: 'empty_sub_folder',
+        name: '빈 폴더',
+        mimeType: 'application/vnd.google-apps.folder',
+        modifiedTime: '2026-11-17T00:00:00.000Z',
+        parents: [TARGET_FOLDER_ID],
+      },
+      {
+        id: 'course_folder',
+        name: '수업자료',
+        mimeType: 'application/vnd.google-apps.folder',
+        modifiedTime: '2026-11-17T00:00:00.000Z',
+        parents: [TARGET_FOLDER_ID],
+      },
+      {
+        id: 'nested_folder',
+        name: '1주차',
+        mimeType: 'application/vnd.google-apps.folder',
+        modifiedTime: '2026-11-17T00:00:00.000Z',
+        parents: ['course_folder'],
+      },
+      {
+        id: 'remote_md_1',
+        name: '강의요약.md',
+        mimeType: 'text/markdown',
+        modifiedTime: '2026-11-17T00:05:00.000Z',
+        parents: ['nested_folder'],
+        content: '# 1주차 요약\n\n외부 Drive 웹에서 추가된 문서입니다.',
+      },
+      {
+        id: 'images_root_folder',
+        name: 'images',
+        mimeType: 'application/vnd.google-apps.folder',
+        modifiedTime: '2026-11-17T00:00:00.000Z',
+        parents: [TARGET_FOLDER_ID],
+      },
+    ];
+
+    const mockFetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes(`/files/${TARGET_FOLDER_ID}?fields=`)) {
+        return new Response(
+          JSON.stringify({ id: TARGET_FOLDER_ID, name: 'EduInk Sync', trashed: false, mimeType: 'application/vnd.google-apps.folder' }),
+          { status: 200 },
+        );
+      }
+      if (url.includes('?q=')) {
+        const parsed = new URL(url);
+        const q = parsed.searchParams.get('q') ?? '';
+        const parentMatch = /'([^']+)' in parents/.exec(q);
+        const parentId = parentMatch?.[1];
+        const files = driveItems
+          .filter((item) => item.parents.includes(parentId ?? ''))
+          .map(({ content: _c, ...meta }) => meta);
+        return new Response(JSON.stringify({ files }), { status: 200 });
+      }
+      const mediaMatch = /\/files\/([^/?]+)\?alt=media/.exec(url);
+      if (mediaMatch) {
+        const found = driveItems.find((item) => item.id === mediaMatch[1]);
+        return new Response(found?.content ?? '', { status: 200 });
+      }
+      return new Response('{}', { status: 404 });
+    });
+
+    const res = await runDriveSync({
+      fetchImpl: mockFetch as unknown as typeof fetch,
+      getToken: async () => 'valid-token',
+    });
+
+    expect(res.status).toBe('synced');
+    expect(res.downloadedCount).toBe(1);
+
+    const folders = Array.from(folderStore.values());
+    expect(folders.some((f) => f.name === '빈 폴더' && f.parentId === null)).toBe(true);
+    const courseFolder = folders.find((f) => f.name === '수업자료' && f.parentId === null);
+    expect(courseFolder).toBeDefined();
+    const nestedFolder = folders.find((f) => f.name === '1주차' && f.parentId === courseFolder!.id);
+    expect(nestedFolder).toBeDefined();
+    // 루트 images/ 폴더는 로컬 노트 폴더 트리로 생성되지 않아야 함
+    expect(folders.some((f) => f.name === 'images')).toBe(false);
+
+    const downloadedNote = Array.from(noteStore.values()).find((n) => n.title === '강의요약');
+    expect(downloadedNote).toBeDefined();
+    expect(downloadedNote?.folderId).toBe(nestedFolder!.id);
+    expect(downloadedNote?.markdown).toContain('외부 Drive 웹에서 추가된 문서입니다.');
+  });
+
+  it('16. listScopedFiles는 nextPageToken이 있는 다중 페이지 응답을 모두 수집한다', async () => {
+    const mockFetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      const pageToken = url.searchParams.get('pageToken');
+      if (!pageToken) {
+        return new Response(
+          JSON.stringify({
+            nextPageToken: 'page-2-token',
+            files: [
+              { id: 'f1', name: 'first.md', mimeType: 'text/markdown', parents: [TARGET_FOLDER_ID] },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      expect(pageToken).toBe('page-2-token');
+      return new Response(
+        JSON.stringify({
+          files: [
+            { id: 'f2', name: 'second.md', mimeType: 'text/markdown', parents: [TARGET_FOLDER_ID] },
+          ],
+        }),
+        { status: 200 },
+      );
+    });
+
+    const files = await listScopedFiles(TARGET_FOLDER_ID, undefined, {
+      fetchImpl: mockFetch as unknown as typeof fetch,
+      getToken: async () => 'valid-token',
+    });
+
+    expect(files.map((f) => f.id)).toEqual(['f1', 'f2']);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
   });
 });

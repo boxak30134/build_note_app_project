@@ -9,6 +9,7 @@ import { useSettings } from '../../store/settingsStore';
 import {
   assertMinimalDriveScope,
   DRIVE_FILE_SCOPE,
+  DRIVE_READONLY_SCOPE,
   DRIVE_PROFILE_SCOPE,
   DRIVE_USERINFO_SCOPE,
 } from './driveFolderGuard';
@@ -67,8 +68,8 @@ export function isNativeWebViewEnvironment(): boolean {
 }
 
 /**
- * 최소 권한(drive.file)만 요청하는 Google OAuth 2.0 인증 URL을 생성한다.
- * `assertMinimalDriveScope` 검증을 거쳐 상위 drive / drive.readonly 권한 유입을 원천 차단한다.
+ * 최소 권한(drive.file + 지정 폴더 조회용 drive.readonly)만 요청하는 Google OAuth 2.0 인증 URL을 생성한다.
+ * `assertMinimalDriveScope` 검증을 거쳐 전체 쓰기 스코프(drive 등) 유입을 원천 차단한다.
  */
 export function buildGoogleOAuthUrl(opts: GoogleOAuthUrlOptions): string {
   const clientId = opts.clientId.trim();
@@ -76,9 +77,10 @@ export function buildGoogleOAuthUrl(opts: GoogleOAuthUrlOptions): string {
     throw new Error('Google OAuth Client ID가 설정되지 않았습니다.');
   }
 
+  const baseDriveScopes = `${DRIVE_FILE_SCOPE} ${DRIVE_READONLY_SCOPE}`;
   const rawScope = opts.includeEmailScope
-    ? `${DRIVE_FILE_SCOPE} ${DRIVE_USERINFO_SCOPE} ${DRIVE_PROFILE_SCOPE}`
-    : DRIVE_FILE_SCOPE;
+    ? `${baseDriveScopes} ${DRIVE_USERINFO_SCOPE} ${DRIVE_PROFILE_SCOPE}`
+    : baseDriveScopes;
   const verifiedScopes = assertMinimalDriveScope(rawScope);
 
   const params = new URLSearchParams({
@@ -210,7 +212,7 @@ export async function authenticateGoogleDrive(options?: {
   const g = (typeof window !== 'undefined' ? (window as unknown as Record<string, any>).google : null);
   if (g?.accounts?.oauth2?.initTokenClient) {
     const verifiedScopes = assertMinimalDriveScope(
-      `${DRIVE_FILE_SCOPE} ${DRIVE_USERINFO_SCOPE} ${DRIVE_PROFILE_SCOPE}`,
+      `${DRIVE_FILE_SCOPE} ${DRIVE_READONLY_SCOPE} ${DRIVE_USERINFO_SCOPE} ${DRIVE_PROFILE_SCOPE}`,
     );
     const token = await new Promise<DriveOAuthToken>((resolve, reject) => {
       const client = g.accounts.oauth2.initTokenClient({
@@ -318,14 +320,14 @@ export async function getValidDriveAccessToken(forceRefresh = false): Promise<st
   const g = (typeof window !== 'undefined' ? (window as unknown as Record<string, any>).google : null);
   const clientId = resolveGoogleClientId();
   if (g?.accounts?.oauth2?.initTokenClient && clientId) {
-    const verifiedScopes = assertMinimalDriveScope(DRIVE_FILE_SCOPE);
+    const verifiedScopes = assertMinimalDriveScope(`${DRIVE_FILE_SCOPE} ${DRIVE_READONLY_SCOPE}`);
     const loginHint = current?.email || useSettings.getState().driveSyncConfig.accountEmail || undefined;
     const refreshed = await new Promise<DriveOAuthToken>((resolve, reject) => {
       const client = g.accounts.oauth2.initTokenClient({
         client_id: clientId,
         scope: verifiedScopes.join(' '),
         ...(loginHint ? { hint: loginHint } : {}),
-        callback: (resp: { access_token?: string; expires_in?: number; error?: string }) => {
+        callback: (resp: { access_token?: string; expires_in?: number; error?: string; scope?: string }) => {
           if (resp.error || !resp.access_token) {
             reject(new Error(resp.error || 'Access Token 자동 갱신에 실패했습니다.'));
             return;
@@ -335,7 +337,7 @@ export async function getValidDriveAccessToken(forceRefresh = false): Promise<st
             expiresAt: Date.now() + Number(resp.expires_in || 3600) * 1000,
             email: current?.email,
             name: current?.name,
-            scope: DRIVE_FILE_SCOPE,
+            scope: resp.scope ?? `${DRIVE_FILE_SCOPE} ${DRIVE_READONLY_SCOPE}`,
           });
         },
       });
