@@ -61,6 +61,7 @@ export function LeftSidebar() {
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   const [showMoveModal, setShowMoveModal] = useState(false);
   const [targetMoveFolderId, setTargetMoveFolderId] = useState<string | null>(null);
+  const [moveModalCollapsed, setMoveModalCollapsed] = useState<Record<string, boolean>>({});
   const [selectedTrashKeys, setSelectedTrashKeys] = useState<Set<string>>(new Set());
 
   const activeId = useTabs((s) => s.activeTabId);
@@ -706,6 +707,7 @@ export function LeftSidebar() {
                     className="flex items-center gap-1 rounded bg-white px-2 py-1 text-[11px] font-semibold text-indigo-700 shadow-xs hover:bg-indigo-100 disabled:opacity-40"
                     onClick={() => {
                       setTargetMoveFolderId(null);
+                      setMoveModalCollapsed({});
                       setShowMoveModal(true);
                     }}
                     title="선택한 항목을 다른 폴더로 일괄 이동"
@@ -841,79 +843,148 @@ export function LeftSidebar() {
         </>
       )}
 
-      {showMoveModal && (
-        <div
-          data-testid="bulk-move-modal"
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
-          onClick={() => setShowMoveModal(false)}
-        >
-          <div
-            className="w-full max-w-sm rounded-xl bg-white p-4 shadow-2xl"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h3 className="mb-1 text-sm font-semibold text-slate-800">
-              선택한 {selectedKeys.size}개 항목 이동
-            </h3>
-            <p className="mb-3 text-xs text-slate-500">이동할 대상 폴더를 선택하세요:</p>
-            <div className="max-h-60 overflow-y-auto space-y-1 rounded border border-slate-200 p-2 text-xs">
-              <button
-                type="button"
-                data-testid="target-folder-root"
-                className={`flex w-full items-center gap-1.5 rounded px-2 py-1.5 text-left transition hover:bg-indigo-50 ${
-                  targetMoveFolderId === null ? 'bg-indigo-100 font-semibold text-indigo-800' : 'text-slate-700'
-                }`}
-                onClick={() => setTargetMoveFolderId(null)}
-              >
-                <Folder size={14} className="text-amber-500 shrink-0" />
-                <span>최상위 (루트)</span>
-              </button>
-              {liveFolders
-                .filter((f) => {
-                  const selectedFolderIds = Array.from(selectedKeys)
-                    .filter((k) => k.startsWith('folder:'))
-                    .map((k) => k.slice(7));
-                  for (const sfid of selectedFolderIds) {
-                    if (descendantFolderIds(folders, sfid).includes(f.id)) {
-                      return false;
-                    }
-                  }
-                  return true;
-                })
-                .map((f) => (
+      {showMoveModal && (() => {
+        const blockedFolderIds = new Set<string>();
+        for (const k of selectedKeys) {
+          if (k.startsWith('folder:')) {
+            for (const descId of descendantFolderIds(folders, k.slice(7))) {
+              blockedFolderIds.add(descId);
+            }
+          }
+        }
+        const movableFolders = liveFolders.filter((f) => !blockedFolderIds.has(f.id));
+        const movableById = new Map(movableFolders.map((f) => [f.id, f]));
+
+        const getMoveFolderPathLabel = (folderId: string | null): string => {
+          if (!folderId) return '최상위 (루트)';
+          const names: string[] = [];
+          const visited = new Set<string>();
+          let curId: string | null | undefined = folderId;
+          while (curId && !visited.has(curId)) {
+            visited.add(curId);
+            const found: FolderRecord | undefined =
+              movableById.get(curId) ?? liveFolders.find((x) => x.id === curId);
+            if (!found) break;
+            names.unshift(found.name);
+            curId = found.parentId;
+          }
+          return names.length > 0 ? `최상위 (루트) > ${names.join(' > ')}` : '최상위 (루트)';
+        };
+
+        const renderMoveFolderTree = (parentId: string | null, depth: number): React.ReactNode => {
+          const children = movableFolders
+            .filter((f) =>
+              parentId === null
+                ? !f.parentId || !movableById.has(f.parentId)
+                : f.parentId === parentId,
+            )
+            .sort((a, b) => a.name.localeCompare(b.name, 'ko'));
+
+          return children.map((f) => {
+            const hasChildren = movableFolders.some((c) => c.parentId === f.id);
+            const isCollapsed = Boolean(moveModalCollapsed[f.id]);
+            const isSelected = targetMoveFolderId === f.id;
+            return (
+              <div key={f.id}>
+                <div
+                  data-depth={depth}
+                  className={`flex items-center gap-1 rounded pr-2 py-1 transition hover:bg-indigo-50 ${
+                    isSelected ? 'bg-indigo-100 font-semibold text-indigo-800' : 'text-slate-700'
+                  }`}
+                  style={{ paddingLeft: 6 + depth * 16 }}
+                >
+                  {hasChildren ? (
+                    <button
+                      type="button"
+                      data-testid={`move-folder-toggle-${f.id}`}
+                      aria-label={isCollapsed ? `${f.name} 펼치기` : `${f.name} 접기`}
+                      className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-slate-400 hover:bg-slate-200/70 hover:text-slate-700"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setMoveModalCollapsed((prev) => ({ ...prev, [f.id]: !isCollapsed }));
+                      }}
+                    >
+                      {isCollapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
+                    </button>
+                  ) : (
+                    <span className="inline-block w-4 shrink-0" />
+                  )}
                   <button
-                    key={f.id}
                     type="button"
                     data-testid={`target-folder-${f.id}`}
-                    className={`flex w-full items-center gap-1.5 rounded px-2 py-1.5 text-left transition hover:bg-indigo-50 ${
-                      targetMoveFolderId === f.id ? 'bg-indigo-100 font-semibold text-indigo-800' : 'text-slate-700'
-                    }`}
+                    className="flex min-w-0 flex-1 items-center gap-1.5 py-0.5 text-left"
                     onClick={() => setTargetMoveFolderId(f.id)}
                   >
-                    <Folder size={14} className="text-amber-500 shrink-0" />
+                    <Folder size={14} className="shrink-0 text-amber-500" />
                     <span className="truncate">{f.name}</span>
                   </button>
-                ))}
-            </div>
-            <div className="mt-4 flex justify-end gap-2 text-xs">
-              <button
-                type="button"
-                className="rounded px-3 py-1.5 text-slate-600 hover:bg-slate-100"
-                onClick={() => setShowMoveModal(false)}
+                </div>
+                {hasChildren && !isCollapsed && (
+                  <div className="ml-2.5 border-l border-slate-200/80 pl-0.5">
+                    {renderMoveFolderTree(f.id, depth + 1)}
+                  </div>
+                )}
+              </div>
+            );
+          });
+        };
+
+        return (
+          <div
+            data-testid="bulk-move-modal"
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+            onClick={() => setShowMoveModal(false)}
+          >
+            <div
+              className="w-full max-w-sm rounded-xl bg-white p-4 shadow-2xl"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <h3 className="mb-1 text-sm font-semibold text-slate-800">
+                선택한 {selectedKeys.size}개 항목 이동
+              </h3>
+              <p className="mb-2 text-xs text-slate-500">이동할 대상 폴더를 선택하세요:</p>
+              <div
+                data-testid="move-target-path-preview"
+                className="mb-2 truncate rounded bg-slate-50 px-2 py-1 text-[11px] font-medium text-indigo-700"
+                title={getMoveFolderPathLabel(targetMoveFolderId)}
               >
-                취소
-              </button>
-              <button
-                type="button"
-                data-testid="confirm-bulk-move-btn"
-                className="btn-primary px-3 py-1.5"
-                onClick={() => void moveSelectedToTarget()}
-              >
-                이동 실행
-              </button>
+                대상 위치: {getMoveFolderPathLabel(targetMoveFolderId)}
+              </div>
+              <div className="max-h-64 overflow-y-auto space-y-0.5 rounded border border-slate-200 p-2 text-xs">
+                <button
+                  type="button"
+                  data-testid="target-folder-root"
+                  className={`flex w-full items-center gap-1.5 rounded px-2 py-1.5 text-left transition hover:bg-indigo-50 ${
+                    targetMoveFolderId === null ? 'bg-indigo-100 font-semibold text-indigo-800' : 'text-slate-700'
+                  }`}
+                  onClick={() => setTargetMoveFolderId(null)}
+                >
+                  <Folder size={14} className="shrink-0 text-amber-500" />
+                  <span>최상위 (루트)</span>
+                </button>
+                {renderMoveFolderTree(null, 0)}
+              </div>
+              <div className="mt-4 flex justify-end gap-2 text-xs">
+                <button
+                  type="button"
+                  className="rounded px-3 py-1.5 text-slate-600 hover:bg-slate-100"
+                  onClick={() => setShowMoveModal(false)}
+                >
+                  취소
+                </button>
+                <button
+                  type="button"
+                  data-testid="confirm-bulk-move-btn"
+                  className="btn-primary px-3 py-1.5"
+                  onClick={() => void moveSelectedToTarget()}
+                >
+                  이동 실행
+                </button>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {menu && (() => {
         const uploadCount = resolveMenuUploadNoteIds(menu).length;
