@@ -406,4 +406,70 @@ describe('LeftSidebar Multi-Select (파일/폴더 복수 선택 및 일괄 삭�
       expect(currentNotes.find((n) => n.id === 'purge-note-2')).toBeUndefined();
     });
   });
+
+  it('6. 이동 팝업창에서 중첩 폴더가 계층형 트리와 깊이 들여쓰기로 표시되고 접기/펼치기 및 전체 경로가 동작한다', async () => {
+    const now = Date.now();
+    currentFolders = [
+      { id: 'f-root-a', name: '수학', parentId: null, createdAt: now },
+      { id: 'f-child-b', name: '미적분', parentId: 'f-root-a', createdAt: now },
+      { id: 'f-grand-c', name: '연습문제', parentId: 'f-child-b', createdAt: now },
+      { id: 'f-root-z', name: '물리', parentId: null, createdAt: now },
+    ];
+    currentNotes = [
+      {
+        id: 'move-note-1',
+        title: '이동할 노트',
+        folderId: null,
+        content: { type: 'doc', content: [] },
+        markdown: '',
+        plainText: '',
+        strokes: [],
+        annotations: [],
+        encoding: 'utf-8',
+        eol: 'lf',
+        createdAt: now,
+        updatedAt: now,
+      },
+    ];
+
+    render(<LeftSidebar />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('note-row-move-note-1')).toBeDefined();
+    });
+
+    fireEvent.click(screen.getByTestId('toggle-select-mode-btn'));
+    fireEvent.click(screen.getByTestId('checkbox-note-move-note-1'));
+    fireEvent.click(screen.getByTestId('bulk-move-btn'));
+
+    const modal = await screen.findByTestId('bulk-move-modal');
+    const rowA = screen.getByTestId('target-folder-f-root-a').closest('[data-depth]')!;
+    const rowB = screen.getByTestId('target-folder-f-child-b').closest('[data-depth]')!;
+    const rowC = screen.getByTestId('target-folder-f-grand-c').closest('[data-depth]')!;
+
+    expect(rowA.getAttribute('data-depth')).toBe('0');
+    expect(rowB.getAttribute('data-depth')).toBe('1');
+    expect(rowC.getAttribute('data-depth')).toBe('2');
+
+    // 최상위(물리/수학) 순서 및 하위(미적분 -> 연습문제) 계층 정렬 확인
+    const labels = Array.from(modal.querySelectorAll('[data-testid^="target-folder-f-"]')).map((el) =>
+      el.textContent?.trim(),
+    );
+    expect(labels).toEqual(['물리', '수학', '미적분', '연습문제']);
+
+    // 대상 폴더 클릭 시 전체 경로 미리보기 갱신
+    fireEvent.click(screen.getByTestId('target-folder-f-grand-c'));
+    expect(screen.getByTestId('move-target-path-preview').textContent).toContain(
+      '최상위 (루트) > 수학 > 미적분 > 연습문제',
+    );
+
+    // 상위 폴더 접기 클릭 시 하위 폴더 숨김
+    fireEvent.click(screen.getByTestId('move-folder-toggle-f-root-a'));
+    expect(screen.queryByTestId('target-folder-f-child-b')).toBeNull();
+    expect(screen.queryByTestId('target-folder-f-grand-c')).toBeNull();
+
+    // 다시 펼치면 하위 폴더 복원
+    fireEvent.click(screen.getByTestId('move-folder-toggle-f-root-a'));
+    expect(screen.getByTestId('target-folder-f-child-b')).toBeDefined();
+  });
 });
