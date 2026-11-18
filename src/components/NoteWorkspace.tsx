@@ -6,6 +6,7 @@ import { useSettings } from '../store/settingsStore';
 import { useTabs } from '../store/tabsStore';
 import { toast } from '../store/uiStore';
 import { InkCanvas } from '../canvas/InkCanvas';
+import { cachedBounds } from '../canvas/render';
 import { OverlayLayer } from './OverlayLayer';
 import { TextObjectLayer } from './TextObjectLayer';
 import { SelectionMenu } from './SelectionMenu';
@@ -113,7 +114,14 @@ function LoadedWorkspace({
     customFonts,
     fontSize,
   } = settings;
-  const maxY = useSyncExternalStore(session.strokes.subscribe, session.strokes.getQuantizedMaxY);
+  const maxY = useSyncExternalStore(session.strokes.subscribe, () => {
+    let m = 0;
+    for (const s of session.strokes.getAll()) {
+      const b = cachedBounds(s);
+      if (b.maxY > m) m = b.maxY;
+    }
+    return m > 0 ? Math.ceil(m / 200) * 200 : 0;
+  });
   const [hoverLink, setHoverLink] = useState<HTMLElement | null>(null);
   const pendingScroll = useTabs((s) => s.pendingScroll[session.id]);
 

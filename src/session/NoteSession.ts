@@ -151,7 +151,7 @@ export class NoteSession {
   navState: NavState = createInitialNavState(0);
 
   private cleanDoc: PMNode | null = null;
-  private cleanStrokesRef: Stroke[] = [];
+  private cleanStrokes = '[]';
   private cleanAnnotations = '[]';
   private cleanTextObjects = '[]';
   private cleanPages = '[]';
@@ -272,33 +272,11 @@ export class NoteSession {
   // ---------- dirty / clean ----------
   private captureClean() {
     this.cleanDoc = this.editor.state.doc;
-    this.cleanStrokesRef = this.strokes.getAll();
+    this.cleanStrokes = JSON.stringify(this.strokes.getAll());
     this.cleanAnnotations = JSON.stringify(this.ui.annotations);
     this.cleanTextObjects = JSON.stringify(this.ui.textObjects ?? []);
     this.cleanPages = JSON.stringify(this.ui.pages);
     this.patch({ dirty: false });
-  }
-
-  private hasStrokesChanged(): boolean {
-    const cur = this.strokes.getAll();
-    const clean = this.cleanStrokesRef;
-    if (cur === clean) return false;
-    if (cur.length !== clean.length) return true;
-    for (let i = 0; i < cur.length; i++) {
-      const a = cur[i];
-      const b = clean[i];
-      if (a === b) continue;
-      if (
-        a.id !== b.id ||
-        a.points !== b.points ||
-        a.color !== b.color ||
-        a.size !== b.size ||
-        a.tool !== b.tool
-      ) {
-        return true;
-      }
-    }
-    return false;
   }
 
   scheduleDirtyCheck() {
@@ -310,7 +288,7 @@ export class NoteSession {
     const dirty =
       !this.cleanDoc ||
       !this.editor.state.doc.eq(this.cleanDoc) ||
-      this.hasStrokesChanged() ||
+      JSON.stringify(this.strokes.getAll()) !== this.cleanStrokes ||
       JSON.stringify(this.ui.annotations) !== this.cleanAnnotations ||
       JSON.stringify(this.ui.textObjects ?? []) !== this.cleanTextObjects ||
       JSON.stringify(this.ui.pages) !== this.cleanPages;
