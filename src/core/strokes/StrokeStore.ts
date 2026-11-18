@@ -1,4 +1,4 @@
-import type { AABB, StrokePoint } from '../geometry/geometry';
+import type { AABB, Point, StrokePoint } from '../geometry/geometry';
 import { boundsOfPoints, eraserHitsStroke, translatePoints, unionBounds } from '../geometry/geometry';
 import type { CompositeHistoryManager } from '../history/CompositeHistoryManager';
 import { newCommandId } from '../history/CompositeHistoryManager';
@@ -29,6 +29,17 @@ export function strokeBounds(s: Stroke): AABB {
   return { minX: b.minX - pad, minY: b.minY - pad, maxX: b.maxX + pad, maxY: b.maxY + pad };
 }
 
+const strokeBoundsCache = new WeakMap<Stroke, AABB>();
+
+export function cachedStrokeBounds(s: Stroke): AABB {
+  let b = strokeBoundsCache.get(s);
+  if (!b) {
+    b = strokeBounds(s);
+    strokeBoundsCache.set(s, b);
+  }
+  return b;
+}
+
 /**
  * 캔버스 스트로크 상태 저장소. 모든 변이는 CompositeHistoryManager 로 기록된다.
  * 배열은 불변(immutable)으로 교체되어 React useSyncExternalStore 와 호환된다.
@@ -37,6 +48,7 @@ export class StrokeStore {
   private strokes: Stroke[] = [];
   private listeners = new Set<Listener>();
   private eraseBatches = new Map<string, Array<Array<{ stroke: Stroke; index: number }>>>();
+  private cachedMaxY: number | null = null;
 
   constructor(private history?: CompositeHistoryManager, initial: Stroke[] = []) {
     this.strokes = initial;
@@ -48,6 +60,23 @@ export class StrokeStore {
 
   getAll = (): Stroke[] => this.strokes;
 
+  getMaxY = (): number => {
+    if (this.cachedMaxY === null) {
+      let m = 0;
+      for (const s of this.strokes) {
+        const b = cachedStrokeBounds(s);
+        if (b.maxY > m) m = b.maxY;
+      }
+      this.cachedMaxY = m;
+    }
+    return this.cachedMaxY;
+  };
+
+  getQuantizedMaxY = (): number => {
+    const m = this.getMaxY();
+    return m > 0 ? Math.ceil(m / 200) * 200 : 0;
+  };
+
   get(id: string): Stroke | undefined {
     return this.strokes.find((s) => s.id === id);
   }
@@ -58,12 +87,13 @@ export class StrokeStore {
   }
 
   boundsOf(ids: string[]): AABB | null {
-    return unionBounds(this.getMany(ids).map(strokeBounds));
+    return unionBounds(this.getMany(ids).map(cachedStrokeBounds));
   }
 
   /** 히스토리 기록 없이 전체 교체(로드 시) */
   reset(strokes: Stroke[]) {
     this.strokes = strokes;
+    this.cachedMaxY = null;
     this.eraseBatches.clear();
     this.emit();
   }
@@ -78,6 +108,10 @@ export class StrokeStore {
     const next = this.strokes.slice();
     [...list].sort((a, b) => a.index - b.index).forEach(({ stroke, index }) => {
       next.splice(Math.min(index, next.length), 0, stroke);
+      if (this.cachedMaxY !== null) {
+        const b = cachedStrokeBounds(stroke);
+        if (b.maxY > this.cachedMaxY) this.cachedMaxY = b.maxY;
+      }
     });
     this.strokes = next;
     this.emit();
@@ -89,6 +123,14 @@ export class StrokeStore {
     this.strokes.forEach((s, index) => {
       if (set.has(s.id)) removed.push({ stroke: s, index });
     });
+    if (this.cachedMaxY !== null) {
+      for (const r of removed) {
+        if (cachedStrokeBounds(r.stroke).maxY >= this.cachedMaxY - 1) {
+          this.cachedMaxY = null;
+          break;
+        }
+      }
+    }
     this.strokes = this.strokes.filter((s) => !set.has(s.id));
     this.emit();
     return removed;
@@ -97,6 +139,7 @@ export class StrokeStore {
   rawTranslate(ids: string[], dx: number, dy: number) {
     const set = new Set(ids);
     this.strokes = this.strokes.map((s) => (set.has(s.id) ? { ...s, points: translatePoints(s.points, dx, dy) } : s));
+    this.cachedMaxY = null;
     this.emit();
   }
 
@@ -165,28 +208,73 @@ export class StrokeStore {
   }
 
   /**
+   * 한 프레임의 다중 지우개 궤적 좌표를 단일 패스로 판정해 충돌 획을 일괄 삭제(단일 emit)하고,
+   * destination-out 즉각 소거 및 pointerup 부분 복원에 필요한 삭제 획·바운딩 박스를 반환한다.
+   */
+  erasePoints(
+    points: ReadonlyArray<Point>,
+    radius = 12,
+    mergeCommandId?: string,
+  ): { removedIds: string[]; removedStrokes: Stroke[]; commandId?: string; removedBounds: AABB | null } {
+    if (points.length === 0) {
+      return { removedIds: [], removedStrokes: [], commandId: mergeCommandId, removedBounds: null };
+    }
+
+    let qMinX = Infinity;
+    let qMinY = Infinity;
+    let qMaxX = -Infinity;
+    let qMaxY = -Infinity;
+    for (const pt of points) {
+      if (pt.x < qMinX) qMinX = pt.x;
+      if (pt.y < qMinY) qMinY = pt.y;
+      if (pt.x > qMaxX) qMaxX = pt.x;
+      if (pt.y > qMaxY) qMaxY = pt.y;
+    }
+    qMinX -= radius;
+    qMinY -= radius;
+    qMaxX += radius;
+    qMaxY += radius;
+
+    const hitIds: string[] = [];
+    const hitStrokes: Stroke[] = [];
+    const hitBoxes: AABB[] = [];
+    for (const s of this.strokes) {
+      const b = cachedStrokeBounds(s);
+      if (qMaxX < b.minX || qMinX > b.maxX || qMaxY < b.minY || qMinY > b.maxY) {
+        continue;
+      }
+      for (const p of points) {
+        if (p.x + radius < b.minX || p.x - radius > b.maxX || p.y + radius < b.minY || p.y - radius > b.maxY) {
+          continue;
+        }
+        if (eraserHitsStroke(p, radius, s.points, s.size)) {
+          hitIds.push(s.id);
+          hitStrokes.push(s);
+          hitBoxes.push(b);
+          break;
+        }
+      }
+    }
+
+    if (hitIds.length === 0) {
+      return { removedIds: [], removedStrokes: [], commandId: mergeCommandId, removedBounds: null };
+    }
+    const commandId = this.removeStrokes(hitIds, mergeCommandId);
+    return {
+      removedIds: hitIds,
+      removedStrokes: hitStrokes,
+      commandId,
+      removedBounds: unionBounds(hitBoxes),
+    };
+  }
+
+  /**
    * 지우개 접촉 반경(radius, 기본 12px)과 충돌하는 스트로크를 반투명 지연 없이 즉각 삭제(Instant Erase)하고
    * 동일 드래그 제스처 내 삭제 획들을 단일 Undo/Redo 명령으로 묶어 기록한다.
    */
   eraseAt(x: number, y: number, radius = 12, mergeCommandId?: string): { removedIds: string[]; commandId?: string } {
-    const p = { x, y };
-    const hitIds: string[] = [];
-    for (const s of this.strokes) {
-      // 1. AABB(Bounding Box) 1차 판정 (성능 최적화)
-      const b = strokeBounds(s);
-      if (x + radius < b.minX || x - radius > b.maxX || y + radius < b.minY || y - radius > b.maxY) {
-        continue;
-      }
-      // 2. 점-선분 거리 제곱 정밀 판정
-      if (eraserHitsStroke(p, radius, s.points, s.size)) {
-        hitIds.push(s.id);
-      }
-    }
-    if (hitIds.length === 0) {
-      return { removedIds: [], commandId: mergeCommandId };
-    }
-    const commandId = this.removeStrokes(hitIds, mergeCommandId);
-    return { removedIds: hitIds, commandId };
+    const { removedIds, commandId } = this.erasePoints([{ x, y }], radius, mergeCommandId);
+    return { removedIds, commandId };
   }
 
   /** 실시간 드래그 중 미리보기 이동(기록 안 함). 종료 시 commitMove 로 총 변위를 기록한다. */
