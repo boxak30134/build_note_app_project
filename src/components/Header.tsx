@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { motion, AnimatePresence } from 'framer-motion';
-import { PanelLeft, PanelRight, Plus, FileText, Image as ImageIcon, Camera, Table, MessageSquare, Save, Bot, HardDrive, Download, FileDown } from 'lucide-react';
+import { PanelLeft, PanelRight, Plus, FileText, Image as ImageIcon, Camera, Table, MessageSquare, MessageSquarePlus, Save, Bot, HardDrive, Download, FileDown } from 'lucide-react';
 import { Capacitor } from '@capacitor/core';
+import { FeedbackModal } from './FeedbackModal';
 import { useSettings } from '../store/settingsStore';
 import { useTabs } from '../store/tabsStore';
 import { useSessionUI } from '../store/sessionStore';
@@ -37,6 +38,7 @@ export function Header() {
   const ui = useSessionUI(activeId);
   const [title, setTitle] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [feedbackOpen, setFeedbackOpen] = useState(false);
   const editingRef = useRef(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -108,10 +110,21 @@ export function Header() {
       </button>
       <ExportMenu activeId={activeId} />
       <AttachMenu />
+      <button
+        type="button"
+        data-testid="header-feedback-btn"
+        className="btn-ghost text-slate-600"
+        onClick={() => setFeedbackOpen(true)}
+        onMouseDown={(e) => e.preventDefault()}
+        title="버그 제보 및 피드백 보내기"
+      >
+        <MessageSquarePlus size={15} /> 피드백
+      </button>
       <button className={`icon-btn ${rightOpen ? 'text-indigo-600' : ''}`} onClick={toggleRight} title="AI 사이드바 열기/닫기">
         <Bot size={18} />
         <PanelRight size={14} className="-ml-1" />
       </button>
+      <FeedbackModal open={feedbackOpen} onClose={() => setFeedbackOpen(false)} />
     </header>
   );
 }
