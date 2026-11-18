@@ -7,6 +7,7 @@ import { createPage, type NotePage } from '../core/page/pageTypes';
 import type { CustomFontRecord } from '../core/font/fontManager';
 import type { UserWordStat } from '../types/adaptiveGlossary';
 import { plainTextOf } from '../core/doc/blocks';
+import onboardingReadmeMd from '../assets/ONBOARDING_README.md?raw';
 
 export interface UserWordStatRecord extends UserWordStat {
   id: string;
@@ -177,8 +178,19 @@ export async function seedIfEmpty() {
       content: [{ type: 'paragraph', content: [{ type: 'text', text: '태블릿 필기와 AI 주석을 결합한 학습 도구의 효과 검증 실험 설계.' }] }],
     },
   });
+  const readmeNote = emptyNote({
+    title: 'README (시작 가이드)',
+    folderId: null,
+    content: undefined,
+    markdown: onboardingReadmeMd,
+    plainText: onboardingReadmeMd
+      .replace(/[#>*`[\]()\-|]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim(),
+  });
   for (const n of [n1, n2, n3]) n.plainText = plainTextOf(n.content);
-  n1.updatedAt += 2; // 첫 실행 시 가장 먼저 열릴 샘플
+  readmeNote.updatedAt += 10; // 최초 접속 시 가장 먼저 열리는 온보딩 README
+  n1.updatedAt += 2;
   n2.updatedAt += 1;
-  await db.notes.bulkAdd([n1, n2, n3]);
+  await db.notes.bulkAdd([readmeNote, n1, n2, n3]);
 }
