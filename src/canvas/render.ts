@@ -169,6 +169,92 @@ function getStreamlineAlpha(penType: Stroke['penType']): number {
   }
 }
 
+function appendSmoothedStep(
+  rawPts: ReadonlyArray<readonly number[]>,
+  smoothed: RenderPoint[],
+  baseAlpha: number,
+  i: number,
+): void {
+  if (i === 0) {
+    smoothed.push([rawPts[0][0], rawPts[0][1], rawPts[0][2] ?? 0.5]);
+    return;
+  }
+  const prev = smoothed[i - 1];
+  const rx = rawPts[i][0];
+  const ry = rawPts[i][1];
+  const rp = rawPts[i][2] ?? 0.5;
+  const dist = Math.hypot(rx - prev[0], ry - prev[1]);
+  const alpha = Math.min(0.92, baseAlpha + Math.min(0.32, dist / 45));
+  smoothed.push([
+    prev[0] + (rx - prev[0]) * alpha,
+    prev[1] + (ry - prev[1]) * alpha,
+    prev[2] + (rp - prev[2]) * 0.65,
+  ]);
+}
+
+function computeInitialWidth(stroke: Pick<Stroke, 'size' | 'penType'>, firstPt: RenderPoint): number {
+  const penType = stroke.penType || 'pencil';
+  const baseSize = Math.max(0.8, stroke.size);
+  const p0 = naturalPenEasing(firstPt[2]);
+  let startScale = 0.4 + 0.6 * p0;
+  if (penType === 'fountain-sharp') startScale = 0.32 + 0.55 * p0;
+  else if (penType === 'brush') startScale = 0.28 + 0.68 * p0;
+  else if (penType === 'ballpoint') startScale = 0.8 + 0.16 * p0;
+  return Math.max(0.7, baseSize * startScale);
+}
+
+function computeWidthAtStep(
+  stroke: Pick<Stroke, 'size' | 'penType'>,
+  a: RenderPoint,
+  b: RenderPoint,
+  i: number,
+  prevW: number,
+): number {
+  const penType = stroke.penType || 'pencil';
+  const baseSize = Math.max(0.8, stroke.size);
+  const dx = b[0] - a[0];
+  const dy = b[1] - a[1];
+  const dist = Math.hypot(dx, dy);
+  const speedNorm = Math.min(1, dist / 24);
+  const avgP = naturalPenEasing((a[2] + b[2]) * 0.5);
+  const entryTaper = i <= 2 ? 0.68 + 0.16 * i : 1;
+
+  let rawScale: number;
+  switch (penType) {
+    case 'fountain-sharp': {
+      const velScale = 1 - 0.36 * speedNorm;
+      rawScale = (0.26 + 0.88 * avgP) * velScale * entryTaper;
+      break;
+    }
+    case 'fountain-flat': {
+      // 45도 사선 닙: 진행 방향과 닙 각도 차이에 따라 획 굵기 강약 표현
+      const strokeAngle = Math.atan2(dy, dx);
+      const nibFactor = dist > 0.2 ? 0.44 + 0.56 * Math.abs(Math.sin(strokeAngle + Math.PI / 4)) : 0.72;
+      rawScale = (0.72 + 0.34 * avgP) * nibFactor;
+      break;
+    }
+    case 'brush': {
+      const velScale = 1 - 0.42 * speedNorm;
+      rawScale = (0.2 + 1.18 * Math.pow(avgP, 1.15)) * velScale * entryTaper;
+      break;
+    }
+    case 'ballpoint': {
+      rawScale = 0.8 + 0.18 * avgP;
+      break;
+    }
+    case 'pencil':
+    default: {
+      const velScale = 1 - 0.16 * speedNorm;
+      const pencilEntry = i === 1 ? 0.85 : 1;
+      rawScale = (0.32 + 0.72 * avgP) * velScale * pencilEntry;
+      break;
+    }
+  }
+
+  const targetW = Math.max(0.7, baseSize * rawScale);
+  return prevW + (targetW - prevW) * 0.58;
+}
+
 /**
  * 인과적(Causal) 렌더 스무딩 필터:
  * 원시 좌표(stroke.points)는 변조하지 않고 렌더링 시점에만 [0..i] 과거 샘플을 이용해
@@ -181,20 +267,9 @@ export function computeCausalSmoothedPoints(
   const n = pts.length;
   if (n === 0) return [];
   const baseAlpha = getStreamlineAlpha(penType);
-  const out: RenderPoint[] = [[pts[0][0], pts[0][1], pts[0][2] ?? 0.5]];
-
-  for (let i = 1; i < n; i++) {
-    const prev = out[i - 1];
-    const rx = pts[i][0];
-    const ry = pts[i][1];
-    const rp = pts[i][2] ?? 0.5;
-    const dist = Math.hypot(rx - prev[0], ry - prev[1]);
-    const alpha = Math.min(0.92, baseAlpha + Math.min(0.32, dist / 45));
-    out.push([
-      prev[0] + (rx - prev[0]) * alpha,
-      prev[1] + (ry - prev[1]) * alpha,
-      prev[2] + (rp - prev[2]) * 0.65,
-    ]);
+  const out: RenderPoint[] = [];
+  for (let i = 0; i < n; i++) {
+    appendSmoothedStep(pts, out, baseAlpha, i);
   }
   return out;
 }
@@ -208,65 +283,54 @@ export function computeCausalStrokeWidths(
 ): number[] {
   const n = smoothed.length;
   if (n === 0) return [];
-  const penType = stroke.penType || 'pencil';
-  const baseSize = Math.max(0.8, stroke.size);
-
-  const p0 = naturalPenEasing(smoothed[0][2]);
-  let startScale = 0.4 + 0.6 * p0;
-  if (penType === 'fountain-sharp') startScale = 0.32 + 0.55 * p0;
-  else if (penType === 'brush') startScale = 0.28 + 0.68 * p0;
-  else if (penType === 'ballpoint') startScale = 0.8 + 0.16 * p0;
-
-  const widths: number[] = [Math.max(0.7, baseSize * startScale)];
-
+  const widths: number[] = [computeInitialWidth(stroke, smoothed[0])];
   for (let i = 1; i < n; i++) {
-    const a = smoothed[i - 1];
-    const b = smoothed[i];
-    const dx = b[0] - a[0];
-    const dy = b[1] - a[1];
-    const dist = Math.hypot(dx, dy);
-    const speedNorm = Math.min(1, dist / 24);
-    const avgP = naturalPenEasing((a[2] + b[2]) * 0.5);
-    const entryTaper = i <= 2 ? 0.68 + 0.16 * i : 1;
+    widths.push(computeWidthAtStep(stroke, smoothed[i - 1], smoothed[i], i, widths[i - 1]));
+  }
+  return widths;
+}
 
-    let rawScale: number;
-    switch (penType) {
-      case 'fountain-sharp': {
-        const velScale = 1 - 0.36 * speedNorm;
-        rawScale = (0.26 + 0.88 * avgP) * velScale * entryTaper;
-        break;
-      }
-      case 'fountain-flat': {
-        // 45도 사선 닙: 진행 방향과 닙 각도 차이에 따라 획 굵기 강약 표현
-        const strokeAngle = Math.atan2(dy, dx);
-        const nibFactor = dist > 0.2 ? 0.44 + 0.56 * Math.abs(Math.sin(strokeAngle + Math.PI / 4)) : 0.72;
-        rawScale = (0.72 + 0.34 * avgP) * nibFactor;
-        break;
-      }
-      case 'brush': {
-        const velScale = 1 - 0.42 * speedNorm;
-        rawScale = (0.2 + 1.18 * Math.pow(avgP, 1.15)) * velScale * entryTaper;
-        break;
-      }
-      case 'ballpoint': {
-        rawScale = 0.8 + 0.18 * avgP;
-        break;
-      }
-      case 'pencil':
-      default: {
-        const velScale = 1 - 0.16 * speedNorm;
-        const pencilEntry = i === 1 ? 0.85 : 1;
-        rawScale = (0.32 + 0.72 * avgP) * velScale * pencilEntry;
-        break;
-      }
-    }
+interface CachedStrokeGeometry {
+  smoothed: RenderPoint[];
+  widths: number[];
+  firstPointRef: readonly number[] | undefined;
+}
 
-    const targetW = Math.max(0.7, baseSize * rawScale);
-    const prevW = widths[i - 1];
-    widths.push(prevW + (targetW - prevW) * 0.58);
+const geometryCache = new WeakMap<Stroke, CachedStrokeGeometry>();
+
+/**
+ * 스트로크 객체 단위 인과적 스무딩·필압 굵기 증분 캐시:
+ * - pointermove 중에는 새로 유입된 점 구간만 O(Δn)으로 추가 계산하고
+ * - 확정 획 재렌더링 시에는 캐시된 배열을 O(1)로 재사용하여 선 품질 저하 없이 CPU 부하를 제거한다.
+ */
+export function getIncrementalStrokeGeometry(stroke: Stroke): { smoothed: RenderPoint[]; widths: number[] } {
+  const rawPts = stroke.points;
+  const n = rawPts.length;
+  if (n === 0) return { smoothed: [], widths: [] };
+
+  let entry = geometryCache.get(stroke);
+  if (!entry || entry.smoothed.length > n || entry.firstPointRef !== rawPts[0]) {
+    entry = { smoothed: [], widths: [], firstPointRef: rawPts[0] };
+    geometryCache.set(stroke, entry);
   }
 
-  return widths;
+  const baseAlpha = getStreamlineAlpha(stroke.penType);
+  for (let i = entry.smoothed.length; i < n; i++) {
+    appendSmoothedStep(rawPts, entry.smoothed, baseAlpha, i);
+  }
+
+  if (stroke.tool !== 'highlighter') {
+    if (entry.widths.length === 0 && entry.smoothed.length > 0) {
+      entry.widths.push(computeInitialWidth(stroke, entry.smoothed[0]));
+    }
+    for (let i = entry.widths.length; i < entry.smoothed.length; i++) {
+      entry.widths.push(
+        computeWidthAtStep(stroke, entry.smoothed[i - 1], entry.smoothed[i], i, entry.widths[i - 1]),
+      );
+    }
+  }
+
+  return entry;
 }
 
 function evalQuadraticAt(
@@ -301,7 +365,7 @@ export function drawIncrementalStrokeSegment(
   const n = rawPts.length;
   if (n === 0 || fromIndex >= n) return n;
 
-  const pts = computeCausalSmoothedPoints(rawPts, stroke.penType);
+  const { smoothed: pts, widths } = getIncrementalStrokeGeometry(stroke);
 
   ctx.save();
   ctx.imageSmoothingEnabled = true;
@@ -340,7 +404,6 @@ export function drawIncrementalStrokeSegment(
     }
     ctx.stroke();
   } else {
-    const widths = computeCausalStrokeWidths(stroke, pts);
     ctx.strokeStyle = stroke.color;
     ctx.fillStyle = stroke.color;
     ctx.lineCap = 'round';
