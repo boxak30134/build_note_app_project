@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useSyncExternalStore } from 'react';
 import { useFloating, autoUpdate, offset, flip, shift, useDismiss, useInteractions, FloatingPortal } from '@floating-ui/react';
 import { motion } from 'framer-motion';
 import { Move, Copy, Scissors, Trash2, MessageSquare, Loader2, Sparkles, X, Quote, Link2 } from 'lucide-react';
@@ -65,6 +65,7 @@ export function OverlayLayer({ session }: { session: NoteSession }) {
   useLayoutTick(session);
   const storeUI = useSessionUI(session.id);
   const ui = session?.ui ?? storeUI;
+  const strokes = useSyncExternalStore(session.strokes.subscribe, session.strokes.getAll);
   const [pinEls, setPinEls] = useState<Record<string, HTMLElement | null>>({});
   const [dragPin, setDragPin] = useState<{ id: string; x: number; y: number } | null>(null);
   const dragStartRef = useRef<{
@@ -78,6 +79,7 @@ export function OverlayLayer({ session }: { session: NoteSession }) {
     hasMoved: boolean;
   } | null>(null);
   const justDraggedRef = useRef(false);
+  void strokes;
 
   const selBox = ui.lassoIds.length ? session.strokes.boundsOf(ui.lassoIds) : null;
 
