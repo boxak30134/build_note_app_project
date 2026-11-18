@@ -9,7 +9,7 @@ import { validateImageFiles, sanitizeDocumentTitle } from '../core/files/validat
 import { appendBubbleText, clampBubbleText, consumeAiTurn, MAX_BUBBLE_CHAR_LENGTH } from '../core/bubble/limits';
 import { dataUrlToBase64, PROVIDER_LABEL, streamAi } from '../ai/aiClient';
 import { BUBBLE_MAX_OUTPUT_TOKENS, GEMINI_PRIMARY_MODEL, streamGeminiTutor } from '../modules/ai';
-import { renderStrokesToDataUrl } from '../canvas/render';
+import { renderPageStrokesToDataUrl, renderStrokesToDataUrl } from '../canvas/render';
 import { plainTextOf } from '../core/doc/blocks';
 import { buildExtensions, markdownToJson, preprocessMarkdownEntities, sanitizeMarkdownDocEntities } from '../editor/extensions';
 import { ASSIGN_IDS_META } from '../editor/extensions/blockId';
@@ -1460,6 +1460,43 @@ export class NoteSession {
 
   getStrokesForAnnotation(a: Annotation): Stroke[] {
     return a.anchor.type === 'strokes' ? this.strokes.getMany(a.anchor.strokeIds) : [];
+  }
+
+  /** 현재 활성 페이지의 손글씨 스트로크를 압축 이미지 DataURL로 캡처 (AI 허브 질의용) */
+  async captureCurrentPageImage(): Promise<{ dataUrl: string; pageIndex: number } | null> {
+    const pages = this.ui.pages ?? [];
+    const pageIndex = Math.max(0, Math.min(this.ui.currentPageIndex ?? 0, Math.max(0, pages.length - 1)));
+    const allStrokes = this.strokes.getAll();
+    if (allStrokes.length === 0) return null;
+
+    let pageStrokes = allStrokes;
+    const targetPage = pages[pageIndex];
+    if (pages.length > 1 && targetPage) {
+      const currentWidth = getPageDimensions(targetPage.size, targetPage.orientation).width;
+      const layout = computePdfPageLayout(
+        pages.map((p) => {
+          const d = getPageDimensions(p.size, p.orientation);
+          return { width: d.width, height: d.height };
+        }),
+        currentWidth,
+      );
+      const pageTop = layout.yOffsets[pageIndex] ?? 0;
+      const pageHeight = layout.pageHeights[pageIndex] ?? 0;
+      const pageBottom = pageTop + pageHeight + PDF_PAGE_GAP_PX;
+      pageStrokes = allStrokes.filter((s) => {
+        const bounds = this.strokes.boundsOf([s.id]);
+        return bounds ? bounds.minY >= pageTop - 4 && bounds.maxY <= pageBottom + 4 : false;
+      });
+    }
+    if (pageStrokes.length === 0) return null;
+
+    const dataUrl = renderPageStrokesToDataUrl(pageStrokes, {
+      maxDim: 1280,
+      mimeType: 'image/webp',
+      quality: 0.82,
+    });
+    if (!dataUrl) return null;
+    return { dataUrl, pageIndex };
   }
 
   // ---------- citations (non-blocking link creation) ----------
