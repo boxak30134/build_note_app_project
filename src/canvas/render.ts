@@ -453,6 +453,47 @@ export function renderStrokesToDataUrl(strokes: Stroke[], pad = 16): string | nu
   return canvas.toDataURL('image/png');
 }
 
+export interface PageCaptureOptions {
+  maxDim?: number;
+  pad?: number;
+  mimeType?: 'image/webp' | 'image/png';
+  quality?: number;
+}
+
+/** 현재 페이지의 손글씨 스트로크를 압축 이미지(WebP 우선, 폴백 PNG) DataURL로 캡처 — AI 허브 질의용 */
+export function renderPageStrokesToDataUrl(
+  strokes: Stroke[],
+  options: PageCaptureOptions = {},
+): string | null {
+  const box = unionBounds(strokes.map(strokeBounds));
+  if (!box) return null;
+  const pad = options.pad ?? 24;
+  const maxDim = options.maxDim ?? 1280;
+  const w = Math.ceil(box.maxX - box.minX + pad * 2);
+  const h = Math.ceil(box.maxY - box.minY + pad * 2);
+  const scale = Math.min(2, maxDim / Math.max(w, h));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(w * scale));
+  canvas.height = Math.max(1, Math.round(h * scale));
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return null;
+  ctx.imageSmoothingEnabled = true;
+  if ('imageSmoothingQuality' in ctx) ctx.imageSmoothingQuality = 'high';
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.scale(scale, scale);
+  ctx.translate(pad - box.minX, pad - box.minY);
+  strokes.forEach((s) => drawStroke(ctx, s));
+
+  const preferredMime = options.mimeType ?? 'image/webp';
+  const quality = options.quality ?? 0.82;
+  const out = canvas.toDataURL(preferredMime, quality);
+  if (preferredMime === 'image/webp' && !out.startsWith('data:image/webp')) {
+    return canvas.toDataURL('image/png');
+  }
+  return out;
+}
+
 /**
  * 올가미(Lasso) 드래그 시각 피드백 렌더링:
  * 파란색 점선(rgba(59, 130, 246, 0.8), [6, 6]) 및 반투명 채우기 면(rgba(59, 130, 246, 0.12))

@@ -1,13 +1,13 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type MouseEvent } from 'react';
 import { motion } from 'framer-motion';
-import { KeyRound, Send, Loader2, Settings, MessageCircle, Trash2, Sparkles, ShieldCheck, ArrowLeft, ExternalLink, Square, Link2 } from 'lucide-react';
+import { KeyRound, Send, Loader2, Settings, MessageCircle, Trash2, Sparkles, ShieldCheck, ArrowLeft, ExternalLink, Square, Link2, Camera, X } from 'lucide-react';
 import type { ModelMessage } from 'ai';
 import { useSettings, DEFAULT_MODELS, type AiProviderId } from '../store/settingsStore';
 import { useSessionUI } from '../store/sessionStore';
 import { useTabs } from '../store/tabsStore';
 import { saveApiKey, removeApiKey, loadTranslateApiKey, saveTranslateApiKey, removeTranslateApiKey } from '../storage/secureStore';
 import { useConnectedProviders, useProvidersLoaded, refreshProviders } from '../ai/useConnectedProviders';
-import { streamAi, PROVIDER_LABEL, PROVIDER_KEY_URL, PROVIDER_KEY_GUIDE, MissingApiKeyError } from '../ai/aiClient';
+import { dataUrlToBase64, streamAi, PROVIDER_LABEL, PROVIDER_KEY_URL, PROVIDER_KEY_GUIDE, MissingApiKeyError } from '../ai/aiClient';
 import { estimateTurnTokenPreview } from '../ai/modelCatalog';
 import { AiModelSelector } from './AiModelSelector';
 import {
@@ -428,6 +428,7 @@ function Chat({ connected, onConnect }: { connected: AiProviderId[]; onConnect: 
   const setStatusInfo = useAiChatStore((s) => s.setStatusInfo);
   const clearMessages = useAiChatStore((s) => s.clearMessages);
   const [selectedText, setSelectedText] = useState('');
+  const [attachedPageImg, setAttachedPageImg] = useState<{ dataUrl: string; pageIndex: number } | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
   const lastQuestionRef = useRef<string>('');
 
@@ -465,6 +466,23 @@ function Chat({ connected, onConnect }: { connected: AiProviderId[]; onConnect: 
     void endRef.current?.scrollIntoView?.({ block: 'end' });
   }, [msgs]);
 
+  const handleCapturePage = async () => {
+    const s = getSession(activeId);
+    if (!s) {
+      toast.info('먼저 노트를 여세요.');
+      return;
+    }
+    const captured = await s.captureCurrentPageImage();
+    if (!captured) {
+      toast.info('현재 페이지에 캡처할 손글씨가 없습니다.');
+      return;
+    }
+    setAttachedPageImg(captured);
+    if (!input.trim()) {
+      setInput('이 페이지의 손글씨 풀이/내용이 맞는지 확인하고, 틀린 부분이나 보완할 점을 설명해 주세요.');
+    }
+  };
+
   const handleSendMessage = async (
     e?: FormEvent<HTMLFormElement> | KeyboardEvent<HTMLTextAreaElement> | MouseEvent<HTMLButtonElement>,
     overrideText?: string,
@@ -472,7 +490,9 @@ function Chat({ connected, onConnect }: { connected: AiProviderId[]; onConnect: 
     e?.preventDefault();
     e?.stopPropagation();
 
-    const q = (overrideText ?? input).trim();
+    const pendingImage = overrideText === undefined ? attachedPageImg : null;
+    const rawQ = (overrideText ?? input).trim();
+    const q = rawQ || (pendingImage ? '이 페이지의 손글씨 풀이/내용이 맞는지 확인해 주세요.' : '');
     if (!q || busy) return;
     lastQuestionRef.current = q;
 
@@ -481,11 +501,15 @@ function Chat({ connected, onConnect }: { connected: AiProviderId[]; onConnect: 
     const context = s ? s.editor.getMarkdown().slice(0, 2000) : '';
     const title = s?.record.title ?? '';
     const systemContext = context ? `[현재 노트: ${title}]\n${context}` : '(현재 열린 노트 없음)';
-    const history: ChatMsg[] = [...msgs, { role: 'user', content: q }];
+    const history: ChatMsg[] = [
+      ...msgs,
+      { role: 'user', content: q, ...(pendingImage ? { imageDataUrl: pendingImage.dataUrl } : {}) },
+    ];
 
     setMsgs([...history, { role: 'assistant', content: '' }]);
     if (overrideText === undefined) {
       setInput('');
+      setAttachedPageImg(null);
     }
     setBusy(true);
 
@@ -500,7 +524,19 @@ function Chat({ connected, onConnect }: { connected: AiProviderId[]; onConnect: 
 
     try {
       const prunedHistory = history.slice(-8);
-      const messages: ModelMessage[] = prunedHistory.map((m) => ({ role: m.role, content: m.content }));
+      const messages: ModelMessage[] = prunedHistory.map((m, idx) => {
+        if (idx === prunedHistory.length - 1 && m.role === 'user' && pendingImage) {
+          const { base64, mediaType } = dataUrlToBase64(pendingImage.dataUrl);
+          return {
+            role: 'user',
+            content: [
+              { type: 'text', text: m.content },
+              { type: 'file', mediaType, data: base64 },
+            ],
+          };
+        }
+        return { role: m.role, content: m.content };
+      });
       let acc = '';
       if (provider === 'google') {
         const modelId = useSettings.getState().aiModels.google || GEMINI_PRIMARY_MODEL;
@@ -656,6 +692,13 @@ function Chat({ connected, onConnect }: { connected: AiProviderId[]; onConnect: 
             className={`break-words rounded-xl px-3 py-2 text-xs leading-relaxed ${m.role === 'user' ? 'ml-6 whitespace-pre-wrap bg-indigo-600 text-white' : 'mr-4 bg-slate-100 text-slate-800'
               }`}
           >
+            {m.role === 'user' && m.imageDataUrl && (
+              <img
+                src={m.imageDataUrl}
+                alt="캡처된 노트 페이지"
+                className="mb-1.5 max-h-40 rounded-lg border border-indigo-300/50 bg-white object-contain"
+              />
+            )}
             {m.content ? (
               m.role === 'assistant' ? (
                 <div data-testid="ai-chat-assistant-markdown">
@@ -705,7 +748,42 @@ function Chat({ connected, onConnect }: { connected: AiProviderId[]; onConnect: 
         </div>
       )}
       <form className="border-t p-2" onSubmit={(e) => void handleSendMessage(e)}>
+        {attachedPageImg && (
+          <div
+            data-testid="ai-attached-page-image"
+            className="mb-1.5 flex items-center gap-2 rounded-lg border border-indigo-200 bg-indigo-50/60 p-1.5"
+          >
+            <img
+              src={attachedPageImg.dataUrl}
+              alt="캡처된 페이지 미리보기"
+              className="h-12 w-12 shrink-0 rounded border border-slate-200 bg-white object-contain"
+            />
+            <div className="min-w-0 flex-1 text-[11px] text-slate-700">
+              <div className="font-semibold text-indigo-800">페이지 {attachedPageImg.pageIndex + 1} 캡처 첨부됨</div>
+              <div className="truncate text-[10px] text-slate-500">프롬프트와 함께 AI에 전송됩니다</div>
+            </div>
+            <button
+              type="button"
+              data-testid="ai-remove-page-image-btn"
+              onClick={() => setAttachedPageImg(null)}
+              className="icon-btn text-slate-500 hover:text-red-600"
+              title="첨부 이미지 제거"
+            >
+              <X size={13} />
+            </button>
+          </div>
+        )}
         <div className="flex items-end gap-1">
+          <button
+            type="button"
+            data-testid="ai-capture-page-btn"
+            disabled={busy || !activeId}
+            onClick={() => void handleCapturePage()}
+            className="btn-ghost shrink-0 border border-slate-200 !px-2 !py-1.5 text-[11px] text-slate-700 disabled:opacity-40"
+            title="현재 페이지 손글씨를 이미지로 캡처하여 첨부"
+          >
+            <Camera size={14} className="text-indigo-600" />
+          </button>
           <textarea
             className="max-h-32 min-h-[38px] flex-1 resize-none rounded-lg border px-2 py-1.5 text-xs outline-none focus:border-indigo-400"
             placeholder="노트에 대해 질문… (Enter 전송, Shift+Enter 줄바꿈)"
@@ -732,7 +810,7 @@ function Chat({ connected, onConnect }: { connected: AiProviderId[]; onConnect: 
               <Square size={14} />
             </button>
           ) : (
-            <button type="submit" className="btn-primary !px-2" disabled={!input.trim()} title="전송">
+            <button type="submit" className="btn-primary !px-2" disabled={!input.trim() && !attachedPageImg} title="전송">
               <Send size={14} />
             </button>
           )}
