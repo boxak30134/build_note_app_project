@@ -16,7 +16,7 @@ import {
 import { useSettings, activeColor } from '../store/settingsStore';
 import { useSessions } from '../store/sessionStore';
 import { useContextMenu } from '../store/contextMenuStore';
-import { cachedBounds, drawIncrementalStrokeSegment, drawStroke, intersects, renderLassoFeedback } from './render';
+import { cachedBounds, drawIncrementalStrokeSegment, drawStroke, eraseStrokeMask, intersects, renderLassoFeedback } from './render';
 import {
   appendStrokePoint,
   coalescedEventsOf,
@@ -65,31 +65,59 @@ interface Props {
  */
 export const CHUNK_HEIGHT = 1600;
 
+export function computeVisibleChunkRange(
+  pageH: number,
+  scrollTop: number,
+  viewportH: number,
+  zoom = 1,
+): { start: number; end: number; total: number } {
+  const total = Math.max(1, Math.ceil(pageH / CHUNK_HEIGHT));
+  if (total <= 1 || viewportH <= 0 || viewportH >= pageH) {
+    return { start: 0, end: total - 1, total };
+  }
+  const safeZ = zoom > 0 ? zoom : 1;
+  const viewTopPage = Math.max(0, scrollTop / safeZ);
+  const viewBottomPage = Math.min(pageH, (scrollTop + viewportH) / safeZ);
+  const visStart = Math.max(0, Math.floor(viewTopPage / CHUNK_HEIGHT));
+  const visEnd = Math.min(total - 1, Math.max(visStart, Math.floor(viewBottomPage / CHUNK_HEIGHT)));
+  return {
+    start: Math.max(0, visStart - 1),
+    end: Math.min(total - 1, visEnd + 1),
+    total,
+  };
+}
+
 /**
  * [Layer 2] 2계층 더블 버퍼링 투명 벡터 캔버스:
- * - Committed Canvas (`canvasRef` / `chunkCanvasesRef`): 확정된 누적 필기 전용.
- * - Active Canvas (`wetRef`, `desynchronized: true`): 진행 중인 활성 획 전용 저지연 캔버스.
+ * - Static Cache Layer (`canvasRef` / `chunkCanvasesRef`): 확정된 누적 필기 전용 (가시 영역 ±1 청크만 마운트).
+ * - Active Stroke Layer (`wetRef`, `desynchronized: true`): 현재 진행 중인 단일 활성 획 전용 저지연 캔버스.
  */
 export function InkCanvas({ session, viewportRef, active }: Props) {
-  /** [Layer 1] Committed Canvas (Dry ink): 확정된 누적 필기 보관용 정적 비트맵 버퍼 */
+  /** [Layer 1] Static Cache Canvas (Dry ink): 확정된 누적 필기 보관용 정적 비트맵 버퍼 */
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  /** [Layer 2] Active Canvas (Wet ink): 진행 중인 펜 필기 전용 저지연(desynchronized) 캔버스 */
+  /** [Layer 2] Active Canvas (Wet ink): 진행 중인 단일 펜 필기 전용 저지연(desynchronized) 캔버스 */
   const wetRef = useRef<HTMLCanvasElement>(null);
   /** [Layer 3] Interaction Overlay: 올가미(Lasso) 실시간 점선/반투명 면 전용 표준 더블 버퍼링 캔버스 */
   const interactionRef = useRef<HTMLCanvasElement>(null);
-  /** 긴 다중 페이지 문서를 분할 렌더링하기 위한 청크 캔버스 맵 (chunkIndex -> HTMLCanvasElement) */
+  /** 긴 다중 페이지 문서를 가상화 분할 렌더링하기 위한 청크 캔버스 맵 (chunkIndex -> HTMLCanvasElement) */
   const chunkCanvasesRef = useRef<Map<number, HTMLCanvasElement>>(new Map());
-  const [chunkCount, setChunkCount] = useState<number>(() => {
+  const mountedCanvasElsRef = useRef<Map<number, HTMLCanvasElement>>(new Map());
+  const [chunkRange, setChunkRange] = useState<{ start: number; end: number; total: number }>(() => {
     const page = session.pageEl;
+    const viewport = viewportRef.current;
     if (page && page.offsetHeight > 0) {
-      return Math.max(1, Math.ceil(page.offsetHeight / CHUNK_HEIGHT));
+      const vh = viewport?.clientHeight ?? 0;
+      const z = useSessions.getState().sessions[session.id]?.zoom || 1;
+      return computeVisibleChunkRange(page.offsetHeight, viewport?.scrollTop ?? 0, vh, z);
     }
-    return 1;
+    return { start: 0, end: 0, total: 1 };
   });
   const live = useRef<Live>(null);
   const predicted = useRef<StrokePoint[]>([]);
   const frame = useRef(0);
   const wetFrame = useRef(0);
+  /** 지우개 드래그 중 destination-out 마스크가 적용된 청크 인덱스 집합 (pointerup 시 clean restore) */
+  const dirtyEraseChunks = useRef<Set<number>>(new Set());
   /** 방금 pointerup 에서 Committed Canvas 에 직접 베이크 완료한 스트로크 추적 (중복 Full Redraw 방지) */
   const lastBakedStrokeId = useRef<string | null>(null);
   const lastBakedStrokeCount = useRef<number>(-1);
@@ -105,25 +133,37 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
     }
     if (!viewport || !page) return null;
     const z = useSessions.getState().sessions[session.id]?.zoom || 1;
-    const pr = page.getBoundingClientRect();
-    const vr = viewport.getBoundingClientRect();
-    const pageW =
-      page.offsetWidth > 0 ? page.offsetWidth : pr.width > 0 ? pr.width / z : vr.width / z;
-    const pageH =
-      page.offsetHeight > 0 ? page.offsetHeight : pr.height > 0 ? pr.height / z : vr.height / z;
+    let pageW = page.offsetWidth;
+    let pageH = page.offsetHeight;
+    if (pageW <= 0 || pageH <= 0) {
+      const pr = page.getBoundingClientRect();
+      const vr = viewport.getBoundingClientRect();
+      pageW = pageW > 0 ? pageW : pr.width > 0 ? pr.width / z : vr.width / z;
+      pageH = pageH > 0 ? pageH : pr.height > 0 ? pr.height / z : vr.height / z;
+    }
     if (pageW <= 0 || pageH <= 0) return null;
+
+    const viewportHeight =
+      viewport.clientHeight > 0 ? viewport.clientHeight : viewport.getBoundingClientRect().height;
 
     const rawDpr = window.devicePixelRatio || 1;
     // 1x~1.5x 화면에서도 대각선 계단 현상을 막기 위해 최소 2.0x 슈퍼샘플링(최대 3.0x) 유지
     const dpr = Math.min(Math.max(rawDpr, 2.0), 3.0);
-    return { pageW, pageH, dpr, z, viewport, page };
+    return { pageW, pageH, dpr, z, viewport, viewportHeight, page };
   }, [session, viewportRef]);
 
   const updateChunkCount = useCallback(() => {
     const dims = getPageDimensions();
     if (!dims) return;
-    const count = Math.max(1, Math.ceil(dims.pageH / CHUNK_HEIGHT));
-    setChunkCount((prev) => (prev !== count ? count : prev));
+    const next = computeVisibleChunkRange(
+      dims.pageH,
+      dims.viewport.scrollTop,
+      dims.viewportHeight,
+      dims.z,
+    );
+    setChunkRange((prev) =>
+      prev.start === next.start && prev.end === next.end && prev.total === next.total ? prev : next,
+    );
   }, [getPageDimensions]);
 
   const prepareChunk = useCallback(
@@ -194,8 +234,10 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
         canvas.width = w;
         canvas.height = h;
       }
-      canvas.style.top = `${wetTop}px`;
-      canvas.style.height = `${wetHeight}px`;
+      const nextTop = `${wetTop}px`;
+      const nextHeight = `${wetHeight}px`;
+      if (canvas.style.top !== nextTop) canvas.style.top = nextTop;
+      if (canvas.style.height !== nextHeight) canvas.style.height = nextHeight;
 
       const ctx = getLowLatencyContext(canvas);
       if (!ctx) return null;
@@ -239,8 +281,10 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
         canvas.width = w;
         canvas.height = h;
       }
-      canvas.style.top = `${overlayTop}px`;
-      canvas.style.height = `${overlayHeight}px`;
+      const nextTop = `${overlayTop}px`;
+      const nextHeight = `${overlayHeight}px`;
+      if (canvas.style.top !== nextTop) canvas.style.top = nextTop;
+      if (canvas.style.height !== nextHeight) canvas.style.height = nextHeight;
 
       const ctx = canvas.getContext('2d');
       if (!ctx) return null;
@@ -309,9 +353,8 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
   );
 
   /**
-   * pointerdown / pointermove 중 Active Canvas(wetRef)에 clearRect 없이 신규 세그먼트만 증분(Incremental)으로 이어 그린다.
-   * 일반 펜 필기 시에는 Committed Canvas에도 동일 세그먼트를 증분 반영하여
-   * pointerup 직후 wetCanvas 가 즉시 비워질 때 컴포지터 1프레임 지연으로 인한 깜빡임을 0ms 로 제거한다.
+   * 2-레이어 엄격 분리: pointerdown / pointermove 중에는 상단 활성 캔버스(wetRef, desynchronized: true)에만
+   * clearRect 없이 신규 세그먼트를 증분(Incremental) 렌더링하고, 하단 정적 캔버스에는 접근하지 않는다.
    */
   const drawWetIncremental = useCallback(() => {
     const l = live.current;
@@ -320,19 +363,8 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
     const wr = prepareWet(false);
     if (!wr) return;
     const nextIdx = drawIncrementalStrokeSegment(wr.ctx, l.stroke, prevIdx);
-    if (l.stroke.tool !== 'highlighter') {
-      const lastPt = l.stroke.points[l.stroke.points.length - 1];
-      const chunkIdx = lastPt ? Math.max(0, Math.floor(lastPt[1] / CHUNK_HEIGHT)) : 0;
-      const targetCanvas = chunkCanvasesRef.current.get(chunkIdx) || canvasRef.current;
-      if (targetCanvas) {
-        const dr = prepareChunk(chunkIdx, targetCanvas, false);
-        if (dr) {
-          drawIncrementalStrokeSegment(dr.ctx, l.stroke, prevIdx);
-        }
-      }
-    }
     l.lastRenderedIndex = nextIdx;
-  }, [prepareWet, prepareChunk]);
+  }, [prepareWet]);
 
   const drawWet = useCallback(() => {
     const l = live.current;
@@ -357,6 +389,66 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
     }
   }, [prepareWet, drawWetIncremental]);
 
+  const renderSingleChunk = useCallback(
+    (
+      chunkIdx: number,
+      canvas: HTMLCanvasElement,
+      allStrokes: ReadonlyArray<Stroke>,
+      lassoBounds: AABB | null,
+      excludedIds?: Set<string>,
+    ) => {
+      const r = prepareChunk(chunkIdx, canvas, true);
+      if (!r) return;
+      const { ctx, view } = r;
+      for (const s of allStrokes) {
+        if (excludedIds && excludedIds.has(s.id)) continue;
+        if (!intersects(cachedBounds(s), view)) continue;
+        drawStroke(ctx, s);
+      }
+      if (!excludedIds && lassoBounds && intersects(lassoBounds, view)) {
+        ctx.save();
+        ctx.setLineDash([5, 4]);
+        ctx.strokeStyle = '#6366f1';
+        ctx.lineWidth = 1.2;
+        ctx.strokeRect(
+          lassoBounds.minX - 6,
+          lassoBounds.minY - 6,
+          lassoBounds.maxX - lassoBounds.minX + 12,
+          lassoBounds.maxY - lassoBounds.minY + 12,
+        );
+        ctx.restore();
+      }
+    },
+    [prepareChunk],
+  );
+
+  const drawChunks = useCallback(
+    (chunkIndices: Iterable<number>, excludedIds?: Set<string>) => {
+      updateChunkCount();
+      const allStrokes = session.strokes.getAll();
+      const sel = useSessions.getState().sessions[session.id]?.lassoIds ?? [];
+      const b = sel.length ? session.strokes.boundsOf(sel) : null;
+
+      if (chunkCanvasesRef.current.size > 0) {
+        for (const chunkIdx of chunkIndices) {
+          const canvas = chunkCanvasesRef.current.get(chunkIdx);
+          if (!canvas) continue;
+          renderSingleChunk(chunkIdx, canvas, allStrokes, b, excludedIds);
+        }
+      } else if (canvasRef.current) {
+        for (const chunkIdx of chunkIndices) {
+          if (chunkIdx === 0) {
+            renderSingleChunk(0, canvasRef.current, allStrokes, b, excludedIds);
+            break;
+          }
+        }
+      }
+
+      drawWet();
+    },
+    [session, renderSingleChunk, drawWet, updateChunkCount],
+  );
+
   const draw = useCallback(
     (excludedIds?: Set<string>) => {
       updateChunkCount();
@@ -366,54 +458,26 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
 
       if (chunkCanvasesRef.current.size > 0) {
         chunkCanvasesRef.current.forEach((canvas, chunkIdx) => {
-          const r = prepareChunk(chunkIdx, canvas, true);
-          if (!r) return;
-          const { ctx, view } = r;
-          for (const s of allStrokes) {
-            if (excludedIds && excludedIds.has(s.id)) continue;
-            if (!intersects(cachedBounds(s), view)) continue;
-            drawStroke(ctx, s);
-          }
-          if (!excludedIds && b && intersects(b, view)) {
-            ctx.save();
-            ctx.setLineDash([5, 4]);
-            ctx.strokeStyle = '#6366f1';
-            ctx.lineWidth = 1.2;
-            ctx.strokeRect(b.minX - 6, b.minY - 6, b.maxX - b.minX + 12, b.maxY - b.minY + 12);
-            ctx.restore();
-          }
+          renderSingleChunk(chunkIdx, canvas, allStrokes, b, excludedIds);
         });
       } else if (canvasRef.current) {
-        const r = prepareChunk(0, canvasRef.current, true);
-        if (r) {
-          const { ctx, view } = r;
-          for (const s of allStrokes) {
-            if (excludedIds && excludedIds.has(s.id)) continue;
-            if (!intersects(cachedBounds(s), view)) continue;
-            drawStroke(ctx, s);
-          }
-          if (!excludedIds && b && intersects(b, view)) {
-            ctx.save();
-            ctx.setLineDash([5, 4]);
-            ctx.strokeStyle = '#6366f1';
-            ctx.lineWidth = 1.2;
-            ctx.strokeRect(b.minX - 6, b.minY - 6, b.maxX - b.minX + 12, b.maxY - b.minY + 12);
-            ctx.restore();
-          }
-        }
+        renderSingleChunk(0, canvasRef.current, allStrokes, b, excludedIds);
       }
 
       // 같은 프레임에서 wet 레이어도 갱신 → 펜을 뗄 때 dry 전환 깜빡임 없음
       drawWet();
     },
-    [session, prepareChunk, drawWet, updateChunkCount],
+    [session, renderSingleChunk, drawWet, updateChunkCount],
   );
 
   const requestDraw = useCallback(() => {
     cancelAnimationFrame(frame.current);
     cancelAnimationFrame(wetFrame.current);
     wetFrame.current = 0;
-    frame.current = requestAnimationFrame(() => draw());
+    frame.current = requestAnimationFrame(() => {
+      frame.current = 0;
+      draw();
+    });
   }, [draw]);
 
   /** 필기 중에는 wet 레이어만 다시 그린다 (확정 스트로크 전체 재렌더 없음) */
@@ -425,11 +489,11 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
     });
   }, [drawWet]);
 
-  // 1. 외부 스트로크 변경(Undo/Redo, 다른 모듈의 획 갱신) 구독: 필기 중이 아닐 때만 Committed Canvas 재렌더
+  // 1. 외부 스트로크 변경(Undo/Redo, 다른 모듈의 획 갱신) 구독: 필기·지우기 드래그 중이 아닐 때만 정적 캔버스 재렌더
   useEffect(() => {
     const unsubscribe = session.strokes.subscribe(() => {
-      // 펜 필기 중(live kind === 'draw')에는 실시간 획을 방해하지 않음
-      if (live.current !== null && live.current.kind === 'draw') return;
+      // 펜 필기/지우개 드래그 중에는 실시간 활성 획·지우기 마스크를 방해하지 않음
+      if (live.current !== null && (live.current.kind === 'draw' || live.current.kind === 'erase')) return;
       const allStrokes = session.strokes.getAll();
       const latestId = allStrokes.length > 0 ? allStrokes[allStrokes.length - 1].id : null;
       if (
@@ -495,20 +559,30 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
     ro?.observe(viewport);
     const pageEl = session.pageEl ?? viewport.querySelector<HTMLElement>('.note-page');
     if (pageEl) ro?.observe(pageEl);
+    let scrollRaf = 0;
+    const onScrollVirtualize = () => {
+      if (scrollRaf) return;
+      scrollRaf = requestAnimationFrame(() => {
+        scrollRaf = 0;
+        updateChunkCount();
+      });
+    };
     updateChunkCount();
-    // [핵심] 캔버스는 pageEl 내부(position: absolute; inset: 0)에 결합되어 브라우저 하드웨어 컴포지터에서
-    // 페이지와 1:1 동시 스크롤되므로, 스크롤 시 JS clearRect/translate 재렌더링(onScroll)을 수행하지 않는다.
+    // 뷰포트 스크롤 시 가시 영역 ±1 청크 윈도우가 바뀔 때만 가상화 범위를 RAF로 갱신
+    viewport.addEventListener('scroll', onScrollVirtualize, { passive: true });
     window.addEventListener('resize', requestDraw);
     window.addEventListener('orientationchange', onOrientationChange);
     window.visualViewport?.addEventListener('resize', requestDraw);
     return () => {
+      cancelAnimationFrame(scrollRaf);
       if (orientationTimer) clearTimeout(orientationTimer);
       ro?.disconnect();
+      viewport.removeEventListener('scroll', onScrollVirtualize);
       window.removeEventListener('resize', requestDraw);
       window.removeEventListener('orientationchange', onOrientationChange);
       window.visualViewport?.removeEventListener('resize', requestDraw);
     };
-  }, [viewportRef, session, requestDraw]);
+  }, [viewportRef, session, requestDraw, updateChunkCount]);
 
   // ---------- 입력 처리 ----------
   useEffect(() => {
@@ -518,10 +592,37 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
     let moveRaf = 0;
     const palmState: PalmRejectionState = { isPenDrawing: false, lastPenTimestamp: 0 };
     const activeTouchIds = new Set<number>();
+    let gestureLayout: {
+      scrollLeft: number;
+      scrollTop: number;
+      zoom: number;
+      originX: number;
+      originY: number;
+    } | null = null;
 
     const toPage = (e: PointerEvent): Point => {
       const z = session.ui.zoom || 1;
-      return clientPointToPageLocal(e.clientX, e.clientY, session.pageEl!, viewport, z);
+      const sl = viewport.scrollLeft;
+      const st = viewport.scrollTop;
+      if (
+        gestureLayout &&
+        gestureLayout.zoom === z &&
+        gestureLayout.scrollLeft === sl &&
+        gestureLayout.scrollTop === st
+      ) {
+        return {
+          x: gestureLayout.originX + e.clientX / z,
+          y: gestureLayout.originY + e.clientY / z,
+        };
+      }
+      const origin = clientPointToPageLocal(0, 0, session.pageEl!, viewport, z);
+      if (live.current !== null) {
+        gestureLayout = { scrollLeft: sl, scrollTop: st, zoom: z, originX: origin.x, originY: origin.y };
+      }
+      return {
+        x: origin.x + e.clientX / z,
+        y: origin.y + e.clientY / z,
+      };
     };
     const cancelLongPress = () => {
       if (longPress) clearTimeout(longPress.timer);
@@ -536,12 +637,16 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
       return isStylusPointer(e) || (e.pointerType === 'mouse' && s.mouseDraw && e.button === 0);
     };
 
-    const handleEraserMove = (x: number, y: number, radius = useSettings.getState().eraserSize) => {
+    const handleEraserPoints = (points: Point[], radius = useSettings.getState().eraserSize) => {
       const l = live.current;
-      if (l?.kind !== 'erase') return;
-      const { removedIds, commandId } = session.strokes.eraseAt(x, y, radius, l.commandId);
+      if (l?.kind !== 'erase' || points.length === 0) return;
+      const { removedIds, removedStrokes, commandId } = session.strokes.erasePoints(
+        points,
+        radius,
+        l.commandId,
+      );
       l.commandId = commandId;
-      if (removedIds.length > 0) {
+      if (removedStrokes.length > 0) {
         if (session.ui.lassoIds.length > 0) {
           const removedSet = new Set(removedIds);
           const nextLasso = session.ui.lassoIds.filter((id) => !removedSet.has(id));
@@ -549,7 +654,22 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
             session.patch({ lassoIds: nextLasso });
           }
         }
-        requestDraw();
+        // 드래그 중에는 전체 청크를 재구성하지 않고 destination-out 마스크로 삭제된 획만 즉각 소거
+        const pad = 32;
+        for (const s of removedStrokes) {
+          const b = cachedBounds(s);
+          const startChunk = Math.max(0, Math.floor((b.minY - pad) / CHUNK_HEIGHT));
+          const endChunk = Math.max(startChunk, Math.floor((b.maxY + pad) / CHUNK_HEIGHT));
+          for (let c = startChunk; c <= endChunk; c++) {
+            dirtyEraseChunks.current.add(c);
+            const chunkCanvas = chunkCanvasesRef.current.get(c) || (c === 0 ? canvasRef.current : null);
+            if (!chunkCanvas) continue;
+            const cr = prepareChunk(c, chunkCanvas, false);
+            if (cr) {
+              eraseStrokeMask(cr.ctx, s);
+            }
+          }
+        }
       }
     };
 
@@ -557,6 +677,7 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
       if (!session.pageEl) return;
       const target = e.target as HTMLElement | null;
       if (target?.closest?.('[data-overlay]')) return; // 핀/말풍선/액션바
+      gestureLayout = null;
 
       // 펜이 이미 용지 내부에서 필기 중일 때 들어온 손바닥 터치는 용지 안팎 무관하게 즉시 차단
       if (e.pointerType === 'touch') {
@@ -671,8 +792,9 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
         }
         return;
       } else if (effectiveTool === 'eraser') {
+        dirtyEraseChunks.current.clear();
         live.current = { kind: 'erase', pointerId: e.pointerId, commandId: undefined, trail: [p] };
-        handleEraserMove(p.x, p.y, settings.eraserSize);
+        handleEraserPoints([p], settings.eraserSize);
         // 지우개가 페이지에 닿았을 때 삭제된 획이 없으면 Committed Canvas 전체 재렌더를 호출하지 않고 지우개 커서(wet)만 갱신
         requestWet();
         return;
@@ -739,8 +861,8 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
           const p = toPage(pe);
           return [p.x, p.y, normalizePenPressure(pe.pressure, pe.pointerType)] as StrokePoint;
         });
-        // pointermove 중에는 clearRect 를 호출하지 않고 신규 샘플 구간만 증분(Incremental) 드로잉한다
-        drawWetIncremental();
+        // 좌표는 useRef(l.stroke.points)에 무상태 수집하고 실제 드로잉은 requestAnimationFrame으로 배칭
+        requestWet();
         return;
       } else if (l.kind === 'lasso') {
         for (const ce of list) l.poly.push(toPage(ce));
@@ -755,11 +877,13 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
         return;
       } else if (l.kind === 'erase') {
         const radius = useSettings.getState().eraserSize;
+        const pts: Point[] = [];
         for (const ce of list) {
           const p = toPage(ce);
           l.trail.push(p);
-          handleEraserMove(p.x, p.y, radius);
+          pts.push(p);
         }
+        handleEraserPoints(pts, radius);
       } else if (l.kind === 'move') {
         const p = toPage(e);
         const dx = p.x - l.start.x;
@@ -793,6 +917,7 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
       if (!l) return;
       if (l.pointerId !== e.pointerId && !isStylusPointer(e)) return;
       live.current = null;
+      gestureLayout = null;
       predicted.current = [];
       viewport.classList.remove('is-inking');
       // 필기 종료 즉시 뷰포트 터치 제스처·스크롤 즉각 복원
@@ -935,6 +1060,14 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
         if (wetRef.current) {
           prepare(wetRef.current, true);
         }
+        if (dirtyEraseChunks.current.size > 0) {
+          const chunksToRestore = Array.from(dirtyEraseChunks.current);
+          dirtyEraseChunks.current.clear();
+          const allStrokes = session.strokes.getAll();
+          lastBakedStrokeCount.current = allStrokes.length;
+          lastBakedStrokeId.current = allStrokes.length > 0 ? allStrokes[allStrokes.length - 1].id : null;
+          drawChunks(chunksToRestore);
+        }
         return;
       } else if (l.kind === 'lasso') {
         clearInteraction();
@@ -999,6 +1132,10 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
     return () => {
       cancelLongPress();
       cancelAnimationFrame(moveRaf);
+      cancelAnimationFrame(frame.current);
+      frame.current = 0;
+      cancelAnimationFrame(wetFrame.current);
+      wetFrame.current = 0;
       viewport.classList.remove('is-lasso-dragging');
       viewport.removeEventListener('pointerdown', onPointerDown, { capture: true });
       viewport.removeEventListener('pointermove', onPointerMove, { capture: true });
@@ -1009,7 +1146,7 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
       window.removeEventListener('pointerup', onUp);
       window.removeEventListener('pointercancel', onCancel);
     };
-  }, [session, viewportRef, prepare, prepareChunk, prepareWet, drawWetIncremental, requestDraw, requestWet, draw, drawMoveInteraction]);
+  }, [session, viewportRef, prepare, prepareChunk, prepareWet, drawWetIncremental, requestDraw, requestWet, draw, drawChunks, drawMoveInteraction]);
 
   const initializedChunkCanvases = useRef<WeakSet<HTMLCanvasElement>>(new WeakSet());
   const chunkRefCallbacks = useRef<Map<number, (el: HTMLCanvasElement | null) => void>>(new Map());
@@ -1019,6 +1156,7 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
       if (!cb) {
         cb = (el: HTMLCanvasElement | null) => {
           if (el) {
+            mountedCanvasElsRef.current.set(index, el);
             chunkCanvasesRef.current.set(index, el);
             if (index === 0) {
               (canvasRef as React.MutableRefObject<HTMLCanvasElement | null>).current = el;
@@ -1031,8 +1169,16 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
               }
             }
           } else {
+            const prevEl = mountedCanvasElsRef.current.get(index);
+            if (prevEl) {
+              // 화면 밖으로 벗어난 가상화 청크 캔버스의 GPU/2D 컨텍스트 메모리 즉시 해제
+              prevEl.width = 0;
+              prevEl.height = 0;
+              initializedChunkCanvases.current.delete(prevEl);
+              mountedCanvasElsRef.current.delete(index);
+            }
             chunkCanvasesRef.current.delete(index);
-            if (index === 0 && canvasRef.current === el) {
+            if (index === 0) {
               (canvasRef as React.MutableRefObject<HTMLCanvasElement | null>).current = null;
             }
           }
@@ -1045,11 +1191,23 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
   );
 
   const currentDims = getPageDimensions();
-  const effectiveChunkCount = currentDims ? Math.max(1, Math.ceil(currentDims.pageH / CHUNK_HEIGHT)) : chunkCount;
+  const effectiveRange = currentDims
+    ? computeVisibleChunkRange(
+        currentDims.pageH,
+        currentDims.viewport.scrollTop,
+        currentDims.viewportHeight,
+        currentDims.z,
+      )
+    : chunkRange;
+
+  const visibleChunkIndices: number[] = [];
+  for (let i = effectiveRange.start; i <= effectiveRange.end; i++) {
+    visibleChunkIndices.push(i);
+  }
 
   return (
     <>
-      {Array.from({ length: effectiveChunkCount }, (_, i) => {
+      {visibleChunkIndices.map((i) => {
         const topY = i * CHUNK_HEIGHT;
         return (
           <canvas
