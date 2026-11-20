@@ -5,11 +5,14 @@ export interface ChatMsg {
   role: 'user' | 'assistant';
   content: string;
   model?: string;
+  requestedModel?: string;
+  usedFallback?: boolean;
   imageDataUrl?: string;
 }
 
 export type ChatStatus =
   | 'idle'
+  | 'queued'
   | 'connecting'
   | 'retrying'
   | 'fallback'
@@ -22,6 +25,10 @@ export interface StatusInfo {
   status: ChatStatus;
   message?: string;
   model?: string;
+  requestedModel?: string;
+  usedFallback?: boolean;
+  attempt?: number;
+  maxRetries?: number;
 }
 
 export interface AiChatState {

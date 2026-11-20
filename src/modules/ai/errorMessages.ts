@@ -8,6 +8,7 @@ export type GeminiErrorClassification =
   | 'fatal-request'
   | 'fatal-auth'
   | 'fatal-permission'
+  | 'fatal-safety'
   | 'timeout'
   | 'cancelled'
   | 'unknown';
@@ -146,7 +147,10 @@ export function classifyGeminiError(err: unknown): GeminiErrorClassification {
   if (/permission denied|free tier|billing/i.test(msg)) {
     return 'fatal-permission';
   }
-  if (/unavailable|high demand|overloaded|rate limit|quota/i.test(msg)) {
+  if (/safety|prohibited_content|recitation|blocklist|harm_category|안전 정책/i.test(msg)) {
+    return 'fatal-safety';
+  }
+  if (/unavailable|high demand|overloaded|rate limit|quota|failed to fetch|network\s*error|econnreset|etimedout|socket hang up/i.test(msg)) {
     return 'retryable';
   }
 
@@ -202,6 +206,8 @@ export function getUserFacingErrorMessage(err: unknown): string {
       return `요청한 모델을 사용할 수 없습니다${statusText}.`;
     case 'fatal-request':
       return `요청 형식이 올바르지 않습니다${statusText}.`;
+    case 'fatal-safety':
+      return '안전 정책에 의해 응답이 차단되었습니다. 표현을 수정한 뒤 다시 질문해주세요.';
     case 'timeout':
       return '서버 응답 시간이 초과되었습니다. 잠시 후 다시 시도해주세요.';
     case 'retryable':

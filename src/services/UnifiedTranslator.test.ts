@@ -202,6 +202,7 @@ describe('UnifiedTranslator (Hybrid Translation Engine)', () => {
         targetText: 'quantum mechanics',
         surroundingSentence: 'Quantum mechanics is a fundamental theory in physics.',
         apiKey: 'valid-key-but-offline',
+        retryDelayMs: 1,
       });
 
       expect(res.success).toBe(false);

@@ -7,8 +7,6 @@ import {
   buildAcademicSystemInstruction,
   CHUNK_GAP_TIMEOUT_MS,
   FIRST_CHUNK_TIMEOUT_MS,
-  GEMINI_FALLBACK_CHAIN,
-  GEMINI_FALLBACK_MODEL,
   GEMINI_PRIMARY_MODEL,
   GEMINI_TEMPERATURE,
   GEMINI_THINKING_CONFIG,
@@ -21,14 +19,18 @@ import {
   type GeminiTutorTarget,
 } from './constants';
 import {
-  AllModelsFailedError,
   EmptyStreamError,
   TimeoutError,
   classifyGeminiError,
   extractHttpStatus,
-  extractRetryDelayMs,
   sanitizeLogMessage,
 } from './errorMessages';
+import {
+  acquireGeminiQueueSlot,
+  callGeminiWithResilience,
+  getGeminiQueuePendingCount,
+  type GeminiResilienceStatus,
+} from '../../services/geminiResilience';
 
 export interface GeminiAttachmentPart {
   type: 'file';
@@ -106,11 +108,15 @@ export interface GeminiTutorRequest {
   /** 전체 요청 예산(ms) (기본값: TOTAL_REQUEST_BUDGET_MS = 90000) */
   totalBudgetMs?: number;
   /** 실제 스트리밍 응답을 개시한 모델 확정 콜백 */
-  onModelResolved?: (model: string) => void;
-  /** 재시도 시 UI 알림 콜백 (모델명, 시도 횟수, 대기 시간 ms) */
-  onRetry?: (model: string, attempt: number, delayMs: number) => void;
+  onModelResolved?: (model: string, info?: { requestedModel: string; usedFallback: boolean }) => void;
+  /** 재시도 시 UI 알림 콜백 (모델명, 시도 횟수, 대기 시간 ms, 다음 모델) */
+  onRetry?: (model: string, attempt: number, delayMs: number, nextModel?: string) => void;
   /** 폴백 전환 시 UI 알림 콜백 (이전 모델명, 전환될 모델명) */
   onFallback?: (fromModel: string, toModel: string) => void;
+  /** 통합 상태 변경 콜백 (큐 대기/재시도/폴백/스트리밍/완료/오류) */
+  onStatusChange?: (status: GeminiResilienceStatus) => void;
+  /** 직렬 큐 사용 여부 (기본 true) */
+  useQueue?: boolean;
 }
 
 /**
@@ -514,10 +520,10 @@ export async function probeStreamFirstChunk(
 }
 
 /**
- * Gemini 학술 튜터 스트리밍 호출 (GEMINIAIPANELNORESPONSE_FIX 명세 준수)
- * - 503(과부하), 429(속도제한), 타임아웃 오류 시 동일 모델에 대해 지수 백오프+Jitter로 최대 3회 재시도.
- * - 404 발생 시 즉시 대안 모델로 폴백. 400/401/403은 즉시 throw.
- * - 첫 청크 12초, 청크 간 20초, 전체 예산 90초 타임아웃 엄격 적용.
+ * Gemini 학술 튜터 스트리밍 호출 (단일 callGeminiWithResilience 레이어 통합)
+ * - 전역 직렬 큐로 동시 요청 RPM 충돌(429) 방지
+ * - 503/429/타임아웃 시 지수 백오프+지터로 최대 3회 재시도하며 경량 폴백 모델로 즉시 전환
+ * - 404 발생 시 즉시 대안 모델로 폴백. 400/401/403 및 안전 정책 차단은 즉시 throw
  */
 export async function* streamGeminiTutor(req: GeminiTutorRequest): AsyncGenerator<string> {
   const apiKey = await resolveGeminiApiKey(req.apiKey);
@@ -525,148 +531,112 @@ export async function* streamGeminiTutor(req: GeminiTutorRequest): AsyncGenerato
   const primaryModel = req.model?.trim() || GEMINI_PRIMARY_MODEL;
   const allowFallback = req.enableFallback !== false;
 
-  const candidateModels: string[] = [primaryModel];
-  if (allowFallback) {
-    for (const fallback of [GEMINI_FALLBACK_MODEL, ...GEMINI_FALLBACK_CHAIN]) {
-      if (!candidateModels.includes(fallback)) {
-        candidateModels.push(fallback);
-      }
-    }
-  }
-
-  const startTime = Date.now();
   const totalBudgetMs = req.totalBudgetMs ?? TOTAL_REQUEST_BUDGET_MS;
   const firstChunkTimeoutMs = req.firstChunkTimeoutMs ?? FIRST_CHUNK_TIMEOUT_MS;
   const chunkGapTimeoutMs = req.chunkGapTimeoutMs ?? CHUNK_GAP_TIMEOUT_MS;
-  const retryBaseDelayMs = req.retryDelayMs ?? RETRY_BASE_DELAY_MS;
+  const useQueue = req.useQueue !== false;
 
-  let probed: ProbedStream | null = null;
-  let lastError: unknown = null;
-  const triedModels: string[] = [];
-
-  for (let i = 0; i < candidateModels.length; i++) {
-    const model = candidateModels[i];
-    triedModels.push(model);
-    let modelSucceeded = false;
-
-    for (let attempt = 0; attempt < MAX_RETRY_ATTEMPTS; attempt++) {
-      if (req.signal?.aborted) return;
-      if (Date.now() - startTime >= totalBudgetMs) {
-        throw new TimeoutError('budget', `전체 요청 시간 상한(${totalBudgetMs}ms)을 초과했습니다.`);
-      }
-
-      try {
-        probed = await probeStreamFirstChunk(ai, req, model, firstChunkTimeoutMs);
-        lastError = null;
-        modelSucceeded = true;
-        req.onModelResolved?.(model);
-        break;
-      } catch (err) {
-        lastError = err;
-        console.error(
-          `[Gemini generateContentStream Error] model=${model} (attempt ${attempt + 1}/${MAX_RETRY_ATTEMPTS}):`,
-          sanitizeLogMessage(err instanceof Error ? err.message : String(err)),
-        );
-
-        const classification = classifyGeminiError(err);
-        if (classification === 'cancelled') {
-          return;
-        }
-
-        // 치명적 요청/인증/권한 에러는 재시도나 폴백 없이 즉시 중단
-        if (
-          classification === 'fatal-request' ||
-          classification === 'fatal-auth' ||
-          classification === 'fatal-permission'
-        ) {
-          throw err;
-        }
-
-        // 404 모델 미지원은 재시도 없이 즉시 다음 모델로 이동
-        if (classification === 'fatal-model') {
-          break;
-        }
-
-        // 503, 429, 타임아웃 등 재시도 가능 오류
-        if (attempt < MAX_RETRY_ATTEMPTS - 1) {
-          const customDelay = extractRetryDelayMs(err);
-          const actualDelay = await waitWithBackoffAndJitter(
-            attempt,
-            retryBaseDelayMs,
-            req.signal,
-            customDelay,
-          );
-          req.onRetry?.(model, attempt + 2, actualDelay);
-          continue;
-        }
-
-        // 이 모델의 재시도 횟수를 모두 소진함
-        break;
-      }
-    }
-
-    if (modelSucceeded) {
-      break;
-    }
-
-    const hasMoreCandidates = i < candidateModels.length - 1;
-    if (hasMoreCandidates) {
-      req.onFallback?.(model, candidateModels[i + 1]);
-      console.warn(
-        `[Gemini Model Fallback] ${model} failed, falling back to ${candidateModels[i + 1]}...`,
-      );
-    }
+  if (useQueue && getGeminiQueuePendingCount() > 0) {
+    req.onStatusChange?.({
+      phase: 'queued',
+      model: primaryModel,
+      requestedModel: primaryModel,
+      message: `이전 AI 요청 대기 중… (대기열 ${getGeminiQueuePendingCount()}건)`,
+    });
   }
 
-  if (!probed) {
-    throw new AllModelsFailedError(lastError, triedModels);
-  }
-
-  let accumulated = '';
-  const { iterator, firstResult } = probed;
+  const releaseQueue = useQueue ? await acquireGeminiQueueSlot(req.signal) : null;
 
   try {
-    if (!firstResult.done && firstResult.value) {
-      console.log('Chunk received:', firstResult.value);
-      const delta = extractChunkText(firstResult.value);
-      if (delta) {
-        accumulated += delta;
-        req.onChunk?.(delta, accumulated);
-        yield delta;
-      }
-    }
+    const resilienceRes = await callGeminiWithResilience<ProbedStream>(
+      (model) => probeStreamFirstChunk(ai, req, model, firstChunkTimeoutMs),
+      {
+        primaryModel,
+        enableFallback: allowFallback,
+        maxRetries: MAX_RETRY_ATTEMPTS,
+        retryDelayMs: req.retryDelayMs,
+        totalBudgetMs,
+        signal: req.signal,
+        useQueue: false, // 스트림 종료까지 외부에서 큐 슬롯 유지
+        label: `stream:${req.target ?? 'sidebar'}`,
+        onStatusChange: req.onStatusChange,
+        onRetry: req.onRetry,
+        onFallback: req.onFallback,
+        onModelResolved: (model, info) => {
+          req.onModelResolved?.(model, info);
+          req.onStatusChange?.({
+            phase: 'streaming',
+            model,
+            requestedModel: info.requestedModel,
+            usedFallback: info.usedFallback,
+            message: info.usedFallback
+              ? `경량 모델(${model})로 응답 중`
+              : `${model} 응답 중`,
+          });
+        },
+      },
+    );
 
-    while (!req.signal?.aborted) {
-      let nextResult: IteratorResult<GeminiStreamChunkLike>;
-      try {
-        nextResult = await withTimeout(iterator.next(), chunkGapTimeoutMs, req.signal, 'chunk-gap');
-      } catch (gapErr) {
-        if (gapErr instanceof TimeoutError && gapErr.stage === 'chunk-gap') {
-          console.warn('[Gemini Stream Gap Timeout] Response truncated by gap timeout');
-          const notice = '\n\n[알림: 응답이 중간에 끊어졌습니다]';
-          accumulated += notice;
-          req.onChunk?.(notice, accumulated);
-          yield notice;
-          break;
+    const probed = resilienceRes.value;
+    let accumulated = '';
+    const { iterator, firstResult } = probed;
+
+    try {
+      if (!firstResult.done && firstResult.value) {
+        console.log('Chunk received:', firstResult.value);
+        const delta = extractChunkText(firstResult.value);
+        if (delta) {
+          accumulated += delta;
+          req.onChunk?.(delta, accumulated);
+          yield delta;
         }
-        throw gapErr;
       }
 
-      if (nextResult.done) break;
-      console.log('Chunk received:', nextResult.value);
-      const delta = extractChunkText(nextResult.value);
-      if (delta) {
-        accumulated += delta;
-        req.onChunk?.(delta, accumulated);
-        yield delta;
+      while (!req.signal?.aborted) {
+        let nextResult: IteratorResult<GeminiStreamChunkLike>;
+        try {
+          nextResult = await withTimeout(iterator.next(), chunkGapTimeoutMs, req.signal, 'chunk-gap');
+        } catch (gapErr) {
+          if (gapErr instanceof TimeoutError && gapErr.stage === 'chunk-gap') {
+            console.warn('[Gemini Stream Gap Timeout] Response truncated by gap timeout');
+            const notice = '\n\n[알림: 응답이 중간에 끊어졌습니다]';
+            accumulated += notice;
+            req.onChunk?.(notice, accumulated);
+            yield notice;
+            break;
+          }
+          throw gapErr;
+        }
+
+        if (nextResult.done) break;
+        console.log('Chunk received:', nextResult.value);
+        const delta = extractChunkText(nextResult.value);
+        if (delta) {
+          accumulated += delta;
+          req.onChunk?.(delta, accumulated);
+          yield delta;
+        }
       }
+
+      req.onStatusChange?.({
+        phase: 'done',
+        model: resilienceRes.model,
+        requestedModel: resilienceRes.requestedModel,
+        usedFallback: resilienceRes.usedFallback,
+        message: resilienceRes.usedFallback ? `폴백 응답 (${resilienceRes.model})` : '완료',
+      });
+    } catch (streamErr) {
+      if (req.signal?.aborted || (streamErr instanceof DOMException && streamErr.name === 'AbortError')) {
+        return;
+      }
+      console.error(
+        '[Gemini Stream Iteration Error]:',
+        sanitizeLogMessage(streamErr instanceof Error ? streamErr.message : String(streamErr)),
+      );
+      throw streamErr;
     }
-  } catch (streamErr) {
-    if (req.signal?.aborted || (streamErr instanceof DOMException && streamErr.name === 'AbortError')) {
-      return;
-    }
-    console.error('[Gemini Stream Iteration Error]:', sanitizeLogMessage(streamErr instanceof Error ? streamErr.message : String(streamErr)));
-    throw streamErr;
+  } finally {
+    releaseQueue?.();
   }
 }
 

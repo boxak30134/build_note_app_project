@@ -151,6 +151,10 @@ export class UnifiedTranslator {
       surroundingSentence: req.surroundingSentence,
       geminiApiKey: resolvedKey,
       localMeaning: null,
+      model: req.model,
+      signal: req.signal,
+      retryDelayMs: req.retryDelayMs,
+      onStatusChange: req.onStatusChange,
     });
 
     if (friendlyRes.success && friendlyRes.translatedText) {
@@ -159,6 +163,9 @@ export class UnifiedTranslator {
         translatedText: friendlyRes.translatedText,
         source: friendlyRes.engine === 'gemini' ? 'google_api' : 'public_free',
         confidence: friendlyRes.confidence,
+        model: friendlyRes.model,
+        requestedModel: friendlyRes.requestedModel,
+        usedFallback: friendlyRes.usedFallback,
       };
     }
 
