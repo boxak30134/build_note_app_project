@@ -1,3 +1,5 @@
+import type { GeminiResilienceStatus } from '../services/geminiResilience';
+
 export type TranslationSource = 'local_seed' | 'local_learned' | 'google_api' | 'gemini_api' | 'public_free';
 
 export type TranslationErrorCode =
@@ -13,6 +15,10 @@ export interface UnifiedTranslationRequest {
   surroundingSentence: string;
   documentTags?: string[];
   apiKey?: string | null;
+  model?: string;
+  signal?: AbortSignal;
+  retryDelayMs?: number;
+  onStatusChange?: (status: GeminiResilienceStatus) => void;
 }
 
 export interface UnifiedTranslationResponse {
@@ -20,6 +26,9 @@ export interface UnifiedTranslationResponse {
   translatedText?: string;
   source?: TranslationSource;
   confidence: number; // 0 ~ 100 (%)
+  model?: string;
+  requestedModel?: string;
+  usedFallback?: boolean;
   matchedTrigger?: string;
   errorCode?: TranslationErrorCode;
   errorMessage?: string;

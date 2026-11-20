@@ -48,6 +48,7 @@ export function Bubble({ session, annotation, reference, onClose }: Props) {
   const [mode, setMode] = useState<'preview' | 'edit'>(() => (annotation.body.trim().length > 0 ? 'preview' : 'edit'));
   const questionRefs = useRef<Map<number, HTMLDivElement>>(new Map());
   const busy = useSessions((s) => Boolean(s.sessions[session.id]?.streamingAnnotationIds?.[annotation.id]));
+  const aiStatus = useSessions((s) => s.sessions[session.id]?.annotationAiStatus?.[annotation.id]);
   const blocks = useMemo(() => parseBubbleBlocks(annotation.body), [annotation.body]);
   const questionBlocks = useMemo(
     () => blocks.filter((b): b is Extract<typeof b, { kind: 'question' }> => b.kind === 'question'),
@@ -330,6 +331,15 @@ export function Bubble({ session, annotation, reference, onClose }: Props) {
                       <span className="rounded border border-slate-200 bg-white px-1.5 py-0.5 text-[10px] font-medium text-slate-500">
                         {block.providerLabel}
                       </span>
+                      {idx === blocks.length - 1 && aiStatus?.usedFallback && aiStatus.model && (
+                        <span
+                          data-testid="bubble-fallback-badge"
+                          className="rounded border border-amber-300 bg-amber-50 px-1.5 py-0.5 text-[9px] font-medium text-amber-800"
+                          title={`선택 모델(${aiStatus.requestedModel ?? '기본 모델'}) 혼잡으로 경량 모델(${aiStatus.model})로 응답했습니다.`}
+                        >
+                          폴백 · {aiStatus.model}
+                        </span>
+                      )}
                       {busy && idx === blocks.length - 1 && (
                         <Loader2 size={11} className="ml-auto animate-spin text-indigo-500" />
                       )}
@@ -337,7 +347,9 @@ export function Bubble({ session, annotation, reference, onClose }: Props) {
                     {block.content.trim() ? (
                       <BubbleMarkdown text={block.content} className="mt-1.5 text-[12.5px] text-slate-800" />
                     ) : busy && idx === blocks.length - 1 ? (
-                      <p className="mt-1.5 text-xs text-slate-400">답변을 작성하고 있습니다…</p>
+                      <p data-testid="bubble-ai-status-text" className="mt-1.5 text-xs text-indigo-600">
+                        {aiStatus?.message || '답변을 작성하고 있습니다…'}
+                      </p>
                     ) : null}
                   </div>
                 );

@@ -160,8 +160,8 @@ describe('Gemini 기반 학술 튜터 및 AI 연계 모듈 (CLAUDE.md §9)', () 
     expect(chunks.join('')).toBe('대안 모델 응답: $\\forall \\epsilon > 0$');
   });
 
-  it('503 오류 발생 시 동일 모델에 대해 지수 백오프로 재시도하고, 소진 시 Fallback 모델로 전환한다', async () => {
-    // 3.8-flash: 1회차 503, 2회차 성공
+  it('503 오류 발생 시 지수 백오프로 재시도하며 다음 경량 Fallback 모델로 자동 전환한다', async () => {
+    // 3.8-flash: 1회차 503 -> 2회차 fallback(gemini-3.6-flash) 성공
     const err503 = Object.assign(new Error('503 This model is currently experiencing high demand'), { status: 503 });
 
     const generateContentStream = vi
@@ -184,10 +184,10 @@ describe('Gemini 기반 학술 튜터 및 AI 연계 모듈 (CLAUDE.md §9)', () 
       chunks.push(chunk);
     }
 
-    // 동일 모델(gemini-3.8-flash)로 2번 호출되어 2번째에 성공해야 함
+    // 1차 gemini-3.8-flash 503 실패 -> 2차 폴백 모델(gemini-3.6-flash)로 즉시 전환해 성공
     expect(generateContentStream).toHaveBeenCalledTimes(2);
     expect(generateContentStream.mock.calls[0][0].model).toBe('gemini-3.8-flash');
-    expect(generateContentStream.mock.calls[1][0].model).toBe('gemini-3.8-flash');
+    expect(generateContentStream.mock.calls[1][0].model).toBe(GEMINI_FALLBACK_MODEL);
     expect(chunks.join('')).toBe('재시도 성공 응답');
   });
 

@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Settings } from 'lucide-react';
 import { unifiedTranslator } from '../services/UnifiedTranslator';
+import type { GeminiResilienceStatus } from '../services/geminiResilience';
 import type { UnifiedTranslationResponse } from '../types/unifiedTranslation';
 import { loadApiKey, saveApiKey, removeApiKey } from '../storage/secureStore';
 import { toast } from '../store/uiStore';
@@ -31,6 +32,8 @@ export const UnifiedTranslationButton: React.FC<Props> = ({
   const [showConfigModal, setShowConfigModal] = useState(false);
   const [errorNotice, setErrorNotice] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [resilienceStatus, setResilienceStatus] = useState<GeminiResilienceStatus | null>(null);
+  const [fallbackNotice, setFallbackNotice] = useState<{ model: string; requestedModel?: string } | null>(null);
 
   const openConfigModal = () => {
     setShowConfigModal(true);
@@ -44,6 +47,8 @@ export const UnifiedTranslationButton: React.FC<Props> = ({
 
   const handleTranslate = async () => {
     setErrorNotice(null);
+    setFallbackNotice(null);
+    setResilienceStatus(null);
     setLoading(true);
 
     // 사용자의 Gemini Key가 있으면 Tier 2 우선 사용, 없으면 Tier 3 Zero-Config 공개 무키 번역 자동 사용
@@ -54,11 +59,16 @@ export const UnifiedTranslationButton: React.FC<Props> = ({
       surroundingSentence,
       documentTags,
       apiKey: geminiKey,
+      onStatusChange: (status) => setResilienceStatus(status),
     });
 
     setLoading(false);
+    setResilienceStatus(null);
 
     if (res.success && res.translatedText) {
+      if (res.usedFallback && res.model) {
+        setFallbackNotice({ model: res.model, requestedModel: res.requestedModel });
+      }
       const isSingle = !selectedText.trim().includes(' ') && !selectedText.trim().includes('\n');
       if (isSingle) {
         const rec = unifiedTranslator.createLearningRecord(
@@ -101,10 +111,30 @@ export const UnifiedTranslationButton: React.FC<Props> = ({
         onClick={handleTranslate}
         disabled={loading}
         className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-white bg-blue-600 hover:bg-blue-500 rounded shadow transition-colors disabled:opacity-50"
-        title="Zero-Config 즉시 번역 (Gemini 키 등록 시 정밀 학술 번역 적용)"
+        title={resilienceStatus?.message || 'Zero-Config 즉시 번역 (Gemini 키 등록 시 정밀 학술 번역 적용)'}
       >
-        <span>{loading ? '번역 중...' : '번역'}</span>
+        <span>
+          {loading
+            ? resilienceStatus?.phase === 'retrying' && resilienceStatus.attempt
+              ? `재시도 중... (${resilienceStatus.attempt}/${resilienceStatus.maxRetries ?? 3})`
+              : resilienceStatus?.phase === 'fallback'
+                ? '경량 모델 전환 중...'
+                : resilienceStatus?.phase === 'queued'
+                  ? '대기 중...'
+                  : '번역 중...'
+            : '번역'}
+        </span>
       </button>
+
+      {fallbackNotice && (
+        <span
+          data-testid="unified-translate-fallback-badge"
+          className="px-1.5 py-0.5 text-[10px] font-medium text-amber-800 bg-amber-50 border border-amber-300 rounded"
+          title={`기본 모델(${fallbackNotice.requestedModel ?? 'gemini-2.5-flash'}) 혼잡으로 ${fallbackNotice.model}로 자동 전환되어 번역되었습니다.`}
+        >
+          폴백 · {fallbackNotice.model}
+        </span>
+      )}
 
       <button
         type="button"

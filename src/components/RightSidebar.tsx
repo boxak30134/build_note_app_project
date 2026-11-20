@@ -515,7 +515,9 @@ function Chat({ connected, onConnect }: { connected: AiProviderId[]; onConnect: 
 
     const controller = aiChatAbortManager.create();
 
-    let resolvedModelName = provider === 'google' ? GEMINI_PRIMARY_MODEL : PROVIDER_LABEL[provider];
+    let resolvedModelName: string | undefined = provider === 'google' ? GEMINI_PRIMARY_MODEL : PROVIDER_LABEL[provider];
+    let resolvedRequestedModel: string | undefined;
+    let resolvedUsedFallback = false;
     setStatusInfo({
       status: 'connecting',
       message: `연결 중… (${resolvedModelName})`,
@@ -540,6 +542,7 @@ function Chat({ connected, onConnect }: { connected: AiProviderId[]; onConnect: 
       let acc = '';
       if (provider === 'google') {
         const modelId = useSettings.getState().aiModels.google || GEMINI_PRIMARY_MODEL;
+        resolvedRequestedModel = modelId;
         for await (const delta of streamGeminiTutor({
           messages,
           systemContext,
@@ -547,33 +550,46 @@ function Chat({ connected, onConnect }: { connected: AiProviderId[]; onConnect: 
           maxOutputTokens: SIDEBAR_MAX_OUTPUT_TOKENS,
           model: modelId,
           signal: controller.signal,
-          onModelResolved: (model) => {
+          onStatusChange: (st) => {
+            if (st.model) resolvedModelName = st.model;
+            if (st.requestedModel) resolvedRequestedModel = st.requestedModel;
+            if (typeof st.usedFallback === 'boolean') resolvedUsedFallback = st.usedFallback;
+            setStatusInfo({
+              status: st.phase,
+              message: st.message,
+              model: st.model,
+              requestedModel: st.requestedModel,
+              usedFallback: st.usedFallback,
+              attempt: st.attempt,
+              maxRetries: st.maxRetries,
+            });
+          },
+          onModelResolved: (model, info) => {
             resolvedModelName = model;
-            setStatusInfo({
-              status: 'streaming',
-              message: `${model} 응답 중`,
-              model,
-            });
-          },
-          onRetry: (model, attempt, delayMs) => {
-            setStatusInfo({
-              status: 'retrying',
-              message: `서버 혼잡(503). ${Math.max(1, Math.round(delayMs / 1000))}초 후 재시도 (${attempt}/3)`,
-              model,
-            });
-          },
-          onFallback: (fromModel, toModel) => {
-            setStatusInfo({
-              status: 'fallback',
-              message: `${fromModel} 응답 없음. ${toModel}로 전환 중…`,
-              model: toModel,
-            });
+            if (info) {
+              resolvedRequestedModel = info.requestedModel;
+              resolvedUsedFallback = info.usedFallback;
+            }
           },
         })) {
           acc += delta;
-          setMsgs([...history, { role: 'assistant', content: acc, model: resolvedModelName }]);
+          setMsgs([
+            ...history,
+            {
+              role: 'assistant',
+              content: acc,
+              model: resolvedModelName,
+              requestedModel: resolvedRequestedModel,
+              usedFallback: resolvedUsedFallback,
+            },
+          ]);
         }
-        setStatusInfo({ status: 'done', model: resolvedModelName });
+        setStatusInfo({
+          status: 'done',
+          model: resolvedModelName,
+          requestedModel: resolvedRequestedModel,
+          usedFallback: resolvedUsedFallback,
+        });
       } else {
         for await (const delta of streamAi({
           provider,
@@ -654,9 +670,15 @@ function Chat({ connected, onConnect }: { connected: AiProviderId[]; onConnect: 
         </button>
       </div>
       {statusInfo.status !== 'idle' && statusInfo.status !== 'done' && (
-        <div className="flex items-center justify-between border-b border-indigo-100 bg-indigo-50/90 px-2.5 py-1 text-[11px] text-indigo-800">
+        <div
+          data-testid="ai-chat-status-banner"
+          className="flex items-center justify-between border-b border-indigo-100 bg-indigo-50/90 px-2.5 py-1 text-[11px] text-indigo-800"
+        >
           <div className="flex items-center gap-1.5 truncate">
-            {statusInfo.status === 'connecting' || statusInfo.status === 'retrying' || statusInfo.status === 'fallback' ? (
+            {statusInfo.status === 'queued' ||
+            statusInfo.status === 'connecting' ||
+            statusInfo.status === 'retrying' ||
+            statusInfo.status === 'fallback' ? (
               <Loader2 size={11} className="animate-spin text-indigo-600 shrink-0" />
             ) : null}
             <span className="truncate">{statusInfo.message}</span>
@@ -713,7 +735,18 @@ function Chat({ connected, onConnect }: { connected: AiProviderId[]; onConnect: 
               ''
             )}
             {m.role === 'assistant' && m.model && m.content && (
-              <div className="mt-1 text-[10px] text-slate-400 font-mono">{m.model}</div>
+              <div className="mt-1 flex items-center gap-1.5 text-[10px] text-slate-400 font-mono">
+                <span>{m.model}</span>
+                {m.usedFallback && (
+                  <span
+                    data-testid="ai-chat-fallback-badge"
+                    className="rounded border border-amber-300 bg-amber-50 px-1 py-0.5 font-sans text-[9px] font-medium text-amber-800"
+                    title={`선택 모델(${m.requestedModel ?? '기본 모델'}) 혼잡으로 경량 모델(${m.model})로 자동 전환되어 응답했습니다.`}
+                  >
+                    폴백 응답
+                  </span>
+                )}
+              </div>
             )}
           </div>
         ))}

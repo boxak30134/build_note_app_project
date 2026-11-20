@@ -3,6 +3,7 @@ import type { Annotation } from '../features/annotations/types';
 import type { NoteTextObject } from '../core/text/textObjects';
 import { createPage, DEFAULT_NOTE_ZOOM, type NotePage } from '../core/page/pageTypes';
 import type { LinkRecommendation } from '../services/offlineDocumentLinker';
+import type { GeminiResilienceStatus } from '../services/geminiResilience';
 
 export interface CitationResult {
   noteId: string;
@@ -32,6 +33,8 @@ export interface SessionUI {
   openAnnotationId: string | null;
   /** 백그라운드에서 AI 스트리밍 응답이 진행 중인 말풍선 ID 맵 */
   streamingAnnotationIds?: Record<string, boolean>;
+  /** 말풍선별 AI 재시도/폴백/완료 모델 상태 */
+  annotationAiStatus?: Record<string, GeminiResilienceStatus>;
   /** 페이지 앵커 기반 독립형 텍스트 객체 목록 및 현재 편집 중인 텍스트 객체 ID */
   textObjects: NoteTextObject[];
   editingTextObjectId: string | null;
@@ -59,6 +62,7 @@ const emptySession = (): SessionUI => ({
   annotations: [],
   openAnnotationId: null,
   streamingAnnotationIds: {},
+  annotationAiStatus: {},
   textObjects: [],
   editingTextObjectId: null,
   lassoIds: [],

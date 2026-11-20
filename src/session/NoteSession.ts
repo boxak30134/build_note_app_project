@@ -8,7 +8,13 @@ import { decodeText, UnencodableCharError } from '../core/codec/textCodec';
 import { validateImageFiles, sanitizeDocumentTitle } from '../core/files/validation';
 import { appendBubbleText, clampBubbleText, consumeAiTurn, MAX_BUBBLE_CHAR_LENGTH } from '../core/bubble/limits';
 import { dataUrlToBase64, PROVIDER_LABEL, streamAi } from '../ai/aiClient';
-import { BUBBLE_MAX_OUTPUT_TOKENS, GEMINI_PRIMARY_MODEL, streamGeminiTutor } from '../modules/ai';
+import {
+  BUBBLE_MAX_OUTPUT_TOKENS,
+  GEMINI_PRIMARY_MODEL,
+  getUserFacingErrorMessage,
+  streamGeminiTutor,
+} from '../modules/ai';
+import type { GeminiResilienceStatus } from '../services/geminiResilience';
 import { renderPageStrokesToDataUrl, renderStrokesToDataUrl } from '../canvas/render';
 import { plainTextOf } from '../core/doc/blocks';
 import { buildExtensions, markdownToJson, preprocessMarkdownEntities, sanitizeMarkdownDocEntities } from '../editor/extensions';
@@ -1206,6 +1212,15 @@ export class NoteSession {
     });
   }
 
+  private setAnnotationAiStatus(id: string, status: GeminiResilienceStatus | null) {
+    this.patch((s) => {
+      const next = { ...(s.annotationAiStatus ?? {}) };
+      if (status) next[id] = status;
+      else delete next[id];
+      return { annotationAiStatus: next };
+    });
+  }
+
   abortAnnotationAi(id: string) {
     const controller = this.bubbleAiControllers.get(id);
     if (controller) {
@@ -1215,6 +1230,7 @@ export class NoteSession {
     if (this.ui.streamingAnnotationIds?.[id]) {
       this.setAnnotationStreaming(id, false);
     }
+    this.setAnnotationAiStatus(id, null);
   }
 
   /**
@@ -1264,6 +1280,10 @@ export class NoteSession {
       turns: [...annotation.turns, { question: q, provider, at: Date.now() }],
     });
     this.setAnnotationStreaming(annotationId, true);
+    this.setAnnotationAiStatus(annotationId, {
+      phase: 'connecting',
+      message: 'AI 연결 중…',
+    });
 
     const separator = annotation.body.trim() ? '\n\n---\n\n' : '';
     const header = `${separator}**Q.** ${q}\n**A(${PROVIDER_LABEL[provider]}).** `;
@@ -1286,6 +1306,11 @@ export class NoteSession {
                 maxOutputTokens: BUBBLE_MAX_OUTPUT_TOKENS,
                 model: useSettings.getState().aiModels.google || GEMINI_PRIMARY_MODEL,
                 signal: controller.signal,
+                onStatusChange: (status) => {
+                  if (!controller.signal.aborted && !this.editor.isDestroyed) {
+                    this.setAnnotationAiStatus(annotationId, status);
+                  }
+                },
               })
             : streamAi({
                 provider,
@@ -1312,7 +1337,13 @@ export class NoteSession {
       return true;
     } catch (err) {
       if (!controller.signal.aborted && !this.editor.isDestroyed) {
-        const errMsg = (err as Error)?.message || 'AI 호출 중 알 수 없는 오류가 발생했습니다.';
+        const errMsg = provider === 'google'
+          ? getUserFacingErrorMessage(err)
+          : (err as Error)?.message || 'AI 호출 중 알 수 없는 오류가 발생했습니다.';
+        this.setAnnotationAiStatus(annotationId, {
+          phase: 'error',
+          message: errMsg,
+        });
         toast.error(errMsg, 'AI 호출 실패');
         this.updateAnnotation(annotationId, { body: appendBubbleText(text, `(⚠️ 오류: ${errMsg})`).text });
       }

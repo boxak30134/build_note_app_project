@@ -5,6 +5,9 @@
  * Tier 3: 클라이언트 공개 무키(No-Key) 엔드포인트 (Zero-Config, 기본 모드)
  */
 
+import { callGeminiWithResilience, type GeminiResilienceStatus } from './geminiResilience';
+import { getUserFacingErrorMessage } from '../modules/ai/errorMessages';
+
 export type TranslationEngine = 'local' | 'gemini' | 'public_free';
 
 export interface FriendlyTranslationResult {
@@ -12,7 +15,17 @@ export interface FriendlyTranslationResult {
   translatedText?: string;
   engine: TranslationEngine;
   confidence: number;
+  model?: string;
+  requestedModel?: string;
+  usedFallback?: boolean;
   errorMessage?: string;
+}
+
+export interface GeminiTranslationCallOptions {
+  model?: string;
+  signal?: AbortSignal;
+  retryDelayMs?: number;
+  onStatusChange?: (status: GeminiResilienceStatus) => void;
 }
 
 /**
@@ -36,16 +49,16 @@ export async function translateViaPublicEndpoint(text: string): Promise<string> 
 }
 
 /**
- * 2. Google AI Studio (Gemini Flash) API 호출 (카드 불필요 무료 키)
+ * 2. Google AI Studio (Gemini Flash) API 호출 — 단일 callGeminiWithResilience 레이어 통과
+ * - 직렬 큐 + 503/429 지수 백오프 재시도 + 경량 모델(gemini-2.5-flash -> gemini-2.5-flash-lite) 자동 폴백 적용
  */
-export async function translateViaGemini(
+export async function translateViaGeminiWithMeta(
   text: string,
   apiKey: string,
-  contextSentence?: string
-): Promise<string> {
+  contextSentence?: string,
+  options: GeminiTranslationCallOptions = {},
+): Promise<{ translatedText: string; model: string; requestedModel: string; usedFallback: boolean }> {
   const cleanKey = apiKey.trim();
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${encodeURIComponent(cleanKey)}`;
-
   const prompt = `You are a professional academic translator specializing in mathematics and computer science.
 Translate the following English text to Korean accurately, maintaining academic terminology (e.g., ring -> 환, field -> 체).
 Surrounding Context: "${contextSentence || ''}"
@@ -53,31 +66,71 @@ Text to translate: "${text}"
 
 Output ONLY the translated Korean text without explanation or markdown quotes.`;
 
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: {
-        temperature: 0.1,
-        maxOutputTokens: 200,
-      },
-    }),
-  });
+  const res = await callGeminiWithResilience<string>(
+    async (model) => {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(cleanKey)}`;
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: options.signal,
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: {
+            temperature: 0.1,
+            maxOutputTokens: 200,
+          },
+        }),
+      });
 
-  if (!response.ok) {
-    const errData = await response.json().catch(() => ({}));
-    const msg = errData.error?.message || `HTTP ${response.status}`;
-    if (response.status === 400 || response.status === 403) {
-      throw new Error(`Gemini 키 오류: ${msg}`);
-    }
-    throw new Error(`Gemini 번역 실패: ${msg}`);
-  }
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        const msg = errData.error?.message || `HTTP ${response.status}`;
+        const err = Object.assign(
+          new Error(
+            response.status === 400 || response.status === 401 || response.status === 403
+              ? `Gemini 키 오류 (${response.status}): ${msg}`
+              : `Gemini 번역 실패 (${response.status}): ${msg}`,
+          ),
+          { status: response.status },
+        );
+        throw err;
+      }
 
-  const data = await response.json();
-  const candidate = data.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!candidate) throw new Error('번역 결과를 생성하지 못했습니다.');
-  return candidate.trim();
+      const data = await response.json();
+      const finishReason = data?.candidates?.[0]?.finishReason;
+      if (finishReason === 'SAFETY' || finishReason === 'PROHIBITED_CONTENT' || finishReason === 'RECITATION') {
+        throw new Error(`SAFETY: 안전 정책에 의해 번역이 차단되었습니다 (${finishReason}).`);
+      }
+      const candidate = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (!candidate) throw new Error('번역 결과를 생성하지 못했습니다.');
+      return candidate.trim();
+    },
+    {
+      primaryModel: options.model || 'gemini-2.5-flash',
+      enableFallback: true,
+      retryDelayMs: options.retryDelayMs,
+      signal: options.signal,
+      label: 'translate',
+      onStatusChange: options.onStatusChange,
+    },
+  );
+
+  return {
+    translatedText: res.value,
+    model: res.model,
+    requestedModel: res.requestedModel,
+    usedFallback: res.usedFallback,
+  };
+}
+
+export async function translateViaGemini(
+  text: string,
+  apiKey: string,
+  contextSentence?: string,
+  options?: GeminiTranslationCallOptions,
+): Promise<string> {
+  const res = await translateViaGeminiWithMeta(text, apiKey, contextSentence, options);
+  return res.translatedText;
 }
 
 /**
@@ -88,11 +141,19 @@ export async function executeFriendlyTranslation({
   surroundingSentence,
   geminiApiKey,
   localMeaning,
+  model,
+  signal,
+  retryDelayMs,
+  onStatusChange,
 }: {
   text: string;
   surroundingSentence: string;
   geminiApiKey?: string | null;
   localMeaning?: string | null;
+  model?: string;
+  signal?: AbortSignal;
+  retryDelayMs?: number;
+  onStatusChange?: (status: GeminiResilienceStatus) => void;
 }): Promise<FriendlyTranslationResult> {
   const trimmed = text.trim();
   if (!trimmed) {
@@ -114,19 +175,43 @@ export async function executeFriendlyTranslation({
     };
   }
 
-  // Tier 2: 사용자가 등록한 Gemini 키가 있는 경우 우선 사용
+  // Tier 2: 사용자가 등록한 Gemini 키가 있는 경우 단일 회복탄력성 레이어 사용
   if (geminiApiKey && geminiApiKey.trim() !== '') {
     try {
-      const result = await translateViaGemini(trimmed, geminiApiKey, surroundingSentence);
+      const geminiRes = await translateViaGeminiWithMeta(trimmed, geminiApiKey, surroundingSentence, {
+        model,
+        signal,
+        retryDelayMs,
+        onStatusChange,
+      });
+      onStatusChange?.({
+        phase: 'done',
+        model: geminiRes.model,
+        requestedModel: geminiRes.requestedModel,
+        usedFallback: geminiRes.usedFallback,
+        message: geminiRes.usedFallback ? `폴백 응답 (${geminiRes.model})` : '완료',
+      });
       return {
         success: true,
-        translatedText: result,
+        translatedText: geminiRes.translatedText,
         engine: 'gemini',
         confidence: 95,
+        model: geminiRes.model,
+        requestedModel: geminiRes.requestedModel,
+        usedFallback: geminiRes.usedFallback,
       };
-    } catch (err: any) {
-      console.warn('Gemini 번역 실패, 기본 공개 엔진으로 자동 폴백합니다:', err.message);
-      // Gemini 키 에러 발생 시 사용자 작업이 중단되지 않도록 Tier 3로 자동 폴백
+    } catch (err: unknown) {
+      if (signal?.aborted) {
+        return {
+          success: false,
+          engine: 'gemini',
+          confidence: 0,
+          errorMessage: '번역이 취소되었습니다.',
+        };
+      }
+      const friendlyErr = getUserFacingErrorMessage(err);
+      console.warn('Gemini 번역 실패, 기본 공개 엔진으로 자동 폴백합니다:', friendlyErr);
+      // Gemini 키/서버 에러 발생 시 사용자 작업이 중단되지 않도록 Tier 3로 자동 폴백
     }
   }
 
