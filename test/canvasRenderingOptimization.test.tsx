@@ -237,8 +237,15 @@ describe('REQ_canvas_rendering_optimization: 2-레이어 분리 · ±1 청크 �
 
     const committed = makeMockCtx();
     const wet = makeMockCtx();
-    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(function (this: HTMLCanvasElement) {
-      if (this.dataset.testid === 'ink-canvas-wet') return wet.ctx as never;
+    const wetGetContextArgs: unknown[][] = [];
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(function (
+      this: HTMLCanvasElement,
+      ...args: unknown[]
+    ) {
+      if (this.dataset.testid === 'ink-canvas-wet') {
+        wetGetContextArgs.push(args);
+        return wet.ctx as never;
+      }
       return committed.ctx as never;
     });
 
@@ -288,6 +295,9 @@ describe('REQ_canvas_rendering_optimization: 2-레이어 분리 · ±1 청크 �
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
     });
 
+    // Active Layer(wet)가 desynchronized:true 누락 합성 버그 없이 표준 2D 컨텍스트로 즉시 화면에 커밋되어야 함
+    expect(wetGetContextArgs.length).toBeGreaterThan(0);
+    expect(wetGetContextArgs.every((args) => args.length === 1 && args[0] === '2d')).toBe(true);
     expect(wet.ctx.stroke).toHaveBeenCalled();
     expect(wet.ctx.clearRect).not.toHaveBeenCalled();
     expect(committed.ctx.stroke).not.toHaveBeenCalled();

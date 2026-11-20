@@ -20,7 +20,6 @@ import { cachedBounds, drawIncrementalStrokeSegment, drawStroke, eraseStrokeMask
 import {
   appendStrokePoint,
   coalescedEventsOf,
-  getLowLatencyContext,
   getStandardContext,
   predictedEventsOf,
 } from './lowLatency';
@@ -90,12 +89,12 @@ export function computeVisibleChunkRange(
 /**
  * [Layer 2] 2계층 더블 버퍼링 투명 벡터 캔버스:
  * - Static Cache Layer (`canvasRef` / `chunkCanvasesRef`): 확정된 누적 필기 전용 (가시 영역 ±1 청크만 마운트).
- * - Active Stroke Layer (`wetRef`, `desynchronized: true`): 현재 진행 중인 단일 활성 획 전용 저지연 캔버스.
+ * - Active Stroke Layer (`wetRef`, 표준 2D 컴포지터 동기화): 현재 진행 중인 단일 활성 획 전용 캔버스.
  */
 export function InkCanvas({ session, viewportRef, active }: Props) {
   /** [Layer 1] Static Cache Canvas (Dry ink): 확정된 누적 필기 보관용 정적 비트맵 버퍼 */
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  /** [Layer 2] Active Canvas (Wet ink): 진행 중인 단일 펜 필기 전용 저지연(desynchronized) 캔버스 */
+  /** [Layer 2] Active Canvas (Wet ink): 진행 중인 단일 펜 필기 전용 캔버스 */
   const wetRef = useRef<HTMLCanvasElement>(null);
   /** [Layer 3] Interaction Overlay: 올가미(Lasso) 실시간 점선/반투명 면 전용 표준 더블 버퍼링 캔버스 */
   const interactionRef = useRef<HTMLCanvasElement>(null);
@@ -218,13 +217,13 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
       const canvas = wetRef.current;
       const dims = getPageDimensions();
       if (!canvas || !dims) return null;
-      const { pageW, pageH, dpr, viewport } = dims;
+      const { pageW, pageH, dpr, z, viewport } = dims;
 
       let wetTop = 0;
       let wetHeight = pageH;
       if (pageH > CHUNK_HEIGHT * 2) {
-        const vTop = viewport.scrollTop;
-        wetTop = Math.max(0, Math.floor(vTop / CHUNK_HEIGHT) * CHUNK_HEIGHT);
+        const vTopPage = viewport.scrollTop / (z > 0 ? z : 1);
+        wetTop = Math.max(0, Math.floor(vTopPage / CHUNK_HEIGHT) * CHUNK_HEIGHT);
         wetHeight = Math.min(pageH - wetTop, CHUNK_HEIGHT * 2);
       }
 
@@ -239,7 +238,10 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
       if (canvas.style.top !== nextTop) canvas.style.top = nextTop;
       if (canvas.style.height !== nextHeight) canvas.style.height = nextHeight;
 
-      const ctx = getLowLatencyContext(canvas);
+      // Windows/Chromium/WebView 환경에서 transparent + desynchronized:true 오버레이가
+      // pointerup 전까지 화면에 합성(composite)되지 않고 빈 화면으로 남는 GPU 드라이버 버그를 방지하기 위해
+      // Active Layer 도 표준 2D 컨텍스트로 즉시 화면 손상 영역(damage rect)을 커밋한다.
+      const ctx = getStandardContext(canvas);
       if (!ctx) return null;
       ctx.imageSmoothingEnabled = true;
       if ('imageSmoothingQuality' in ctx) ctx.imageSmoothingQuality = 'high';
@@ -353,7 +355,7 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
   );
 
   /**
-   * 2-레이어 엄격 분리: pointerdown / pointermove 중에는 상단 활성 캔버스(wetRef, desynchronized: true)에만
+   * 2-레이어 엄격 분리: pointerdown / pointermove 중에는 상단 활성 캔버스(wetRef)에만
    * clearRect 없이 신규 세그먼트를 증분(Incremental) 렌더링하고, 하단 정적 캔버스에는 접근하지 않는다.
    */
   const drawWetIncremental = useCallback(() => {
