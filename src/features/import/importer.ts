@@ -57,6 +57,7 @@ export async function assemblePdfImportResult(
   result: PdfImportResult,
   fileName: string,
   saveAttachment: PdfAttachmentSaver,
+  options?: { pdfSrc?: string },
 ) {
   const content: JSONContent[] = [];
   let media = 0;
@@ -77,15 +78,20 @@ export async function assemblePdfImportResult(
     );
 
     if (page.template) {
-      const rel = await saveAttachment(page.template.blob, `${stem}-p${page.index}.jpg`);
+      const rel = await saveAttachment(page.template.blob, `${stem}-p${page.index}.png`);
+      const attrs: Record<string, unknown> = {
+        src: rel,
+        width: page.template.width,
+        height: page.template.height,
+        page: page.index,
+      };
+      if (options?.pdfSrc) {
+        attrs.pdfSrc = options.pdfSrc;
+        attrs.pdfPage = page.index;
+      }
       content.push({
         type: 'inkTemplate',
-        attrs: {
-          src: rel,
-          width: page.template.width,
-          height: page.template.height,
-          page: page.index,
-        },
+        attrs,
       });
       handwriting++;
     } else {
@@ -122,8 +128,16 @@ export async function assemblePdfImportResult(
 
 async function importPdfFile(file: File, noteId: string, onProgress?: (msg: string) => void) {
   const { importPdf } = await import('./pdfImport');
-  const result = await importPdf(await file.arrayBuffer(), (p, t) => onProgress?.(`PDF 변환 중 (${p} / ${t} 페이지)...`));
-  return assemblePdfImportResult(result, file.name, (blob, name) => saveAttachmentExclusive(noteId, blob, name));
+  const buf = await file.arrayBuffer();
+  const stem = safeTitle(baseName(file.name), 'source');
+  const pdfSrc = await saveAttachmentExclusive(noteId, file, `${stem}-source.pdf`);
+  const result = await importPdf(buf, (p, t) => onProgress?.(`PDF 변환 중 (${p} / ${t} 페이지)...`));
+  return assemblePdfImportResult(
+    result,
+    file.name,
+    (blob, name) => saveAttachmentExclusive(noteId, blob, name),
+    { pdfSrc },
+  );
 }
 
 /** 외부 PDF 문서를 새 노트로 가져온다 */

@@ -2,6 +2,13 @@ import Image from '@tiptap/extension-image';
 import { Node, mergeAttributes } from '@tiptap/core';
 import { attachmentUrl } from '../../storage/opfs';
 import { useSettings } from '../../store/settingsStore';
+import { useSessions } from '../../store/sessionStore';
+import {
+  computeTargetPdfScale,
+  PDF_ZOOM_RERENDER_DEBOUNCE_MS,
+  pdfZoomRenderer,
+  shouldRerenderForZoom,
+} from '../../features/import/pdfZoomRenderer';
 
 function isRelative(src: string) {
   return !!src && !/^(https?:|data:|blob:)/i.test(src);
@@ -26,7 +33,7 @@ export const NoteImage = Image.extend<NoteImageOptions & Record<string, unknown>
         dom.alt = alt ?? '';
         if (isRelative(src)) {
           dom.src = '';
-          void attachmentUrl(noteId, src).then((url) => {
+          void attachmentUrl(noteId, src)?.then((url) => {
             if (url) dom.src = url;
             else dom.alt = `이미지를 찾을 수 없음: ${src}`;
           });
@@ -67,6 +74,8 @@ export const InkTemplate = Node.create<NoteImageOptions>({
       page: { default: 1 },
       pageId: { default: null },
       style: { default: 'plain' },
+      pdfSrc: { default: '' },
+      pdfPage: { default: 0 },
     };
   },
 
@@ -83,6 +92,8 @@ export const InkTemplate = Node.create<NoteImageOptions>({
             page: Number(e.getAttribute('data-page')) || 1,
             pageId: e.getAttribute('data-page-id') || null,
             style: e.getAttribute('data-style') || 'plain',
+            pdfSrc: e.getAttribute('data-pdf-src') ?? '',
+            pdfPage: Number(e.getAttribute('data-pdf-page')) || 0,
           };
         },
       },
@@ -100,6 +111,8 @@ export const InkTemplate = Node.create<NoteImageOptions>({
         'data-page': node.attrs.page,
         'data-page-id': node.attrs.pageId ?? '',
         'data-style': node.attrs.style ?? 'plain',
+        ...(node.attrs.pdfSrc ? { 'data-pdf-src': node.attrs.pdfSrc } : {}),
+        ...(node.attrs.pdfPage ? { 'data-pdf-page': node.attrs.pdfPage } : {}),
       }),
       `손글씨 페이지 ${node.attrs.page}`,
     ];
@@ -107,7 +120,9 @@ export const InkTemplate = Node.create<NoteImageOptions>({
 
   addNodeView() {
     const noteId = (this.options as { noteId?: string })?.noteId ?? '';
+    let nodeViewSeq = 0;
     return ({ node }) => {
+      const viewId = ++nodeViewSeq;
       const dom = document.createElement('div');
       dom.contentEditable = 'false';
       dom.dataset.inkTemplate = '';
@@ -117,7 +132,132 @@ export const InkTemplate = Node.create<NoteImageOptions>({
       dom.append(badge);
 
       let imgEl: HTMLImageElement | null = null;
+      let hiResCanvas: HTMLCanvasElement | null = null;
       let loadedSrc = '';
+      let currentPdfSrc = '';
+      let currentPdfPage = 0;
+      let currentWidth = 595;
+      let currentHeight = 842;
+      let currentZoom = noteId ? useSessions.getState().sessions[noteId]?.zoom ?? 1 : 1;
+      let isVisible = typeof IntersectionObserver === 'undefined';
+      let renderedScale = 0;
+      let hasHiRes = false;
+      let rerenderTimer: ReturnType<typeof setTimeout> | null = null;
+
+      const renderKeyFor = (pdfSrc: string, pdfPage: number) => `${noteId}::${pdfSrc}::${pdfPage}::${viewId}`;
+
+      const clearHiRes = () => {
+        if (rerenderTimer) {
+          clearTimeout(rerenderTimer);
+          rerenderTimer = null;
+        }
+        if (currentPdfSrc && currentPdfPage > 0) {
+          pdfZoomRenderer.releasePage(renderKeyFor(currentPdfSrc, currentPdfPage));
+        }
+        if (hiResCanvas) {
+          hiResCanvas.width = 0;
+          hiResCanvas.height = 0;
+          hiResCanvas.style.opacity = '0';
+        }
+        hasHiRes = false;
+        renderedScale = 0;
+      };
+
+      const scheduleZoomRerender = () => {
+        if (!isVisible || !currentPdfSrc || currentPdfPage <= 0 || !noteId) return;
+        const cssWidth = dom.clientWidth || dom.getBoundingClientRect().width;
+        if (cssWidth <= 0) return;
+
+        const targetScale = computeTargetPdfScale(
+          currentWidth,
+          currentHeight,
+          cssWidth,
+          currentZoom,
+          window.devicePixelRatio || 1,
+        );
+        if (!shouldRerenderForZoom(renderedScale, targetScale, hasHiRes)) {
+          return;
+        }
+
+        if (rerenderTimer) clearTimeout(rerenderTimer);
+        const reqPdfSrc = currentPdfSrc;
+        const reqPdfPage = currentPdfPage;
+        const reqKey = renderKeyFor(reqPdfSrc, reqPdfPage);
+
+        rerenderTimer = setTimeout(() => {
+          rerenderTimer = null;
+          if (!isVisible || currentPdfSrc !== reqPdfSrc || currentPdfPage !== reqPdfPage) return;
+
+          if (!hiResCanvas) {
+            hiResCanvas = document.createElement('canvas');
+            hiResCanvas.className = 'ink-template-hires';
+            hiResCanvas.style.opacity = '0';
+            dom.append(hiResCanvas);
+          }
+
+          void pdfZoomRenderer
+            .renderPageHiRes({
+              key: reqKey,
+              noteId,
+              pdfSrc: reqPdfSrc,
+              pageNumber: reqPdfPage,
+              canvas: hiResCanvas,
+              targetScale,
+              onEvict: () => {
+                hasHiRes = false;
+                renderedScale = 0;
+              },
+            })
+            .then((res) => {
+              if (!res.rendered || !hiResCanvas || !isVisible) return;
+              if (currentPdfSrc !== reqPdfSrc || currentPdfPage !== reqPdfPage) return;
+              renderedScale = res.scale;
+              hasHiRes = true;
+              hiResCanvas.style.opacity = '1';
+              hiResCanvas.dataset.renderScale = res.scale.toFixed(2);
+            });
+        }, PDF_ZOOM_RERENDER_DEBOUNCE_MS);
+      };
+
+      const io =
+        typeof IntersectionObserver !== 'undefined'
+          ? new IntersectionObserver(
+              (entries) => {
+                const visible = entries.some((entry) => entry.isIntersecting);
+                if (visible === isVisible) return;
+                isVisible = visible;
+                if (visible) {
+                  scheduleZoomRerender();
+                } else {
+                  clearHiRes();
+                }
+              },
+              { rootMargin: '250px 0px' },
+            )
+          : null;
+      io?.observe(dom);
+
+      const ro =
+        typeof ResizeObserver !== 'undefined'
+          ? new ResizeObserver(() => {
+              if (isVisible && currentPdfSrc) {
+                scheduleZoomRerender();
+              }
+            })
+          : null;
+      ro?.observe(dom);
+
+      const unsubZoom = noteId
+        ? useSessions.subscribe((st) => {
+            const nextZoom = st.sessions[noteId]?.zoom ?? 1;
+            if (nextZoom !== currentZoom) {
+              currentZoom = nextZoom;
+              if (isVisible && currentPdfSrc) {
+                scheduleZoomRerender();
+              }
+            }
+          })
+        : null;
 
       const applyAttrs = (attrs: Record<string, unknown>) => {
         const pageNum = Number(attrs.page) || 1;
@@ -126,6 +266,17 @@ export const InkTemplate = Node.create<NoteImageOptions>({
         const height = Number(attrs.height) || 842;
         const style = String(attrs.style || 'plain');
         const src = String(attrs.src || '');
+        const nextPdfSrc = String(attrs.pdfSrc || '');
+        const nextPdfPage = Number(attrs.pdfPage) || (nextPdfSrc ? pageNum : 0);
+
+        const pdfChanged = nextPdfSrc !== currentPdfSrc || nextPdfPage !== currentPdfPage;
+        if (pdfChanged) {
+          clearHiRes();
+        }
+        currentWidth = width;
+        currentHeight = height;
+        currentPdfSrc = nextPdfSrc;
+        currentPdfPage = nextPdfPage;
 
         dom.className = `ink-template page-canvas-surface page-style-${style}`;
         dom.style.aspectRatio = `${width} / ${height}`;
@@ -141,6 +292,13 @@ export const InkTemplate = Node.create<NoteImageOptions>({
         dom.dataset.width = String(width);
         dom.dataset.height = String(height);
         dom.dataset.style = style;
+        if (nextPdfSrc) {
+          dom.dataset.pdfSrc = nextPdfSrc;
+          dom.dataset.pdfPage = String(nextPdfPage);
+        } else {
+          delete dom.dataset.pdfSrc;
+          delete dom.dataset.pdfPage;
+        }
         badge.textContent = `${pageNum}쪽`;
 
         if (src) {
@@ -153,7 +311,7 @@ export const InkTemplate = Node.create<NoteImageOptions>({
           if (loadedSrc !== src) {
             loadedSrc = src;
             if (isRelative(src)) {
-              void attachmentUrl(noteId, src).then((url) => {
+              void attachmentUrl(noteId, src)?.then((url) => {
                 if (url && imgEl && loadedSrc === src) imgEl.src = url;
               });
             } else {
@@ -164,6 +322,10 @@ export const InkTemplate = Node.create<NoteImageOptions>({
           imgEl.remove();
           imgEl = null;
           loadedSrc = '';
+        }
+
+        if (nextPdfSrc && isVisible) {
+          scheduleZoomRerender();
         }
       };
 
@@ -188,6 +350,12 @@ export const InkTemplate = Node.create<NoteImageOptions>({
           return false;
         },
         ignoreMutation: () => true,
+        destroy: () => {
+          clearHiRes();
+          io?.disconnect();
+          ro?.disconnect();
+          unsubZoom?.();
+        },
       };
     };
   },

@@ -29,6 +29,7 @@ import { db, uid, type NoteRecord } from '../storage/db';
 import { drafts } from '../storage/drafts';
 import { readHandle, writeHandle } from '../storage/localFiles';
 import { extOfMime, saveAttachmentExclusive, saveImageExclusive } from '../storage/opfs';
+import { pdfZoomRenderer } from '../features/import/pdfZoomRenderer';
 import { indexNote, searchRelated } from '../search/searchClient';
 import { offlineLinker, type LinkRecommendation } from '../services/offlineDocumentLinker';
 import { adaptiveGlossary } from '../services/AdaptiveGlossaryService';
@@ -2095,6 +2096,7 @@ export class NoteSession {
     if (this.draftTimer) clearTimeout(this.draftTimer);
     if (this.relatedTimer) clearTimeout(this.relatedTimer);
     if (this.titleSyncTimer) clearTimeout(this.titleSyncTimer);
+    pdfZoomRenderer.evictNote(this.id);
     this.editor.destroy();
   }
 }

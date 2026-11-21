@@ -26,15 +26,14 @@ export interface PdfImportResult {
   pages: PdfImportPage[];
 }
 
-const TEMPLATE_SCALE = 1.5;
-const MAX_TEMPLATE_PX = 1600;
+export const TEMPLATE_SCALE = 2.0;
+export const MAX_TEMPLATE_PX = 2400;
 
 function canvasToBlob(canvas: HTMLCanvasElement): Promise<Blob> {
   return new Promise((res, rej) =>
     canvas.toBlob(
       (b) => (b ? res(b) : rej(new Error('이미지 변환 실패 (캔버스 메모리 한계 초과 가능성)'))),
-      'image/jpeg',
-      0.85,
+      'image/png',
     ),
   );
 }
