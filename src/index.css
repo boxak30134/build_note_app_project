@@ -343,8 +343,7 @@ body,
   pointer-events: none;
   letter-spacing: 0.02em;
 }
-.ink-template img,
-.ink-template canvas.ink-template-hires {
+.ink-template img {
   position: absolute;
   inset: 0;
   width: 100%;
@@ -353,6 +352,8 @@ body,
   pointer-events: none;
 }
 .ink-template canvas.ink-template-hires {
+  position: absolute;
+  pointer-events: none;
   z-index: 1;
   transition: opacity 0.08s ease-out;
 }

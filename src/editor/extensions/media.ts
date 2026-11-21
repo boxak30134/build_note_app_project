@@ -4,10 +4,14 @@ import { attachmentUrl } from '../../storage/opfs';
 import { useSettings } from '../../store/settingsStore';
 import { useSessions } from '../../store/sessionStore';
 import {
+  computePdfTilePlan,
   computeTargetPdfScale,
+  findFallbackPdfSrc,
   PDF_ZOOM_RERENDER_DEBOUNCE_MS,
   pdfZoomRenderer,
   shouldRerenderForZoom,
+  type PdfTileCropRect,
+  type PdfTilePlan,
 } from '../../features/import/pdfZoomRenderer';
 
 function isRelative(src: string) {
@@ -129,11 +133,14 @@ export const InkTemplate = Node.create<NoteImageOptions>({
 
       const badge = document.createElement('div');
       badge.className = 'ink-template-badge';
+      badge.dataset.testid = 'pdf-resolution-badge';
       dom.append(badge);
 
       let imgEl: HTMLImageElement | null = null;
       let hiResCanvas: HTMLCanvasElement | null = null;
       let loadedSrc = '';
+      let currentPageNum = 1;
+      let currentSrc = '';
       let currentPdfSrc = '';
       let currentPdfPage = 0;
       let currentWidth = 595;
@@ -142,14 +149,66 @@ export const InkTemplate = Node.create<NoteImageOptions>({
       let isVisible = typeof IntersectionObserver === 'undefined';
       let renderedScale = 0;
       let hasHiRes = false;
+      let prevPlan: PdfTilePlan | null = null;
       let rerenderTimer: ReturnType<typeof setTimeout> | null = null;
+      let scrollTimer: ReturnType<typeof setTimeout> | null = null;
+      let fallbackLookupTried = false;
+      let destroyed = false;
+      let renderStatus: 'idle' | 'rendering' | 'hires' | 'static' | 'error' = 'idle';
+      let renderErrorReason = '';
+      let attachedViewport: HTMLElement | null = null;
+      let io: IntersectionObserver | null = null;
+      let rafAttachId: number | null = null;
 
       const renderKeyFor = (pdfSrc: string, pdfPage: number) => `${noteId}::${pdfSrc}::${pdfPage}::${viewId}`;
+
+      const updateBadge = () => {
+        if (!currentSrc && !currentPdfSrc) {
+          badge.textContent = `${currentPageNum}쪽`;
+          delete badge.dataset.zoomPct;
+          delete badge.dataset.resolution;
+          return;
+        }
+        const zoomPct = Math.round(currentZoom * 100);
+        const natW = imgEl?.naturalWidth || 0;
+        const natH = imgEl?.naturalHeight || 0;
+        let resLabel = '';
+        let resData = 'pending';
+
+        if (hasHiRes && prevPlan) {
+          if (prevPlan.mode === 'tile') {
+            resLabel = `${prevPlan.viewportWidth}x${prevPlan.viewportHeight}px (타일 ${prevPlan.canvasWidth}x${prevPlan.canvasHeight}px)`;
+          } else {
+            resLabel = `${prevPlan.canvasWidth}x${prevPlan.canvasHeight}px`;
+          }
+          resData = `${prevPlan.viewportWidth}x${prevPlan.viewportHeight}`;
+        } else if (natW > 0 && natH > 0) {
+          resLabel = `${natW}x${natH}px${currentPdfSrc ? '' : ' (정적PNG)'}`;
+          resData = `${natW}x${natH}`;
+        } else {
+          resLabel = currentPdfSrc ? '대기중' : '원본PDF없음';
+        }
+
+        const statusSuffix =
+          renderStatus === 'rendering'
+            ? ' · 재렌더중'
+            : renderStatus === 'error' && renderErrorReason
+              ? ` · 오류(${renderErrorReason})`
+              : '';
+
+        badge.textContent = `${currentPageNum}쪽 · [배율: ${zoomPct}% | 해상도: ${resLabel}]${statusSuffix}`;
+        badge.dataset.zoomPct = String(zoomPct);
+        badge.dataset.resolution = resData;
+      };
 
       const clearHiRes = () => {
         if (rerenderTimer) {
           clearTimeout(rerenderTimer);
           rerenderTimer = null;
+        }
+        if (scrollTimer) {
+          clearTimeout(scrollTimer);
+          scrollTimer = null;
         }
         if (currentPdfSrc && currentPdfPage > 0) {
           pdfZoomRenderer.releasePage(renderKeyFor(currentPdfSrc, currentPdfPage));
@@ -158,15 +217,123 @@ export const InkTemplate = Node.create<NoteImageOptions>({
           hiResCanvas.width = 0;
           hiResCanvas.height = 0;
           hiResCanvas.style.opacity = '0';
+          delete hiResCanvas.dataset.renderScale;
+          delete hiResCanvas.dataset.viewportWidth;
+          delete hiResCanvas.dataset.viewportHeight;
         }
         hasHiRes = false;
         renderedScale = 0;
+        prevPlan = null;
+        renderStatus = 'idle';
+        updateBadge();
+      };
+
+      const computeVisibleCropRect = (): PdfTileCropRect | null => {
+        if (!attachedViewport) return null;
+        const pageRect = dom.getBoundingClientRect();
+        const vpRect = attachedViewport.getBoundingClientRect();
+        if (pageRect.width <= 0 || pageRect.height <= 0 || vpRect.width <= 0 || vpRect.height <= 0) {
+          return null;
+        }
+        const pad = 160;
+        const visLeft = Math.max(pageRect.left, vpRect.left - pad);
+        const visTop = Math.max(pageRect.top, vpRect.top - pad);
+        const visRight = Math.min(pageRect.right, vpRect.right + pad);
+        const visBottom = Math.min(pageRect.bottom, vpRect.bottom + pad);
+        if (visRight <= visLeft || visBottom <= visTop) {
+          return null;
+        }
+        return {
+          u0: (visLeft - pageRect.left) / pageRect.width,
+          v0: (visTop - pageRect.top) / pageRect.height,
+          u1: (visRight - pageRect.left) / pageRect.width,
+          v1: (visBottom - pageRect.top) / pageRect.height,
+        };
+      };
+
+      const onViewportScroll = () => {
+        if (destroyed || !isVisible || !currentPdfSrc || prevPlan?.mode !== 'tile') return;
+        if (scrollTimer) clearTimeout(scrollTimer);
+        scrollTimer = setTimeout(() => {
+          scrollTimer = null;
+          scheduleZoomRerender();
+        }, PDF_ZOOM_RERENDER_DEBOUNCE_MS);
+      };
+
+      const attachIntersectionObserver = (rootEl: HTMLElement | null) => {
+        io?.disconnect();
+        io =
+          typeof IntersectionObserver !== 'undefined'
+            ? new IntersectionObserver(
+                (entries) => {
+                  const visible = entries.some((entry) => entry.isIntersecting);
+                  if (visible === isVisible) return;
+                  isVisible = visible;
+                  if (visible) {
+                    scheduleZoomRerender();
+                  } else {
+                    clearHiRes();
+                  }
+                },
+                { root: rootEl, rootMargin: '250px 0px' },
+              )
+            : null;
+        io?.observe(dom);
+      };
+
+      const ensureViewportAttached = () => {
+        const vp = dom.closest<HTMLElement>('.note-viewport');
+        if (vp && vp !== attachedViewport) {
+          attachedViewport?.removeEventListener('scroll', onViewportScroll);
+          attachedViewport = vp;
+          attachedViewport.addEventListener('scroll', onViewportScroll, { passive: true });
+          attachIntersectionObserver(vp);
+        }
       };
 
       const scheduleZoomRerender = () => {
-        if (!isVisible || !currentPdfSrc || currentPdfPage <= 0 || !noteId) return;
+        if (destroyed) return;
+        ensureViewportAttached();
+        if (noteId) {
+          const latestZoom = useSessions.getState().sessions[noteId]?.zoom;
+          if (latestZoom && latestZoom > 0) {
+            currentZoom = latestZoom;
+          }
+        }
+
+        if (!currentPdfSrc) {
+          if (currentSrc && noteId && !fallbackLookupTried) {
+            fallbackLookupTried = true;
+            void findFallbackPdfSrc(noteId).then((found) => {
+              if (destroyed) return;
+              if (found && !currentPdfSrc) {
+                currentPdfSrc = found;
+                currentPdfPage = currentPdfPage || currentPageNum;
+                dom.dataset.pdfSrc = found;
+                dom.dataset.pdfPage = String(currentPdfPage);
+                scheduleZoomRerender();
+              } else if (!found) {
+                renderStatus = 'static';
+                updateBadge();
+              }
+            });
+          } else {
+            renderStatus = 'static';
+            updateBadge();
+          }
+          return;
+        }
+
+        if (!isVisible || currentPdfPage <= 0 || !noteId) {
+          updateBadge();
+          return;
+        }
+
         const cssWidth = dom.clientWidth || dom.getBoundingClientRect().width;
-        if (cssWidth <= 0) return;
+        if (cssWidth <= 0) {
+          updateBadge();
+          return;
+        }
 
         const targetScale = computeTargetPdfScale(
           currentWidth,
@@ -175,7 +342,10 @@ export const InkTemplate = Node.create<NoteImageOptions>({
           currentZoom,
           window.devicePixelRatio || 1,
         );
-        if (!shouldRerenderForZoom(renderedScale, targetScale, hasHiRes)) {
+        const crop = computeVisibleCropRect();
+
+        if (!shouldRerenderForZoom(renderedScale, targetScale, hasHiRes, prevPlan, crop)) {
+          updateBadge();
           return;
         }
 
@@ -186,7 +356,7 @@ export const InkTemplate = Node.create<NoteImageOptions>({
 
         rerenderTimer = setTimeout(() => {
           rerenderTimer = null;
-          if (!isVisible || currentPdfSrc !== reqPdfSrc || currentPdfPage !== reqPdfPage) return;
+          if (destroyed || !isVisible || currentPdfSrc !== reqPdfSrc || currentPdfPage !== reqPdfPage) return;
 
           if (!hiResCanvas) {
             hiResCanvas = document.createElement('canvas');
@@ -194,6 +364,10 @@ export const InkTemplate = Node.create<NoteImageOptions>({
             hiResCanvas.style.opacity = '0';
             dom.append(hiResCanvas);
           }
+
+          renderStatus = 'rendering';
+          renderErrorReason = '';
+          updateBadge();
 
           void pdfZoomRenderer
             .renderPageHiRes({
@@ -203,43 +377,57 @@ export const InkTemplate = Node.create<NoteImageOptions>({
               pageNumber: reqPdfPage,
               canvas: hiResCanvas,
               targetScale,
+              crop,
               onEvict: () => {
                 hasHiRes = false;
                 renderedScale = 0;
+                prevPlan = null;
+                renderStatus = 'static';
+                updateBadge();
               },
             })
             .then((res) => {
-              if (!res.rendered || !hiResCanvas || !isVisible) return;
+              if (destroyed || !hiResCanvas || !isVisible) return;
               if (currentPdfSrc !== reqPdfSrc || currentPdfPage !== reqPdfPage) return;
+              if (!res.rendered) {
+                if (res.errorReason) {
+                  renderStatus = 'error';
+                  renderErrorReason = res.errorReason;
+                  hasHiRes = false;
+                  prevPlan = null;
+                  updateBadge();
+                }
+                return;
+              }
               renderedScale = res.scale;
               hasHiRes = true;
+              prevPlan =
+                res.plan ?? computePdfTilePlan(hiResCanvas.width, hiResCanvas.height, crop);
+              renderStatus = 'hires';
+              renderErrorReason = '';
               hiResCanvas.style.opacity = '1';
               hiResCanvas.dataset.renderScale = res.scale.toFixed(2);
+              hiResCanvas.dataset.viewportWidth = String(prevPlan.viewportWidth);
+              hiResCanvas.dataset.viewportHeight = String(prevPlan.viewportHeight);
+              updateBadge();
             });
         }, PDF_ZOOM_RERENDER_DEBOUNCE_MS);
       };
 
-      const io =
-        typeof IntersectionObserver !== 'undefined'
-          ? new IntersectionObserver(
-              (entries) => {
-                const visible = entries.some((entry) => entry.isIntersecting);
-                if (visible === isVisible) return;
-                isVisible = visible;
-                if (visible) {
-                  scheduleZoomRerender();
-                } else {
-                  clearHiRes();
-                }
-              },
-              { rootMargin: '250px 0px' },
-            )
-          : null;
-      io?.observe(dom);
+      attachIntersectionObserver(null);
+      if (typeof requestAnimationFrame === 'function') {
+        rafAttachId = requestAnimationFrame(() => {
+          rafAttachId = null;
+          if (!destroyed) {
+            ensureViewportAttached();
+          }
+        });
+      }
 
       const ro =
         typeof ResizeObserver !== 'undefined'
           ? new ResizeObserver(() => {
+              ensureViewportAttached();
               if (isVisible && currentPdfSrc) {
                 scheduleZoomRerender();
               }
@@ -252,7 +440,8 @@ export const InkTemplate = Node.create<NoteImageOptions>({
             const nextZoom = st.sessions[noteId]?.zoom ?? 1;
             if (nextZoom !== currentZoom) {
               currentZoom = nextZoom;
-              if (isVisible && currentPdfSrc) {
+              updateBadge();
+              if (isVisible) {
                 scheduleZoomRerender();
               }
             }
@@ -272,7 +461,10 @@ export const InkTemplate = Node.create<NoteImageOptions>({
         const pdfChanged = nextPdfSrc !== currentPdfSrc || nextPdfPage !== currentPdfPage;
         if (pdfChanged) {
           clearHiRes();
+          fallbackLookupTried = false;
         }
+        currentPageNum = pageNum;
+        currentSrc = src;
         currentWidth = width;
         currentHeight = height;
         currentPdfSrc = nextPdfSrc;
@@ -299,12 +491,12 @@ export const InkTemplate = Node.create<NoteImageOptions>({
           delete dom.dataset.pdfSrc;
           delete dom.dataset.pdfPage;
         }
-        badge.textContent = `${pageNum}쪽`;
 
         if (src) {
           if (!imgEl) {
             imgEl = document.createElement('img');
             imgEl.draggable = false;
+            imgEl.addEventListener('load', updateBadge);
             dom.append(imgEl);
           }
           imgEl.alt = `페이지 ${pageNum}`;
@@ -324,7 +516,8 @@ export const InkTemplate = Node.create<NoteImageOptions>({
           loadedSrc = '';
         }
 
-        if (nextPdfSrc && isVisible) {
+        updateBadge();
+        if ((nextPdfSrc || src) && isVisible) {
           scheduleZoomRerender();
         }
       };
@@ -351,6 +544,13 @@ export const InkTemplate = Node.create<NoteImageOptions>({
         },
         ignoreMutation: () => true,
         destroy: () => {
+          destroyed = true;
+          if (rafAttachId !== null && typeof cancelAnimationFrame === 'function') {
+            cancelAnimationFrame(rafAttachId);
+            rafAttachId = null;
+          }
+          attachedViewport?.removeEventListener('scroll', onViewportScroll);
+          attachedViewport = null;
           clearHiRes();
           io?.disconnect();
           ro?.disconnect();
