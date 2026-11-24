@@ -271,7 +271,7 @@ export const useSettings = create<SettingsState>()(
     }),
     {
       name: 'eduink-settings',
-      version: 8,
+      version: 9,
       migrate: (persistedState: unknown, version: number) => {
         const state = (persistedState ?? {}) as Partial<SettingsState>;
         if (version < 2 && state.aiModels) {
@@ -314,6 +314,18 @@ export const useSettings = create<SettingsState>()(
             ...state.driveSyncConfig,
             accountName: state.driveSyncConfig.accountName ?? null,
           };
+        }
+        if (version < 9 && state.aiModels) {
+          const currentGoogle = state.aiModels.google;
+          if (
+            !currentGoogle ||
+            currentGoogle === GEMINI_FALLBACK_MODEL ||
+            currentGoogle === 'gemini-2.5-flash' ||
+            currentGoogle === 'gemini-2.5-pro' ||
+            currentGoogle === 'gemini-2.5-flash-lite'
+          ) {
+            state.aiModels = { ...state.aiModels, google: GEMINI_PRIMARY_MODEL };
+          }
         }
         return state as SettingsState;
       },

@@ -132,7 +132,9 @@ export function getOrCreateGeminiClient(apiKey: string): GoogleGenAI {
   if (!client) {
     client = new GoogleGenAI({
       apiKey,
+      apiVersion: 'v1beta',
       httpOptions: {
+        apiVersion: 'v1beta',
         retryOptions: { attempts: 1 },
       },
     });
@@ -674,10 +676,10 @@ export async function validateGeminiApiKey(
   }
 
   try {
-    // 2. 가장 가벼운 모델로 ping (1 토큰)
+    // 2. 가장 가벼운 GA 모델로 ping (1 토큰)
     await withTimeout(
       ai.models.generateContent({
-        model: 'gemini-flash-lite-latest',
+        model: 'gemini-3.5-flash-lite',
         contents: 'ping',
         config: { maxOutputTokens: 1 },
       }),

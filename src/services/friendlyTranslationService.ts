@@ -50,7 +50,7 @@ export async function translateViaPublicEndpoint(text: string): Promise<string> 
 
 /**
  * 2. Google AI Studio (Gemini Flash) API 호출 — 단일 callGeminiWithResilience 레이어 통과
- * - 직렬 큐 + 503/429 지수 백오프 재시도 + 경량 모델(gemini-2.5-flash -> gemini-2.5-flash-lite) 자동 폴백 적용
+ * - 직렬 큐 + 503/429 지수 백오프 재시도 + 현행 GA 모델(gemini-3.5-flash-lite -> gemini-3.8-flash) 자동 폴백 적용
  */
 export async function translateViaGeminiWithMeta(
   text: string,
@@ -106,7 +106,7 @@ Output ONLY the translated Korean text without explanation or markdown quotes.`;
       return candidate.trim();
     },
     {
-      primaryModel: options.model || 'gemini-2.5-flash',
+      primaryModel: options.model || 'gemini-3.5-flash-lite',
       enableFallback: true,
       retryDelayMs: options.retryDelayMs,
       signal: options.signal,

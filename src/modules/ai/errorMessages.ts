@@ -29,22 +29,40 @@ export class EmptyStreamError extends Error {
   }
 }
 
+export interface ModelAttemptFailure {
+  model: string;
+  status: number | null;
+  summary: string;
+}
+
 export class AllModelsFailedError extends Error {
   readonly lastError: unknown;
   readonly triedModels: string[];
   readonly lastStatusCode: number | null;
+  readonly attemptFailures: ModelAttemptFailure[];
 
-  constructor(lastError: unknown, triedModels: string[]) {
+  constructor(
+    lastError: unknown,
+    triedModels: string[],
+    attemptFailures: ModelAttemptFailure[] = [],
+  ) {
     const status = extractHttpStatus(lastError);
     const statusText = status ? ` [HTTP ${status}]` : '';
     const lastMsg = lastError instanceof Error ? lastError.message : String(lastError ?? '알 수 없는 오류');
+    const breakdownText =
+      attemptFailures.length > 0
+        ? ` 실패 내역: ${attemptFailures
+            .map((f) => `${f.model}(${f.status ?? f.summary})`)
+            .join(' → ')} |`
+        : '';
     super(
-      `모든 Gemini 모델 호출에 실패했습니다${statusText}. (시도된 모델: ${triedModels.join(', ')}) 마지막 오류: ${sanitizeLogMessage(lastMsg)}`,
+      `모든 Gemini 모델 호출에 실패했습니다${statusText}. (시도된 모델: ${triedModels.join(', ')})${breakdownText} 마지막 오류: ${sanitizeLogMessage(lastMsg)}`,
     );
     this.name = 'AllModelsFailedError';
     this.lastError = lastError;
     this.triedModels = triedModels;
     this.lastStatusCode = status;
+    this.attemptFailures = attemptFailures;
   }
 }
 

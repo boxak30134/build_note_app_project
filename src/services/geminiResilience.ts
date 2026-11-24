@@ -13,6 +13,7 @@ import {
   extractRetryDelayMs,
   getUserFacingErrorMessage,
   sanitizeLogMessage,
+  type ModelAttemptFailure,
 } from '../modules/ai/errorMessages';
 
 /** 재시도 단계별 지수 백오프 기본 대기 시간(ms): 1초 -> 2.5초 -> 5초 */
@@ -78,10 +79,8 @@ export interface GeminiResilienceResult<T> {
 }
 
 /**
- * 선택된 기본 모델에 따라 가용성이 높은 경량 폴백 체인을 구성한다.
- * - gemini-2.5-pro -> gemini-2.5-flash -> gemini-2.5-flash-lite
- * - gemini-2.5-flash -> gemini-2.5-flash-lite -> gemini-flash-lite-latest
- * - 3.x 계열 -> 기존 3.6/lite 체인 + 2.5-flash -> 2.5-flash-lite
+ * 선택된 기본 모델에 따라 가용성이 높은 현행 GA 모델 폴백 체인을 구성한다.
+ * 신규 API 키에서 HTTP 404를 유발하는 레거시 2.5 계열은 3.x/4.x 폴백 체인에서 배제한다.
  */
 export function buildGeminiFallbackChain(primaryModel?: string, enableFallback = true): string[] {
   const primary = primaryModel?.trim() || GEMINI_PRIMARY_MODEL;
@@ -90,19 +89,18 @@ export function buildGeminiFallbackChain(primaryModel?: string, enableFallback =
 
   let fallbacks: readonly string[];
   if (primary === 'gemini-2.5-pro') {
-    fallbacks = ['gemini-2.5-flash', 'gemini-2.5-flash-lite'];
-  } else if (primary === 'gemini-2.5-flash') {
-    fallbacks = ['gemini-2.5-flash-lite', 'gemini-flash-lite-latest'];
-  } else if (primary === 'gemini-2.5-flash-lite') {
-    fallbacks = ['gemini-2.5-flash', 'gemini-flash-lite-latest'];
+    fallbacks = ['gemini-3.8-flash', 'gemini-3.6-flash', 'gemini-3.5-flash-lite'];
+  } else if (primary === 'gemini-2.5-flash' || primary === 'gemini-2.5-flash-lite') {
+    fallbacks = ['gemini-3.5-flash-lite', 'gemini-3.8-flash', 'gemini-3.6-flash'];
   } else if (primary === 'gemini-1.5-flash') {
-    fallbacks = ['gemini-2.5-flash', 'gemini-2.5-flash-lite'];
+    fallbacks = ['gemini-3.5-flash-lite', 'gemini-3.8-flash'];
+  } else if (primary === GEMINI_PRIMARY_MODEL) {
+    fallbacks = GEMINI_FALLBACK_CHAIN;
   } else {
     fallbacks = [
+      GEMINI_PRIMARY_MODEL,
       GEMINI_FALLBACK_MODEL,
       ...GEMINI_FALLBACK_CHAIN,
-      'gemini-2.5-flash',
-      'gemini-2.5-flash-lite',
     ];
   }
 
@@ -269,6 +267,7 @@ export async function callGeminiWithResilience<T>(
     let totalAttempts = 0;
     let lastError: unknown = null;
     const triedModels: string[] = [];
+    const attemptFailures: ModelAttemptFailure[] = [];
 
     while (true) {
       if (signal?.aborted) {
@@ -328,6 +327,14 @@ export async function callGeminiWithResilience<T>(
           sanitizeLogMessage(err instanceof Error ? err.message : String(err)),
         );
 
+        const errStatus = extractHttpStatus(err);
+        const rawErrSummary = sanitizeLogMessage(err instanceof Error ? err.message : String(err ?? ''));
+        attemptFailures.push({
+          model: currentModel,
+          status: errStatus,
+          summary: classification === 'timeout' ? 'timeout' : rawErrSummary.slice(0, 60) || classification,
+        });
+
         // 영구 오류(인증/권한/요청형식/안전차단)는 재시도·폴백 없이 즉시 중단
         if (
           classification === 'fatal-request' ||
@@ -363,7 +370,7 @@ export async function callGeminiWithResilience<T>(
             });
             continue;
           }
-          const finalErr = new AllModelsFailedError(lastError, triedModels);
+          const finalErr = new AllModelsFailedError(lastError, triedModels, attemptFailures);
           onStatusChange?.({
             phase: 'error',
             model: currentModel,
@@ -443,7 +450,7 @@ export async function callGeminiWithResilience<T>(
         }
 
         // 최대 재시도 소진
-        const exhaustedErr = new AllModelsFailedError(lastError, triedModels);
+        const exhaustedErr = new AllModelsFailedError(lastError, triedModels, attemptFailures);
         onStatusChange?.({
           phase: 'error',
           model: currentModel,

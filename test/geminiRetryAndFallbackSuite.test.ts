@@ -58,16 +58,14 @@ describe('Gemini 503 재시도, Fallback 체인 및 스트림 브라우저 호�
     expect(chunksCaptured).toEqual(['정상 ', '답변입니다.']);
   });
 
-  // 2. 주 모델 503 × 3 → 지수 백오프 재시도 후 다음 모델로 폴백
-  it('2. 주 모델 503 × 3: 동일 모델 3회 재시도 소진 후 다음 모델로 폴백', async () => {
+  // 2. 주 모델 503 연속 발생 → 지수 백오프 재시도마다 폴백 체인 모델로 즉시 순차 전환 후 성공
+  it('2. 주 모델 503 × 3: 재시도마다 폴백 체인의 다음 모델로 순차 전환해 응답을 완료한다', async () => {
     const err503 = Object.assign(new Error('503 Server Unavailable: high demand'), { status: 503 });
     const generateContentStream = vi
       .fn()
-      // Primary 모델: attempt 0, 1, 2 = 총 3회 실패
       .mockRejectedValueOnce(err503)
       .mockRejectedValueOnce(err503)
       .mockRejectedValueOnce(err503)
-      // Fallback 모델: 1회차 성공
       .mockResolvedValueOnce(createAsyncStream([{ text: 'Fallback 모델 응답' }]));
 
     const mockClient: GeminiClientLike = { models: { generateContentStream } };
@@ -84,9 +82,9 @@ describe('Gemini 503 재시도, Fallback 체인 및 스트림 브라우저 호�
 
     expect(generateContentStream).toHaveBeenCalledTimes(4);
     expect(generateContentStream.mock.calls[0][0].model).toBe(GEMINI_PRIMARY_MODEL);
-    expect(generateContentStream.mock.calls[1][0].model).toBe(GEMINI_PRIMARY_MODEL);
-    expect(generateContentStream.mock.calls[2][0].model).toBe(GEMINI_PRIMARY_MODEL);
-    expect(generateContentStream.mock.calls[3][0].model).toBe(GEMINI_FALLBACK_MODEL);
+    expect(generateContentStream.mock.calls[1][0].model).toBe(GEMINI_FALLBACK_MODEL);
+    expect(generateContentStream.mock.calls[2][0].model).toBe('gemini-3.5-flash-lite');
+    expect(generateContentStream.mock.calls[3][0].model).toBe('gemini-4-hydrogen');
     expect(output.join('')).toBe('Fallback 모델 응답');
   });
 

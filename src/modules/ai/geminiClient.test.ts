@@ -156,7 +156,7 @@ describe('Gemini 기반 학술 튜터 및 AI 연계 모듈 (CLAUDE.md §9)', () 
     expect(generateContentStream).toHaveBeenCalledTimes(3);
     expect(generateContentStream.mock.calls[0][0].model).toBe(GEMINI_PRIMARY_MODEL);
     expect(generateContentStream.mock.calls[1][0].model).toBe(GEMINI_FALLBACK_MODEL);
-    expect(generateContentStream.mock.calls[2][0].model).toBe('gemini-flash-lite-latest');
+    expect(generateContentStream.mock.calls[2][0].model).toBe('gemini-3.5-flash-lite');
     expect(chunks.join('')).toBe('대안 모델 응답: $\\forall \\epsilon > 0$');
   });
 
