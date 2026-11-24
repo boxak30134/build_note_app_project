@@ -9,8 +9,9 @@ export const GEMINI_PRIMARY_MODEL = 'gemini-3.8-flash';
 export const GEMINI_FALLBACK_MODEL = 'gemini-3.6-flash';
 export const GEMINI_FALLBACK_CHAIN = [
   GEMINI_FALLBACK_MODEL,
-  'gemini-flash-lite-latest',
   'gemini-3.5-flash-lite',
+  'gemini-4-hydrogen',
+  'gemini-flash-lite-latest',
 ] as const;
 
 /** 503 및 429 일시적 오류에 대한 지수형 Backoff + Jitter 재시도 설정 */

@@ -109,12 +109,12 @@ describe('REQ_AI_PROVIDER_MODEL_SELECTOR: BYOK 멀티 프로바이더 모델 선
 
     it('모델 및 타깃에 따라 최대 출력 토큰 상한이 올바르게 산출된다', () => {
       const proPreview = estimateTurnTokenPreview({
-        modelId: 'gemini-2.5-pro',
+        modelId: 'gemini-4-hydrogen',
         provider: 'google',
         target: 'sidebar',
       });
       const bubblePreview = estimateTurnTokenPreview({
-        modelId: 'gemini-2.5-pro',
+        modelId: 'gemini-4-hydrogen',
         provider: 'google',
         target: 'bubble',
       });

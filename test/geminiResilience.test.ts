@@ -17,21 +17,31 @@ describe('Gemini 단일 회복탄력성 레이어 (직렬 큐 · 백오프 · �
     vi.restoreAllMocks();
   });
 
-  it('1. 기본 모델별 경량 폴백 체인(gemini-2.5-pro -> gemini-2.5-flash -> gemini-2.5-flash-lite)을 생성한다', () => {
-    expect(buildGeminiFallbackChain('gemini-2.5-pro')).toEqual([
-      'gemini-2.5-pro',
-      'gemini-2.5-flash',
-      'gemini-2.5-flash-lite',
+  it('1. 기본 모델별 현행 GA 폴백 체인을 생성하며 3.x 기본 체인에 2.5 레거시를 포함하지 않는다', () => {
+    expect(buildGeminiFallbackChain('gemini-3.8-flash')).toEqual([
+      'gemini-3.8-flash',
+      'gemini-3.6-flash',
+      'gemini-3.5-flash-lite',
+      'gemini-4-hydrogen',
+      'gemini-flash-lite-latest',
+    ]);
+    expect(buildGeminiFallbackChain('gemini-3.6-flash')).toEqual([
+      'gemini-3.6-flash',
+      'gemini-3.8-flash',
+      'gemini-3.5-flash-lite',
+      'gemini-4-hydrogen',
+      'gemini-flash-lite-latest',
     ]);
     expect(buildGeminiFallbackChain('gemini-2.5-flash')).toEqual([
       'gemini-2.5-flash',
-      'gemini-2.5-flash-lite',
-      'gemini-flash-lite-latest',
+      'gemini-3.5-flash-lite',
+      'gemini-3.8-flash',
+      'gemini-3.6-flash',
     ]);
-    expect(buildGeminiFallbackChain('gemini-2.5-pro', false)).toEqual(['gemini-2.5-pro']);
+    expect(buildGeminiFallbackChain('gemini-3.8-flash', false)).toEqual(['gemini-3.8-flash']);
   });
 
-  it('2. 503/429 발생 시 다음 재시도부터 경량 모델로 자동 전환하고 최대 3회 재시도 및 상태 콜백을 전달한다', async () => {
+  it('2. 503/429 발생 시 다음 재시도부터 현행 GA 폴백 모델로 자동 전환하고 상태 콜백을 전달한다', async () => {
     const triedModels: string[] = [];
     const statuses: GeminiResilienceStatus[] = [];
 
@@ -46,23 +56,23 @@ describe('Gemini 단일 회복탄력성 레이어 (직렬 큐 · 백오프 · �
         return '최종 폴백 성공';
       },
       {
-        primaryModel: 'gemini-2.5-pro',
+        primaryModel: 'gemini-3.8-flash',
         retryDelayMs: 1,
         onStatusChange: (s) => statuses.push(s),
       },
     );
 
-    expect(triedModels).toEqual(['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite']);
+    expect(triedModels).toEqual(['gemini-3.8-flash', 'gemini-3.6-flash', 'gemini-3.5-flash-lite']);
     expect(res.value).toBe('최종 폴백 성공');
-    expect(res.model).toBe('gemini-2.5-flash-lite');
-    expect(res.requestedModel).toBe('gemini-2.5-pro');
+    expect(res.model).toBe('gemini-3.5-flash-lite');
+    expect(res.requestedModel).toBe('gemini-3.8-flash');
     expect(res.usedFallback).toBe(true);
     expect(res.attempts).toBe(3);
 
     expect(statuses.some((s) => s.phase === 'retrying' && s.attempt === 1 && s.message.includes('1/3'))).toBe(true);
     expect(statuses.some((s) => s.phase === 'retrying' && s.attempt === 2 && s.message.includes('2/3'))).toBe(true);
-    expect(statuses.some((s) => s.phase === 'fallback' && s.model === 'gemini-2.5-flash')).toBe(true);
-    expect(statuses.some((s) => s.phase === 'fallback' && s.model === 'gemini-2.5-flash-lite')).toBe(true);
+    expect(statuses.some((s) => s.phase === 'fallback' && s.model === 'gemini-3.6-flash')).toBe(true);
+    expect(statuses.some((s) => s.phase === 'fallback' && s.model === 'gemini-3.5-flash-lite')).toBe(true);
   });
 
   it('3. 지수 백오프 + 지터 스케줄(1s -> 2.5s -> 5s + 0~300ms)을 정확히 준수한다', async () => {
@@ -122,13 +132,13 @@ describe('Gemini 단일 회복탄력성 레이어 (직렬 큐 · 백오프 · �
     expect(results.map((r) => r.value)).toEqual([1, 2, 3]);
   });
 
-  it('6. 인앱 번역(executeFriendlyTranslation)도 callGeminiWithResilience를 거쳐 503 시 경량 모델로 폴백 성공한다', async () => {
+  it('6. 인앱 번역(executeFriendlyTranslation)도 callGeminiWithResilience를 거쳐 503 시 현행 GA 모델로 폴백 성공한다', async () => {
     const calledUrls: string[] = [];
     const statuses: GeminiResilienceStatus[] = [];
 
     globalThis.fetch = vi.fn().mockImplementation(async (url: string) => {
       calledUrls.push(url);
-      if (url.includes('gemini-2.5-flash:')) {
+      if (url.includes('gemini-3.5-flash-lite:')) {
         return {
           ok: false,
           status: 503,
@@ -154,10 +164,34 @@ describe('Gemini 단일 회복탄력성 레이어 (직렬 큐 · 백오프 · �
     expect(res.success).toBe(true);
     expect(res.engine).toBe('gemini');
     expect(res.translatedText).toBe('위상수학');
-    expect(res.model).toBe('gemini-2.5-flash-lite');
+    expect(res.model).toBe('gemini-3.8-flash');
     expect(res.usedFallback).toBe(true);
-    expect(calledUrls.some((u) => u.includes('gemini-2.5-flash:generateContent'))).toBe(true);
-    expect(calledUrls.some((u) => u.includes('gemini-2.5-flash-lite:generateContent'))).toBe(true);
+    expect(calledUrls.some((u) => u.includes('gemini-3.5-flash-lite:generateContent'))).toBe(true);
+    expect(calledUrls.some((u) => u.includes('gemini-3.8-flash:generateContent'))).toBe(true);
     expect(statuses.some((s) => s.phase === 'retrying')).toBe(true);
+  });
+
+  it('7. 모든 모델 실패 시 AllModelsFailedError가 모델별 상태 코드 요약을 보존한다', async () => {
+    await expect(
+      callGeminiWithResilience(
+        async (model) => {
+          if (model === 'gemini-3.6-flash') {
+            throw Object.assign(new Error('503 overloaded'), { status: 503 });
+          }
+          throw Object.assign(new Error(`404 ${model} not found`), { status: 404 });
+        },
+        {
+          primaryModel: 'gemini-3.6-flash',
+          retryDelayMs: 1,
+        },
+      ),
+    ).rejects.toMatchObject({
+      name: 'AllModelsFailedError',
+      message: expect.stringContaining('gemini-3.6-flash(503)'),
+      attemptFailures: expect.arrayContaining([
+        expect.objectContaining({ model: 'gemini-3.6-flash', status: 503 }),
+        expect.objectContaining({ model: 'gemini-3.8-flash', status: 404 }),
+      ]),
+    });
   });
 });
