@@ -133,5 +133,97 @@ describe('노트 Markdown / PDF 내보내기 (REQ_note_export_md_pdf)', () => {
     const header = new TextDecoder().decode(pdfBytes.slice(0, 5));
     expect(header).toBe('%PDF-');
   });
+
+  it('7. 인지부하 이론 노트의 inlineMath·blockMath·rubyText·wikiLink 수식이 PDF 내보내기에서 누락 없이 렌더링된다 (Issue #26)', async () => {
+    const fillTextCalls: string[] = [];
+    const moveToCalls: Array<[number, number]> = [];
+    const lineToCalls: Array<[number, number]> = [];
+    const fakeCtx = {
+      fillStyle: '',
+      strokeStyle: '',
+      lineWidth: 1,
+      font: '',
+      fillRect: vi.fn(),
+      save: vi.fn(),
+      restore: vi.fn(),
+      scale: vi.fn(),
+      translate: vi.fn(),
+      beginPath: vi.fn(),
+      moveTo: vi.fn((x: number, y: number) => moveToCalls.push([x, y])),
+      lineTo: vi.fn((x: number, y: number) => lineToCalls.push([x, y])),
+      stroke: vi.fn(),
+      measureText: vi.fn((t: string) => ({ width: t.length * 7 })),
+      fillText: vi.fn((t: string) => fillTextCalls.push(t)),
+      drawImage: vi.fn(),
+    };
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(fakeCtx as unknown as CanvasRenderingContext2D);
+    const minimalJpeg = new Uint8Array([
+      0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x01, 0x00, 0x48,
+      0x00, 0x48, 0x00, 0x00, 0xff, 0xc0, 0x00, 0x0b, 0x08, 0x00, 0x01, 0x00, 0x01, 0x01, 0x01, 0x11,
+      0x00, 0xff, 0xda, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3f, 0x00, 0x7f, 0xff, 0xd9,
+    ]);
+    vi.spyOn(HTMLCanvasElement.prototype, 'toBlob').mockImplementation(function (cb) {
+      cb(new Blob([minimalJpeg], { type: 'image/jpeg' }));
+    });
+
+    const mockSession = {
+      id: 'cognitive-load-note',
+      record: { title: '인지부하 이론', encoding: 'utf-8', eol: 'lf' },
+      ui: { pages: [{ id: 'p-1', size: 'A4', style: 'plain', orientation: 'portrait' }] },
+      editor: {
+        getJSON: () => ({
+          type: 'doc',
+          content: [
+            {
+              type: 'heading',
+              attrs: { level: 1 },
+              content: [{ type: 'text', text: '인지부하 이론 (Cognitive Load Theory)' }],
+            },
+            {
+              type: 'paragraph',
+              content: [
+                { type: 'text', text: '수식 예시: ' },
+                { type: 'inlineMath', attrs: { latex: 'L_{total} = L_i + L_e + L_g' } },
+              ],
+            },
+            {
+              type: 'blockMath',
+              attrs: { latex: '\\sum_{k=1}^{n} \\frac{\\alpha_k}{n} \\le 1' },
+            },
+            {
+              type: 'paragraph',
+              content: [
+                { type: 'rubyText', attrs: { base: 'schema', rt: '스키마' } },
+                { type: 'text', text: ' · ' },
+                { type: 'wikiLink', attrs: { label: '작업기억' } },
+              ],
+            },
+          ],
+        }),
+      },
+      strokes: { getAll: () => [] },
+    } as unknown as NoteSession;
+
+    const pdfBytes = await buildPdfBytesFromSession(mockSession);
+    expect(new TextDecoder().decode(pdfBytes.slice(0, 5))).toBe('%PDF-');
+
+    const renderedText = fillTextCalls.join('');
+    // inlineMath: L_{total} = L_i + L_e + L_g 의 첨자/기호가 모두 실제 그려져야 함
+    expect(renderedText).toContain('수식 예시:');
+    expect(renderedText).toContain('total');
+    expect(renderedText).toContain('L');
+    expect(renderedText).toContain('i');
+    expect(renderedText).toContain('e');
+    expect(renderedText).toContain('g');
+    // blockMath: ∑, α, ≤ 및 분수선(moveTo/lineTo)이 그려져야 함
+    expect(renderedText).toContain('∑');
+    expect(renderedText).toContain('α');
+    expect(renderedText).toContain('≤');
+    expect(moveToCalls.length).toBeGreaterThan(0);
+    expect(lineToCalls.length).toBeGreaterThan(0);
+    // rubyText & wikiLink
+    expect(renderedText).toContain('schema(스키마)');
+    expect(renderedText).toContain('작업기억');
+  });
 });
 
