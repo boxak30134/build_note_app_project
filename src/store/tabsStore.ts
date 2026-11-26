@@ -20,6 +20,8 @@ interface TabsState {
   openTab: (id: string, blockId?: string) => void;
   closeTab: (id: string) => void;
   activate: (id: string) => void;
+  moveTab: (fromIndex: number, toIndex: number) => void;
+  reorderTabById: (draggedId: string, targetId: string) => void;
   toggleSplit: (targetId?: string) => void;
   openInSecondary: (id: string, blockId?: string) => void;
   closeSplit: () => void;
@@ -73,6 +75,34 @@ export const useTabs = create<TabsState>()(
           }
           return { activeTabId: id };
         }),
+      moveTab: (fromIndex, toIndex) =>
+        set((s) => {
+          const len = s.openDocTabs.length;
+          if (
+            len <= 1 ||
+            !Number.isInteger(fromIndex) ||
+            !Number.isInteger(toIndex) ||
+            fromIndex < 0 ||
+            fromIndex >= len ||
+            toIndex < 0 ||
+            toIndex >= len ||
+            fromIndex === toIndex
+          ) {
+            return s;
+          }
+          const next = [...s.openDocTabs];
+          const [moved] = next.splice(fromIndex, 1);
+          next.splice(toIndex, 0, moved);
+          return { openDocTabs: next };
+        }),
+      reorderTabById: (draggedId, targetId) => {
+        const tabs = get().openDocTabs;
+        const fromIndex = tabs.indexOf(draggedId);
+        const toIndex = tabs.indexOf(targetId);
+        if (fromIndex !== -1 && toIndex !== -1 && fromIndex !== toIndex) {
+          get().moveTab(fromIndex, toIndex);
+        }
+      },
       toggleSplit: (targetId) =>
         set((s) => {
           if (s.splitOpen && !targetId) {
