@@ -10,6 +10,8 @@ import {
   GEMINI_PRIMARY_MODEL,
   GEMINI_TEMPERATURE,
   GEMINI_THINKING_CONFIG,
+  MAX_NOTE_CONTEXT_CHARS,
+  MAX_RECENT_CHAT_MESSAGES,
   MAX_RETRY_ATTEMPTS,
   RETRY_BASE_DELAY_MS,
   RETRY_JITTER_RATIO,
@@ -18,6 +20,7 @@ import {
   TOTAL_REQUEST_BUDGET_MS,
   type GeminiTutorTarget,
 } from './constants';
+import { applySlidingWindowAndSummary, trimTutorRequestForFallback } from './contextManager';
 import {
   EmptyStreamError,
   TimeoutError,
@@ -273,8 +276,15 @@ export function buildGeminiStreamParams(
     target,
     req.maxOutputTokens ?? (target === 'bubble' ? BUBBLE_MAX_OUTPUT_TOKENS : SIDEBAR_MAX_OUTPUT_TOKENS),
   );
-  const systemInstruction = buildAcademicSystemInstruction(req.systemContext);
-  const contents = toGeminiContents(req);
+  const windowed = applySlidingWindowAndSummary(req.messages, req.systemContext, {
+    maxRecentMessages: MAX_RECENT_CHAT_MESSAGES,
+    maxContextChars: MAX_NOTE_CONTEXT_CHARS,
+  });
+  const systemInstruction = buildAcademicSystemInstruction(windowed.systemContext);
+  const contents = toGeminiContents({
+    prompt: req.prompt,
+    messages: req.messages ? windowed.recentMessages : undefined,
+  });
 
   return {
     model,
@@ -551,7 +561,10 @@ export async function* streamGeminiTutor(req: GeminiTutorRequest): AsyncGenerato
 
   try {
     const resilienceRes = await callGeminiWithResilience<ProbedStream>(
-      (model) => probeStreamFirstChunk(ai, req, model, firstChunkTimeoutMs),
+      (model, ctx) => {
+        const effectiveReq = ctx.trimContext ? trimTutorRequestForFallback(req) : req;
+        return probeStreamFirstChunk(ai, effectiveReq, model, firstChunkTimeoutMs);
+      },
       {
         primaryModel,
         enableFallback: allowFallback,

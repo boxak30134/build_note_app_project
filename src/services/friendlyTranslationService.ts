@@ -7,6 +7,7 @@
 
 import { callGeminiWithResilience, type GeminiResilienceStatus } from './geminiResilience';
 import { getUserFacingErrorMessage } from '../modules/ai/errorMessages';
+import { FALLBACK_NOTE_CONTEXT_CHARS } from '../modules/ai/constants';
 
 export type TranslationEngine = 'local' | 'gemini' | 'public_free';
 
@@ -26,6 +27,78 @@ export interface GeminiTranslationCallOptions {
   signal?: AbortSignal;
   retryDelayMs?: number;
   onStatusChange?: (status: GeminiResilienceStatus) => void;
+  onChunk?: (delta: string, accumulated: string) => void;
+}
+
+function extractTextAndCheckSafety(payload: any): string {
+  const finishReason = payload?.candidates?.[0]?.finishReason;
+  if (finishReason === 'SAFETY' || finishReason === 'PROHIBITED_CONTENT' || finishReason === 'RECITATION') {
+    throw new Error(`SAFETY: 안전 정책에 의해 번역이 차단되었습니다 (${finishReason}).`);
+  }
+  const parts = payload?.candidates?.[0]?.content?.parts;
+  if (!Array.isArray(parts)) return '';
+  return parts
+    .map((p: any) => (p && !p.thought && typeof p.text === 'string' ? p.text : ''))
+    .join('');
+}
+
+async function readSseOrJsonTranslationResponse(
+  response: Response,
+  onChunk?: (delta: string, accumulated: string) => void,
+): Promise<string> {
+  if (response.body && typeof response.body.getReader === 'function') {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let accumulated = '';
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() ?? '';
+      for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line.startsWith('data:')) continue;
+        const jsonStr = line.slice(5).trim();
+        if (!jsonStr || jsonStr === '[DONE]') continue;
+        try {
+          const chunk = JSON.parse(jsonStr);
+          const delta = extractTextAndCheckSafety(chunk);
+          if (delta) {
+            accumulated += delta;
+            onChunk?.(delta, accumulated);
+          }
+        } catch (err) {
+          if (err instanceof Error && err.message.startsWith('SAFETY:')) throw err;
+        }
+      }
+    }
+    const tail = buffer.trim();
+    if (tail.startsWith('data:')) {
+      const jsonStr = tail.slice(5).trim();
+      if (jsonStr && jsonStr !== '[DONE]') {
+        try {
+          const delta = extractTextAndCheckSafety(JSON.parse(jsonStr));
+          if (delta) {
+            accumulated += delta;
+            onChunk?.(delta, accumulated);
+          }
+        } catch (err) {
+          if (err instanceof Error && err.message.startsWith('SAFETY:')) throw err;
+        }
+      }
+    }
+    if (accumulated.trim()) return accumulated.trim();
+  }
+
+  if (typeof response.json === 'function') {
+    const data = await response.json();
+    const candidate = extractTextAndCheckSafety(data);
+    if (candidate.trim()) return candidate.trim();
+  }
+  throw new Error('번역 결과를 생성하지 못했습니다.');
 }
 
 /**
@@ -59,16 +132,20 @@ export async function translateViaGeminiWithMeta(
   options: GeminiTranslationCallOptions = {},
 ): Promise<{ translatedText: string; model: string; requestedModel: string; usedFallback: boolean }> {
   const cleanKey = apiKey.trim();
-  const prompt = `You are a professional academic translator specializing in mathematics and computer science.
+  const res = await callGeminiWithResilience<string>(
+    async (model, ctx) => {
+      const effectiveText = ctx.trimContext ? text.slice(0, FALLBACK_NOTE_CONTEXT_CHARS) : text;
+      const effectiveContext = ctx.trimContext
+        ? (contextSentence || '').slice(0, 200)
+        : (contextSentence || '').slice(0, 1200);
+      const prompt = `You are a professional academic translator specializing in mathematics and computer science.
 Translate the following English text to Korean accurately, maintaining academic terminology (e.g., ring -> 환, field -> 체).
-Surrounding Context: "${contextSentence || ''}"
-Text to translate: "${text}"
+Surrounding Context: "${effectiveContext}"
+Text to translate: "${effectiveText}"
 
 Output ONLY the translated Korean text without explanation or markdown quotes.`;
 
-  const res = await callGeminiWithResilience<string>(
-    async (model) => {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(cleanKey)}`;
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse&key=${encodeURIComponent(cleanKey)}`;
       const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -96,14 +173,7 @@ Output ONLY the translated Korean text without explanation or markdown quotes.`;
         throw err;
       }
 
-      const data = await response.json();
-      const finishReason = data?.candidates?.[0]?.finishReason;
-      if (finishReason === 'SAFETY' || finishReason === 'PROHIBITED_CONTENT' || finishReason === 'RECITATION') {
-        throw new Error(`SAFETY: 안전 정책에 의해 번역이 차단되었습니다 (${finishReason}).`);
-      }
-      const candidate = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-      if (!candidate) throw new Error('번역 결과를 생성하지 못했습니다.');
-      return candidate.trim();
+      return readSseOrJsonTranslationResponse(response, options.onChunk);
     },
     {
       primaryModel: options.model || 'gemini-3.5-flash-lite',

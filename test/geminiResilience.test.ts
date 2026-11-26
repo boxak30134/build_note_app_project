@@ -166,8 +166,8 @@ describe('Gemini 단일 회복탄력성 레이어 (직렬 큐 · 백오프 · �
     expect(res.translatedText).toBe('위상수학');
     expect(res.model).toBe('gemini-3.8-flash');
     expect(res.usedFallback).toBe(true);
-    expect(calledUrls.some((u) => u.includes('gemini-3.5-flash-lite:generateContent'))).toBe(true);
-    expect(calledUrls.some((u) => u.includes('gemini-3.8-flash:generateContent'))).toBe(true);
+    expect(calledUrls.some((u) => u.includes('gemini-3.5-flash-lite:streamGenerateContent'))).toBe(true);
+    expect(calledUrls.some((u) => u.includes('gemini-3.8-flash:streamGenerateContent'))).toBe(true);
     expect(statuses.some((s) => s.phase === 'retrying')).toBe(true);
   });
 
