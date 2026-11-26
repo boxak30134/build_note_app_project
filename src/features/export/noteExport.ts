@@ -88,14 +88,229 @@ export async function exportNoteToMarkdown(session: NoteSession): Promise<boolea
   return saveBytesWithPicker(bytes, fileName, 'text/markdown', ['.md']);
 }
 
-function extractNodeLines(node: JSONContent, depth = 0): Array<{ text: string; size: number; bold?: boolean }> {
-  const lines: Array<{ text: string; size: number; bold?: boolean }> = [];
-  const collectText = (n: JSONContent): string => {
-    if (n.type === 'text') return n.text ?? '';
-    if (n.type === 'hardBreak') return '\n';
-    if (!n.content) return '';
-    return n.content.map(collectText).join('');
-  };
+type ExportSegment =
+  | { type: 'text'; text: string }
+  | { type: 'math'; latex: string };
+
+interface ExportLine {
+  runs: ExportSegment[];
+  size: number;
+  bold?: boolean;
+  isBlockMath?: boolean;
+}
+
+const CALLOUT_LABELS: Record<string, string> = {
+  theorem: 'Theorem (정리)',
+  lemma: 'Lemma (보조정리)',
+  proposition: 'Proposition (명제)',
+  corollary: 'Corollary (따름정리)',
+  definition: 'Definition (정의)',
+  proof: 'Proof (증명)',
+  example: 'Example (예제)',
+  remark: 'Remark (주해)',
+  warning: 'Warning (주의)',
+  note: 'Note (노트)',
+};
+
+const LATEX_SYMBOLS: Record<string, string> = {
+  alpha: 'α',
+  beta: 'β',
+  gamma: 'γ',
+  delta: 'δ',
+  epsilon: 'ε',
+  varepsilon: 'ε',
+  zeta: 'ζ',
+  eta: 'η',
+  theta: 'θ',
+  vartheta: 'ϑ',
+  iota: 'ι',
+  kappa: 'κ',
+  lambda: 'λ',
+  mu: 'μ',
+  nu: 'ν',
+  xi: 'ξ',
+  pi: 'π',
+  rho: 'ρ',
+  sigma: 'σ',
+  tau: 'τ',
+  upsilon: 'υ',
+  phi: 'φ',
+  varphi: 'φ',
+  chi: 'χ',
+  psi: 'ψ',
+  omega: 'ω',
+  Gamma: 'Γ',
+  Delta: 'Δ',
+  Theta: 'Θ',
+  Lambda: 'Λ',
+  Xi: 'Ξ',
+  Pi: 'Π',
+  Sigma: 'Σ',
+  Phi: 'Φ',
+  Psi: 'Ψ',
+  Omega: 'Ω',
+  le: '≤',
+  leq: '≤',
+  ge: '≥',
+  geq: '≥',
+  ne: '≠',
+  neq: '≠',
+  approx: '≈',
+  equiv: '≡',
+  sim: '∼',
+  simeq: '≃',
+  cong: '≅',
+  propto: '∝',
+  pm: '±',
+  mp: '∓',
+  times: '×',
+  div: '÷',
+  cdot: '·',
+  ast: '∗',
+  circ: '∘',
+  bullet: '•',
+  to: '→',
+  rightarrow: '→',
+  leftarrow: '←',
+  leftrightarrow: '↔',
+  Rightarrow: '⇒',
+  Leftarrow: '⇐',
+  Leftrightarrow: '⇔',
+  mapsto: '↦',
+  infty: '∞',
+  partial: '∂',
+  nabla: '∇',
+  forall: '∀',
+  exists: '∃',
+  nexists: '∄',
+  in: '∈',
+  notin: '∉',
+  ni: '∋',
+  subset: '⊂',
+  subseteq: '⊆',
+  supset: '⊃',
+  supseteq: '⊇',
+  cup: '∪',
+  cap: '∩',
+  emptyset: '∅',
+  varnothing: '∅',
+  sum: '∑',
+  prod: '∏',
+  int: '∫',
+  iint: '∬',
+  oint: '∮',
+  degree: '°',
+  prime: '′',
+  angle: '∠',
+  perp: '⊥',
+  parallel: '∥',
+  therefore: '∴',
+  because: '∵',
+  square: '□',
+  quad: '  ',
+  qquad: '    ',
+  ',': ' ',
+  ';': ' ',
+  ' ': ' ',
+  '%': '%',
+  _: '_',
+  '{': '{',
+  '}': '}',
+  '&': '&',
+};
+
+const BLACKBOARD_MAP: Record<string, string> = {
+  R: 'ℝ',
+  N: 'ℕ',
+  Z: 'ℤ',
+  Q: 'ℚ',
+  C: 'ℂ',
+  P: 'ℙ',
+  E: '𝔼',
+};
+
+const TEXT_WRAPPER_CMDS = new Set([
+  'text',
+  'textrm',
+  'textsf',
+  'texttt',
+  'mathrm',
+  'mathbf',
+  'mathit',
+  'mathsf',
+  'mathcal',
+  'operatorname',
+  'boldsymbol',
+  'hat',
+  'bar',
+  'vec',
+  'tilde',
+  'overline',
+]);
+
+function splitInlineRawMath(text: string): ExportSegment[] {
+  if (!text.includes('$')) return text ? [{ type: 'text', text }] : [];
+  const out: ExportSegment[] = [];
+  const re = /\$(?!\$)(?!\s)([^$\n]+?)(?<!\s)\$/g;
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > last) {
+      out.push({ type: 'text', text: text.slice(last, m.index) });
+    }
+    out.push({ type: 'math', latex: m[1].trim() });
+    last = re.lastIndex;
+  }
+  if (last < text.length) {
+    out.push({ type: 'text', text: text.slice(last) });
+  }
+  return out;
+}
+
+function collectSegments(n: JSONContent): ExportSegment[] {
+  if (n.type === 'text') {
+    return splitInlineRawMath(n.text ?? '');
+  }
+  if (n.type === 'hardBreak') {
+    return [{ type: 'text', text: '\n' }];
+  }
+  if (n.type === 'inlineMath') {
+    const latex = String(n.attrs?.latex ?? '').trim();
+    return [{ type: 'math', latex: latex || '□' }];
+  }
+  if (n.type === 'rubyText') {
+    const base = String(n.attrs?.base ?? '');
+    const rt = String(n.attrs?.rt ?? '').trim();
+    return [{ type: 'text', text: rt ? `${base}(${rt})` : base }];
+  }
+  if (n.type === 'wikiLink') {
+    const label = String(n.attrs?.label ?? '링크');
+    return [{ type: 'text', text: label }];
+  }
+  if (!n.content) return [];
+  return n.content.flatMap(collectSegments);
+}
+
+function splitSegmentsByNewline(segments: ExportSegment[]): ExportSegment[][] {
+  const lines: ExportSegment[][] = [[]];
+  for (const seg of segments) {
+    if (seg.type === 'math') {
+      lines[lines.length - 1].push(seg);
+      continue;
+    }
+    const parts = seg.text.split('\n');
+    parts.forEach((part, idx) => {
+      if (idx > 0) lines.push([]);
+      if (part.length > 0) {
+        lines[lines.length - 1].push({ type: 'text', text: part });
+      }
+    });
+  }
+  return lines;
+}
+
+function extractNodeLines(node: JSONContent, depth = 0): ExportLine[] {
+  const lines: ExportLine[] = [];
 
   if (node.type === 'doc') {
     for (const child of node.content ?? []) {
@@ -108,10 +323,22 @@ function extractNodeLines(node: JSONContent, depth = 0): Array<{ text: string; s
     return lines;
   }
 
+  if (node.type === 'blockMath') {
+    const latex = String(node.attrs?.latex ?? '').trim();
+    lines.push({
+      runs: [{ type: 'math', latex: latex || '□' }],
+      size: 15,
+      isBlockMath: true,
+    });
+    return lines;
+  }
+
   if (node.type === 'heading') {
     const level = Number(node.attrs?.level ?? 1);
     const size = level === 1 ? 22 : level === 2 ? 18 : 15;
-    lines.push({ text: collectText(node), size, bold: true });
+    for (const segLine of splitSegmentsByNewline(collectSegments(node))) {
+      lines.push({ runs: segLine, size, bold: true });
+    }
     return lines;
   }
 
@@ -120,7 +347,10 @@ function extractNodeLines(node: JSONContent, depth = 0): Array<{ text: string; s
       const prefix = node.type === 'orderedList' ? `${idx + 1}. ` : '• ';
       const itemLines = extractNodeLines(item, depth + 1);
       if (itemLines.length > 0) {
-        itemLines[0].text = `${'  '.repeat(depth)}${prefix}${itemLines[0].text}`;
+        itemLines[0] = {
+          ...itemLines[0],
+          runs: [{ type: 'text', text: `${'  '.repeat(depth)}${prefix}` }, ...itemLines[0].runs],
+        };
         lines.push(...itemLines);
       }
     });
@@ -130,21 +360,55 @@ function extractNodeLines(node: JSONContent, depth = 0): Array<{ text: string; s
   if (node.type === 'blockquote') {
     for (const child of node.content ?? []) {
       const sub = extractNodeLines(child, depth);
-      sub.forEach((l) => lines.push({ ...l, text: `│ ${l.text}` }));
+      sub.forEach((l) =>
+        lines.push({ ...l, runs: [{ type: 'text', text: '│ ' }, ...l.runs] }),
+      );
+    }
+    return lines;
+  }
+
+  if (node.type === 'callout') {
+    const kind = String(node.attrs?.kind ?? 'note');
+    const title = String(node.attrs?.title ?? '').trim();
+    const header = title || CALLOUT_LABELS[kind] || kind;
+    lines.push({ runs: [{ type: 'text', text: `[${header}]` }], size: 13, bold: true });
+    for (const child of node.content ?? []) {
+      const sub = extractNodeLines(child, depth);
+      sub.forEach((l) =>
+        lines.push({ ...l, runs: [{ type: 'text', text: '│ ' }, ...l.runs] }),
+      );
+    }
+    return lines;
+  }
+
+  if (node.type === 'table') {
+    for (const row of node.content ?? []) {
+      if (row.type !== 'tableRow') continue;
+      const rowRuns: ExportSegment[] = [];
+      (row.content ?? []).forEach((cell, idx) => {
+        if (idx > 0) rowRuns.push({ type: 'text', text: '  |  ' });
+        rowRuns.push(...collectSegments(cell));
+      });
+      if (rowRuns.length > 0) {
+        lines.push({ runs: rowRuns, size: 12 });
+      }
     }
     return lines;
   }
 
   if (node.type === 'codeBlock') {
-    const raw = collectText(node);
-    raw.split('\n').forEach((l) => lines.push({ text: l, size: 11 }));
+    for (const segLine of splitSegmentsByNewline(collectSegments(node))) {
+      lines.push({ runs: segLine, size: 11 });
+    }
     return lines;
   }
 
-  const txt = collectText(node);
-  if (txt.trim() || node.type === 'paragraph') {
-    for (const sub of txt.split('\n')) {
-      lines.push({ text: sub, size: 13 });
+  const segments = collectSegments(node);
+  const split = splitSegmentsByNewline(segments);
+  const hasContent = segments.some((s) => (s.type === 'math' ? s.latex.length > 0 : s.text.trim().length > 0));
+  if (hasContent || node.type === 'paragraph') {
+    for (const segLine of split) {
+      lines.push({ runs: segLine, size: 13 });
     }
   }
   return lines;
@@ -188,21 +452,314 @@ function drawPageGridStyle(ctx: CanvasRenderingContext2D, width: number, height:
   ctx.restore();
 }
 
-function wrapCanvasText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
-  if (!text) return [''];
-  const result: string[] = [];
-  let line = '';
-  for (const ch of text) {
-    const test = line + ch;
-    if (ctx.measureText(test).width > maxWidth && line.length > 0) {
-      result.push(line);
-      line = ch;
-    } else {
-      line = test;
+type MathAstNode =
+  | { kind: 'text'; text: string }
+  | { kind: 'script'; base: MathAstNode; sub?: MathAstNode[]; sup?: MathAstNode[] }
+  | { kind: 'frac'; num: MathAstNode[]; den: MathAstNode[] }
+  | { kind: 'sqrt'; inner: MathAstNode[] }
+  | { kind: 'group'; items: MathAstNode[] };
+
+function parseLatexAst(input: string): MathAstNode[] {
+  let pos = 0;
+
+  const skipSpaces = () => {
+    while (pos < input.length && /\s/.test(input[pos])) pos++;
+  };
+
+  const readArg = (): MathAstNode[] => {
+    skipSpaces();
+    if (pos >= input.length) return [];
+    if (input[pos] === '{') {
+      pos++;
+      const inner = parseSequence('}');
+      if (pos < input.length && input[pos] === '}') pos++;
+      return inner;
+    }
+    const atom = readAtom();
+    return atom ? [atom] : [];
+  };
+
+  const readCommandName = (): string => {
+    pos++; // skip '\'
+    if (pos >= input.length) return '';
+    if (!/[a-zA-Z]/.test(input[pos])) {
+      return input[pos++];
+    }
+    const start = pos;
+    while (pos < input.length && /[a-zA-Z]/.test(input[pos])) pos++;
+    return input.slice(start, pos);
+  };
+
+  const readAtom = (): MathAstNode | null => {
+    if (pos >= input.length) return null;
+    const ch = input[pos];
+    if (ch === '{') {
+      pos++;
+      const items = parseSequence('}');
+      if (pos < input.length && input[pos] === '}') pos++;
+      return { kind: 'group', items };
+    }
+    if (ch === '\\') {
+      const cmd = readCommandName();
+      if (cmd === 'left' || cmd === 'right' || cmd === 'displaystyle' || cmd === 'limits') {
+        return null;
+      }
+      if (cmd === 'frac' || cmd === 'dfrac' || cmd === 'tfrac') {
+        const num = readArg();
+        const den = readArg();
+        return { kind: 'frac', num, den };
+      }
+      if (cmd === 'sqrt') {
+        skipSpaces();
+        if (input[pos] === '[') {
+          while (pos < input.length && input[pos] !== ']') pos++;
+          if (input[pos] === ']') pos++;
+        }
+        return { kind: 'sqrt', inner: readArg() };
+      }
+      if (cmd === 'mathbb') {
+        const inner = readArg();
+        const raw = inner.map((n) => (n.kind === 'text' ? n.text : '')).join('');
+        return { kind: 'text', text: BLACKBOARD_MAP[raw] ?? raw };
+      }
+      if (TEXT_WRAPPER_CMDS.has(cmd)) {
+        return { kind: 'group', items: readArg() };
+      }
+      if (cmd in LATEX_SYMBOLS) {
+        return { kind: 'text', text: LATEX_SYMBOLS[cmd] };
+      }
+      return { kind: 'text', text: cmd };
+    }
+    pos++;
+    return { kind: 'text', text: ch };
+  };
+
+  const parseSequence = (stopChar?: string): MathAstNode[] => {
+    const nodes: MathAstNode[] = [];
+    while (pos < input.length) {
+      const ch = input[pos];
+      if (stopChar && ch === stopChar) break;
+      if (ch === '^' || ch === '_') {
+        const isSup = ch === '^';
+        pos++;
+        const arg = readArg();
+        const prev = nodes.pop() ?? { kind: 'text', text: '' };
+        if (prev.kind === 'script') {
+          if (isSup) prev.sup = arg;
+          else prev.sub = arg;
+          nodes.push(prev);
+        } else {
+          nodes.push({
+            kind: 'script',
+            base: prev,
+            ...(isSup ? { sup: arg } : { sub: arg }),
+          });
+        }
+        continue;
+      }
+      if (/\s/.test(ch)) {
+        pos++;
+        if (nodes.length > 0) {
+          const last = nodes[nodes.length - 1];
+          if (!(last.kind === 'text' && last.text.endsWith(' '))) {
+            nodes.push({ kind: 'text', text: ' ' });
+          }
+        }
+        continue;
+      }
+      const atom = readAtom();
+      if (atom) nodes.push(atom);
+    }
+    return nodes;
+  };
+
+  return parseSequence();
+}
+
+const makeTextFont = (size: number, bold?: boolean) =>
+  `${bold ? 'bold ' : ''}${size}px "Malgun Gothic", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif`;
+
+const makeMathFont = (size: number, bold?: boolean) =>
+  `${bold ? 'bold ' : ''}italic ${size}px "Cambria Math", "Times New Roman", "Malgun Gothic", serif`;
+
+function measureMathAst(ctx: CanvasRenderingContext2D, nodes: MathAstNode[], size: number, bold?: boolean): number {
+  let width = 0;
+  const scriptSize = Math.max(8, Math.round(size * 0.72));
+  const fracSize = Math.max(8, Math.round(size * 0.82));
+
+  for (const node of nodes) {
+    if (node.kind === 'text') {
+      ctx.font = makeMathFont(size, bold);
+      width += ctx.measureText(node.text).width;
+    } else if (node.kind === 'group') {
+      width += measureMathAst(ctx, node.items, size, bold);
+    } else if (node.kind === 'script') {
+      const baseW = measureMathAst(ctx, [node.base], size, bold);
+      const subW = node.sub ? measureMathAst(ctx, node.sub, scriptSize, bold) : 0;
+      const supW = node.sup ? measureMathAst(ctx, node.sup, scriptSize, bold) : 0;
+      width += baseW + Math.max(subW, supW);
+    } else if (node.kind === 'frac') {
+      const numW = measureMathAst(ctx, node.num, fracSize, bold);
+      const denW = measureMathAst(ctx, node.den, fracSize, bold);
+      width += Math.max(numW, denW) + 8;
+    } else if (node.kind === 'sqrt') {
+      ctx.font = makeMathFont(size, bold);
+      width += ctx.measureText('√').width + measureMathAst(ctx, node.inner, size, bold) + 2;
     }
   }
-  if (line) result.push(line);
-  return result;
+  return width;
+}
+
+function drawMathAst(
+  ctx: CanvasRenderingContext2D,
+  nodes: MathAstNode[],
+  x: number,
+  y: number,
+  size: number,
+  bold?: boolean,
+): number {
+  let cursorX = x;
+  const scriptSize = Math.max(8, Math.round(size * 0.72));
+  const fracSize = Math.max(8, Math.round(size * 0.82));
+
+  for (const node of nodes) {
+    if (node.kind === 'text') {
+      ctx.font = makeMathFont(size, bold);
+      ctx.fillText(node.text, cursorX, y);
+      cursorX += ctx.measureText(node.text).width;
+    } else if (node.kind === 'group') {
+      cursorX = drawMathAst(ctx, node.items, cursorX, y, size, bold);
+    } else if (node.kind === 'script') {
+      cursorX = drawMathAst(ctx, [node.base], cursorX, y, size, bold);
+      const subW = node.sub ? measureMathAst(ctx, node.sub, scriptSize, bold) : 0;
+      const supW = node.sup ? measureMathAst(ctx, node.sup, scriptSize, bold) : 0;
+      if (node.sub) {
+        drawMathAst(ctx, node.sub, cursorX, y + size * 0.28, scriptSize, bold);
+      }
+      if (node.sup) {
+        drawMathAst(ctx, node.sup, cursorX, y - size * 0.36, scriptSize, bold);
+      }
+      cursorX += Math.max(subW, supW);
+    } else if (node.kind === 'frac') {
+      const numW = measureMathAst(ctx, node.num, fracSize, bold);
+      const denW = measureMathAst(ctx, node.den, fracSize, bold);
+      const barW = Math.max(numW, denW) + 6;
+      const midX = cursorX + 1 + barW / 2;
+      drawMathAst(ctx, node.num, midX - numW / 2, y - size * 0.44, fracSize, bold);
+      ctx.save();
+      ctx.strokeStyle = ctx.fillStyle as string;
+      ctx.lineWidth = Math.max(0.8, size * 0.06);
+      ctx.beginPath();
+      ctx.moveTo(cursorX + 1, y - size * 0.3);
+      ctx.lineTo(cursorX + 1 + barW, y - size * 0.3);
+      ctx.stroke();
+      ctx.restore();
+      drawMathAst(ctx, node.den, midX - denW / 2, y + size * 0.48, fracSize, bold);
+      cursorX += barW + 2;
+    } else if (node.kind === 'sqrt') {
+      ctx.font = makeMathFont(size, bold);
+      const radW = ctx.measureText('√').width;
+      ctx.fillText('√', cursorX, y);
+      const innerStart = cursorX + radW;
+      const innerEnd = drawMathAst(ctx, node.inner, innerStart, y, size, bold);
+      ctx.save();
+      ctx.strokeStyle = ctx.fillStyle as string;
+      ctx.lineWidth = Math.max(0.8, size * 0.06);
+      ctx.beginPath();
+      ctx.moveTo(innerStart, y - size * 0.85);
+      ctx.lineTo(innerEnd + 2, y - size * 0.85);
+      ctx.stroke();
+      ctx.restore();
+      cursorX = innerEnd + 2;
+    }
+  }
+  return cursorX;
+}
+
+function measureRunsWidth(
+  ctx: CanvasRenderingContext2D,
+  runs: ExportSegment[],
+  size: number,
+  bold?: boolean,
+): number {
+  let width = 0;
+  for (const run of runs) {
+    if (run.type === 'text') {
+      ctx.font = makeTextFont(size, bold);
+      width += ctx.measureText(run.text).width;
+    } else {
+      width += measureMathAst(ctx, parseLatexAst(run.latex), size, bold);
+    }
+  }
+  return width;
+}
+
+function wrapSegmentRuns(
+  ctx: CanvasRenderingContext2D,
+  runs: ExportSegment[],
+  size: number,
+  maxWidth: number,
+  bold?: boolean,
+): ExportSegment[][] {
+  if (runs.length === 0) return [[]];
+  const wrapped: ExportSegment[][] = [[]];
+  let currentWidth = 0;
+
+  for (const run of runs) {
+    if (run.type === 'math') {
+      const mathW = measureMathAst(ctx, parseLatexAst(run.latex), size, bold);
+      if (currentWidth > 0 && currentWidth + mathW > maxWidth) {
+        wrapped.push([run]);
+        currentWidth = mathW;
+      } else {
+        wrapped[wrapped.length - 1].push(run);
+        currentWidth += mathW;
+      }
+      continue;
+    }
+
+    let buf = '';
+    ctx.font = makeTextFont(size, bold);
+    for (const ch of run.text) {
+      const chW = ctx.measureText(buf + ch).width;
+      if (currentWidth + chW > maxWidth && (buf.length > 0 || currentWidth > 0)) {
+        if (buf.length > 0) {
+          wrapped[wrapped.length - 1].push({ type: 'text', text: buf });
+        }
+        wrapped.push([]);
+        buf = ch;
+        currentWidth = 0;
+      } else {
+        buf += ch;
+      }
+    }
+    if (buf.length > 0) {
+      ctx.font = makeTextFont(size, bold);
+      currentWidth += ctx.measureText(buf).width;
+      wrapped[wrapped.length - 1].push({ type: 'text', text: buf });
+    }
+  }
+  return wrapped;
+}
+
+function drawSegmentRuns(
+  ctx: CanvasRenderingContext2D,
+  runs: ExportSegment[],
+  startX: number,
+  y: number,
+  size: number,
+  bold?: boolean,
+): void {
+  let cursorX = startX;
+  for (const run of runs) {
+    if (run.type === 'text') {
+      ctx.font = makeTextFont(size, bold);
+      ctx.fillText(run.text, cursorX, y);
+      cursorX += ctx.measureText(run.text).width;
+    } else {
+      cursorX = drawMathAst(ctx, parseLatexAst(run.latex), cursorX, y, size, bold);
+    }
+  }
 }
 
 function canvasToJpegUint8Array(canvas: HTMLCanvasElement, quality = 0.88): Promise<Uint8Array> {
@@ -255,14 +812,16 @@ export async function buildPdfBytesFromSession(
   // inkTemplate 노드가 있는 경우 페이지별 배경 이미지 소스 매핑
   const templateNodes = (docJson.content ?? []).filter((n) => n.type === 'inkTemplate');
   const textLines = extractNodeLines(docJson);
-  const totalPages = Math.max(pages.length, templateNodes.length);
+  const hasTemplates = templateNodes.length > 0;
+  let pageCount = Math.max(pages.length, templateNodes.length);
 
   // 각 페이지의 세로 누적 오프셋 계산 (S-Pen 스트로크 Y좌표 매핑용)
   let currentYOffset = 0;
   let lineCursor = 0;
 
-  for (let i = 0; i < totalPages; i++) {
-    onProgress?.(i + 1, totalPages);
+  for (let i = 0; i < pageCount || (!hasTemplates && lineCursor < textLines.length && i < 100); i++) {
+    const effectiveTotal = hasTemplates ? pageCount : Math.max(pageCount, i + 1);
+    onProgress?.(i + 1, effectiveTotal);
     const pageMeta = pages[i] ?? pages[pages.length - 1];
     const dims = getPageDimensions(pageMeta.size, pageMeta.orientation);
     const renderScale = 1.5; // 태블릿/데스크톱 균형 해상도
@@ -296,7 +855,7 @@ export async function buildPdfBytesFromSession(
           /* 템플릿 로드 실패 시 빈 배경으로 진행 */
         }
       } else if (i === 0 || lineCursor < textLines.length) {
-        // 3) 일반 에디터 텍스트 렌더링
+        // 3) 일반 에디터 텍스트 및 KaTeX/LaTeX 수식 렌더링
         const marginX = 48;
         let cursorY = 56;
         const maxWidth = dims.width - marginX * 2;
@@ -304,18 +863,26 @@ export async function buildPdfBytesFromSession(
 
         while (lineCursor < textLines.length) {
           const item = textLines[lineCursor];
-          ctx.font = `${item.bold ? 'bold ' : ''}${item.size}px "Malgun Gothic", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif`;
-          const wrapped = wrapCanvasText(ctx, item.text, maxWidth);
-          const lineHeight = item.size * 1.5;
+          const wrapped = wrapSegmentRuns(ctx, item.runs, item.size, maxWidth, item.bold);
+          const hasBlockMathOrFrac = item.isBlockMath || item.runs.some((r) => r.type === 'math' && /\\frac/.test(r.latex));
+          const lineHeight = item.size * (hasBlockMathOrFrac ? 2.1 : 1.5);
 
-          if (cursorY + wrapped.length * lineHeight > dims.height - 48) {
+          if (cursorY + wrapped.length * lineHeight > dims.height - 48 && cursorY > 56) {
             break;
           }
+          if (item.isBlockMath) {
+            cursorY += 4;
+          }
           for (const wLine of wrapped) {
-            ctx.fillText(wLine, marginX, cursorY);
+            let drawX = marginX;
+            if (item.isBlockMath) {
+              const lineW = measureRunsWidth(ctx, wLine, item.size, item.bold);
+              drawX = marginX + Math.max(0, (maxWidth - lineW) / 2);
+            }
+            drawSegmentRuns(ctx, wLine, drawX, cursorY, item.size, item.bold);
             cursorY += lineHeight;
           }
-          cursorY += 4;
+          cursorY += item.isBlockMath ? 8 : 4;
           lineCursor++;
         }
       }
