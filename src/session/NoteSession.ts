@@ -10,8 +10,10 @@ import { appendBubbleText, clampBubbleText, consumeAiTurn, MAX_BUBBLE_CHAR_LENGT
 import { dataUrlToBase64, PROVIDER_LABEL, streamAi } from '../ai/aiClient';
 import {
   BUBBLE_MAX_OUTPUT_TOKENS,
+  buildDeterministicRollingSummary,
   GEMINI_PRIMARY_MODEL,
   getUserFacingErrorMessage,
+  MAX_NOTE_CONTEXT_CHARS,
   streamGeminiTutor,
 } from '../modules/ai';
 import type { GeminiResilienceStatus } from '../services/geminiResilience';
@@ -1278,7 +1280,7 @@ export class NoteSession {
       return false;
     }
 
-    const quote = this.annotationQuote(annotation);
+    const quote = this.annotationQuote(annotation).slice(0, MAX_NOTE_CONTEXT_CHARS);
     const strokeImg =
       annotation.anchor.type === 'strokes' ? renderStrokesToDataUrl(this.getStrokesForAnnotation(annotation)) : null;
     const parts: Array<{ type: 'text'; text: string } | { type: 'file'; mediaType: string; data: string }> = [];
@@ -1293,10 +1295,20 @@ export class NoteSession {
         const { base64, mediaType } = dataUrlToBase64(a.dataUrl);
         parts.push({ type: 'file', mediaType, data: base64 });
       } else {
-        parts.push({ type: 'text', text: `[첨부 문서 조각: ${a.name}]\n${a.text.slice(0, 8000)}` });
+        parts.push({ type: 'text', text: `[첨부 문서 조각: ${a.name}]\n${a.text.slice(0, 6000)}` });
       }
     }
-    if (annotation.body.trim()) parts.push({ type: 'text', text: `[현재 말풍선 메모]\n${annotation.body}` });
+    if (annotation.body.trim()) {
+      const trimmedBody = annotation.body.trim();
+      const bubbleMemo =
+        trimmedBody.length > 1400
+          ? `${buildDeterministicRollingSummary(
+              [{ role: 'assistant', content: trimmedBody.slice(0, -800) }],
+              3,
+            )}\n${trimmedBody.slice(-800)}`
+          : trimmedBody;
+      parts.push({ type: 'text', text: `[현재 말풍선 메모]\n${bubbleMemo}` });
+    }
     parts.push({ type: 'text', text: `[질문]\n${q}` });
 
     this.updateAnnotation(annotationId, {

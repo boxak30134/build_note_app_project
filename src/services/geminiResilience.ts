@@ -9,6 +9,7 @@ import {
   AllModelsFailedError,
   TimeoutError,
   classifyGeminiError,
+  diagnoseGeminiFailureReason,
   extractHttpStatus,
   extractRetryDelayMs,
   getUserFacingErrorMessage,
@@ -239,7 +240,10 @@ export async function waitWithExponentialBackoff(
  * - 400/401/403 API 키 오류 및 안전 정책 차단은 즉시 중단하고 명확한 한국어 안내 반환
  */
 export async function callGeminiWithResilience<T>(
-  executor: (model: string, context: { attempt: number; usedFallback: boolean }) => Promise<T>,
+  executor: (
+    model: string,
+    context: { attempt: number; usedFallback: boolean; trimContext: boolean; lastError: unknown },
+  ) => Promise<T>,
   options: GeminiResilienceOptions = {},
 ): Promise<GeminiResilienceResult<T>> {
   const {
@@ -282,6 +286,7 @@ export async function callGeminiWithResilience<T>(
         triedModels.push(currentModel);
       }
       const usedFallback = currentModel !== requestedModel;
+      const trimContext = usedFallback || totalAttempts > 0;
       totalAttempts++;
 
       if (totalAttempts === 1) {
@@ -298,6 +303,8 @@ export async function callGeminiWithResilience<T>(
         const value = await executor(currentModel, {
           attempt: totalAttempts,
           usedFallback,
+          trimContext: usedFallback || totalAttempts > 1,
+          lastError,
         });
         onModelResolved?.(currentModel, { requestedModel, usedFallback });
         return {
@@ -329,10 +336,13 @@ export async function callGeminiWithResilience<T>(
 
         const errStatus = extractHttpStatus(err);
         const rawErrSummary = sanitizeLogMessage(err instanceof Error ? err.message : String(err ?? ''));
+        const diagnosed = diagnoseGeminiFailureReason(err);
         attemptFailures.push({
           model: currentModel,
           status: errStatus,
           summary: classification === 'timeout' ? 'timeout' : rawErrSummary.slice(0, 60) || classification,
+          stage: trimContext && totalAttempts > 1 ? 'fallback-trimmed' : 'primary',
+          reasonKo: diagnosed.detailKo,
         });
 
         // 영구 오류(인증/권한/요청형식/안전차단)는 재시도·폴백 없이 즉시 중단

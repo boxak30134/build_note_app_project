@@ -24,6 +24,13 @@ export const FIRST_CHUNK_TIMEOUT_MS = 12000; // 첫 청크(thought 포함) 도�
 export const CHUNK_GAP_TIMEOUT_MS = 20000; // 청크 간 무응답 제한 (20초)
 export const TOTAL_REQUEST_BUDGET_MS = 90000; // 전체 재시도·폴백 합산 상한 (90초)
 
+/** 컨텍스트 슬라이딩 윈도우 및 롤링 요약·페이로드 상한 (REQ_gemini_context_trim_streaming) */
+export const MAX_RECENT_CHAT_MESSAGES = 6; // 최근 4~6개 메시지만 원문 유지
+export const ROLLING_SUMMARY_MAX_LINES = 5; // 이전 대화 3~5줄 핵심 요약
+export const MAX_NOTE_CONTEXT_CHARS = 12000; // 활성 페이지/선택 영역 중심 노트 컨텍스트 상한
+export const FALLBACK_NOTE_CONTEXT_CHARS = 3000; // 폴백 전환 시 핵심 문맥 상한
+export const FALLBACK_MESSAGE_MAX_CHARS = 4000; // 폴백 전환 시 최신 단일 질문 텍스트 상한
+
 /** 3.x 세대 기본값 유지, 임의 감소 금지 (§6.1) */
 export const GEMINI_TEMPERATURE = 1.0;
 

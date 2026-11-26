@@ -11,9 +11,15 @@ import { dataUrlToBase64, streamAi, PROVIDER_LABEL, PROVIDER_KEY_URL, PROVIDER_K
 import { estimateTurnTokenPreview } from '../ai/modelCatalog';
 import { AiModelSelector } from './AiModelSelector';
 import {
+  AllModelsFailedError,
+  applySlidingWindowAndSummary,
   clearGeminiClientCache,
+  extractFocusedNoteContext,
   GEMINI_FALLBACK_MODEL,
   GEMINI_PRIMARY_MODEL,
+  getUserFacingErrorMessage,
+  MAX_NOTE_CONTEXT_CHARS,
+  MAX_RECENT_CHAT_MESSAGES,
   SIDEBAR_MAX_OUTPUT_TOKENS,
   streamGeminiTutor,
 } from '../modules/ai';
@@ -497,10 +503,7 @@ function Chat({ connected, onConnect }: { connected: AiProviderId[]; onConnect: 
     lastQuestionRef.current = q;
 
     const s = getSession(activeId);
-    // 토큰 최적화(token_optimization_guide.md §2.1~2.2): 전체 문서 통째 주입 대신 핵심 청크(최대 2,000자) 및 최근 4턴 슬라이딩 윈도우 전송
-    const context = s ? s.editor.getMarkdown().slice(0, 2000) : '';
-    const title = s?.record.title ?? '';
-    const systemContext = context ? `[현재 노트: ${title}]\n${context}` : '(현재 열린 노트 없음)';
+    const baseSystemContext = extractFocusedNoteContext(s, MAX_NOTE_CONTEXT_CHARS);
     const history: ChatMsg[] = [
       ...msgs,
       { role: 'user', content: q, ...(pendingImage ? { imageDataUrl: pendingImage.dataUrl } : {}) },
@@ -525,9 +528,8 @@ function Chat({ connected, onConnect }: { connected: AiProviderId[]; onConnect: 
     });
 
     try {
-      const prunedHistory = history.slice(-8);
-      const messages: ModelMessage[] = prunedHistory.map((m, idx) => {
-        if (idx === prunedHistory.length - 1 && m.role === 'user' && pendingImage) {
+      const rawMessages: ModelMessage[] = history.map((m, idx) => {
+        if (idx === history.length - 1 && m.role === 'user' && pendingImage) {
           const { base64, mediaType } = dataUrlToBase64(pendingImage.dataUrl);
           return {
             role: 'user',
@@ -539,6 +541,12 @@ function Chat({ connected, onConnect }: { connected: AiProviderId[]; onConnect: 
         }
         return { role: m.role, content: m.content };
       });
+      const windowed = applySlidingWindowAndSummary(rawMessages, baseSystemContext, {
+        maxRecentMessages: MAX_RECENT_CHAT_MESSAGES,
+        maxContextChars: MAX_NOTE_CONTEXT_CHARS,
+      });
+      const messages = windowed.recentMessages;
+      const systemContext = windowed.systemContext;
       let acc = '';
       if (provider === 'google') {
         const modelId = useSettings.getState().aiModels.google || GEMINI_PRIMARY_MODEL;
@@ -618,7 +626,12 @@ function Chat({ connected, onConnect }: { connected: AiProviderId[]; onConnect: 
             },
           ]);
         } else {
-          const errMsg = (err as Error)?.message || 'AI 호출 중 알 수 없는 오류가 발생했습니다.';
+          const errMsg =
+            err instanceof AllModelsFailedError
+              ? getUserFacingErrorMessage(err)
+              : provider === 'google'
+                ? getUserFacingErrorMessage(err)
+                : (err as Error)?.message || 'AI 호출 중 알 수 없는 오류가 발생했습니다.';
           toast.error(errMsg, 'AI 호출 실패');
           setStatusInfo({ status: 'error', message: errMsg });
           setMsgs([...history, { role: 'assistant', content: `⚠️ 오류로 답변을 받지 못했습니다.\n${errMsg}` }]);
