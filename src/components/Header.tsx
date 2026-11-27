@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { motion, AnimatePresence } from 'framer-motion';
-import { PanelLeft, PanelRight, Plus, FileText, Image as ImageIcon, Camera, Table, MessageSquare, MessageSquarePlus, Save, Bot, HardDrive, Download, FileDown } from 'lucide-react';
+import { PanelLeft, PanelRight, Plus, FileText, Image as ImageIcon, Camera, Table, MessageSquare, MessageSquarePlus, Save, Bot, HardDrive, Download, FileDown, RefreshCw } from 'lucide-react';
 import { Capacitor } from '@capacitor/core';
 import { FeedbackModal } from './FeedbackModal';
+import { applyAppUpdate, checkForAppUpdate, usePwaUpdateStore } from '../core/pwa/pwaUpdater';
 import { useSettings } from '../store/settingsStore';
 import { useTabs } from '../store/tabsStore';
 import { useSessionUI } from '../store/sessionStore';
@@ -39,8 +40,20 @@ export function Header() {
   const [title, setTitle] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [feedbackOpen, setFeedbackOpen] = useState(false);
+  const { version, commit, builtAt, updateAvailable, remoteInfo, checking } = usePwaUpdateStore();
   const editingRef = useRef(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const handleCheckUpdate = async () => {
+    const res = await checkForAppUpdate({ silent: false });
+    if (res.offline) {
+      toast.info('오프라인 상태에서는 업데이트를 확인할 수 없습니다.');
+    } else if (res.updateAvailable) {
+      toast.success('새 버전이 감지되었습니다. [업데이트] 버튼을 눌러 새로고침하세요.');
+    } else {
+      toast.info(`현재 최신 버전(v${version})을 사용 중입니다.`);
+    }
+  };
 
   useEffect(() => {
     if (!editingRef.current) setTitle(note?.title ?? '');
@@ -74,7 +87,45 @@ export function Header() {
       <button className={`icon-btn ${leftOpen ? 'text-indigo-600' : ''}`} onClick={toggleLeft} title="왼쪽 사이드바 열기/닫기">
         <PanelLeft size={18} />
       </button>
-      <div className="mr-2 hidden select-none items-center gap-1 text-sm font-bold text-indigo-600 md:flex">✒️ EduInk</div>
+      <div className="mr-1 flex shrink-0 select-none items-center gap-1.5">
+        <span className="hidden items-center gap-1 text-sm font-bold text-indigo-600 md:flex">✒️ EduInk</span>
+        <span
+          data-testid="app-version-badge"
+          className="hidden rounded-full bg-indigo-50 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-indigo-600 md:inline-flex"
+          title={`EduInk Studio v${version} (${commit}${builtAt ? ` · ${builtAt}` : ''})`}
+        >
+          v{version}
+        </span>
+        {updateAvailable ? (
+          <button
+            type="button"
+            data-testid="apply-update-btn"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => void applyAppUpdate()}
+            className="inline-flex items-center gap-1 rounded-full bg-emerald-600 px-2 py-0.5 text-[10px] font-semibold text-white shadow-xs transition hover:bg-emerald-700 active:scale-95"
+            title={
+              remoteInfo
+                ? `새 버전(v${remoteInfo.version} · ${remoteInfo.commit})이 배포되었습니다. 클릭하여 새로고침`
+                : '새 버전이 준비되었습니다. 클릭하여 새로고침'
+            }
+          >
+            <RefreshCw size={11} />
+            <span>업데이트</span>
+          </button>
+        ) : (
+          <button
+            type="button"
+            data-testid="check-update-btn"
+            disabled={checking}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => void handleCheckUpdate()}
+            className="hidden h-6 w-6 items-center justify-center rounded-md text-slate-400 transition hover:bg-slate-100 hover:text-indigo-600 disabled:opacity-50 md:inline-flex"
+            title="최신 배포 업데이트 확인"
+          >
+            <RefreshCw size={12} className={checking ? 'animate-spin text-indigo-600' : ''} />
+          </button>
+        )}
+      </div>
       <div className="relative mx-auto flex min-w-0 max-w-xl flex-1 items-center gap-2">
         <input
           type="text"
