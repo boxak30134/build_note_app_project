@@ -1,9 +1,46 @@
 /// <reference types="vitest/config" />
 import { fileURLToPath, URL } from 'node:url';
-import { defineConfig } from 'vite';
+import { readFileSync } from 'node:fs';
+import { execSync } from 'node:child_process';
+import { defineConfig, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 import { VitePWA } from 'vite-plugin-pwa';
+
+function readAppBuildMeta() {
+  let version = '0.1.0';
+  try {
+    const pkg = JSON.parse(readFileSync(fileURLToPath(new URL('./package.json', import.meta.url)), 'utf-8')) as {
+      version?: string;
+    };
+    if (pkg.version) version = pkg.version;
+  } catch {
+    /* ignore */
+  }
+  let commit = 'dev';
+  try {
+    commit = execSync('git rev-parse --short HEAD', { stdio: ['ignore', 'pipe', 'ignore'] })
+      .toString('utf8')
+      .trim() || 'dev';
+  } catch {
+    /* ignore */
+  }
+  const builtAt = new Date().toISOString();
+  return { version, commit, builtAt };
+}
+
+function emitVersionManifestPlugin(meta: { version: string; commit: string; builtAt: string }): Plugin {
+  return {
+    name: 'eduink-version-manifest',
+    generateBundle() {
+      this.emitFile({
+        type: 'asset',
+        fileName: 'version.json',
+        source: JSON.stringify(meta, null, 2),
+      });
+    },
+  };
+}
 
 const isReleaseByokBuild =
   process.env.VITE_BYOK_ONLY === 'true' ||
@@ -22,13 +59,15 @@ export default defineConfig(({ mode }) => {
     mode === 'release' ||
     process.env.VITE_BYOK_ONLY === 'true' ||
     process.env.VITE_RELEASE_BUILD === 'true';
+  const appMeta = readAppBuildMeta();
 
   return {
     plugins: [
       react(),
       tailwindcss(),
+      emitVersionManifestPlugin(appMeta),
       VitePWA({
-        registerType: 'autoUpdate',
+        registerType: 'prompt',
         manifest: {
           name: 'EduInk Studio',
           short_name: 'EduInk',
@@ -54,17 +93,22 @@ export default defineConfig(({ mode }) => {
         },
         workbox: {
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
-          navigateFallbackDenylist: [/^\/oauth\/callback/],
+          navigateFallbackDenylist: [/^\/oauth\/callback/, /^\/version\.json/],
         },
       }),
     ],
     worker: { format: 'es' },
-    define: byokRelease
-      ? {
-          'import.meta.env.VITE_GEMINI_API_KEY': JSON.stringify(''),
-          'import.meta.env.VITE_BYOK_ONLY': JSON.stringify('true'),
-        }
-      : undefined,
+    define: {
+      __APP_VERSION__: JSON.stringify(appMeta.version),
+      __APP_COMMIT__: JSON.stringify(appMeta.commit),
+      __APP_BUILT_AT__: JSON.stringify(appMeta.builtAt),
+      ...(byokRelease
+        ? {
+            'import.meta.env.VITE_GEMINI_API_KEY': JSON.stringify(''),
+            'import.meta.env.VITE_BYOK_ONLY': JSON.stringify('true'),
+          }
+        : {}),
+    },
     build: {
       chunkSizeWarningLimit: 1500,
       rollupOptions: {
