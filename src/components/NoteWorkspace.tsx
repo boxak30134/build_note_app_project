@@ -359,6 +359,12 @@ function LoadedWorkspace({
     session.editor.setEditable(!ui.readOnly);
   }, [ui.readOnly, session]);
 
+  useEffect(() => {
+    if (settings.tool !== 'none') {
+      session.blurEditor?.();
+    }
+  }, [settings.tool, session]);
+
   // 터치 제스처: 두 손가락 핀치(확대/축소) 터치 무브먼트 및 1손가락 패닝(+관성) 스크롤 (Pull-up 자동 생성 제거됨)
   useEffect(() => {
     const viewport = viewportRef.current;

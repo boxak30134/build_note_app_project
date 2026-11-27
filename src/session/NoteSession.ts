@@ -1178,15 +1178,27 @@ export class NoteSession {
     return readCursorFontSizePx(this.editor.state);
   }
 
+  /** 에디터가 포커스를 가지고 있을 때 스크롤 튐 없이 포커스만 안전하게 해제한다. */
+  blurEditor() {
+    if (!this.editor || this.editor.isDestroyed) return;
+    try {
+      if (this.editor.isFocused) {
+        this.editor.commands.blur();
+      }
+      const dom = this.editor.view?.dom;
+      if (dom && document.activeElement === dom) {
+        dom.blur();
+      }
+    } catch {
+      // mock 또는 마운트 해제 중 예외 무시
+    }
+  }
+
   applyTextColor(color: string) {
     if (!this.editor) return;
-    const { empty } = this.editor.state.selection;
     const isTextMode = useSettings.getState().tool === 'none';
-    if (!empty) {
-      this.editor.chain().focus().setMark('textColor', { color }).run();
-    } else if (isTextMode) {
-      this.editor.chain().focus().setMark('textColor', { color }).run();
-    }
+    if (!isTextMode) return;
+    this.editor.chain().focus().setMark('textColor', { color }).run();
   }
 
   scheduleTitleSync() {

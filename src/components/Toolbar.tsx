@@ -188,6 +188,16 @@ function getContrastColor(hex: string): string {
   return yiq >= 150 ? '#000000' : '#FFFFFF';
 }
 
+function syncColorWithSession(activeId: string | null | undefined, color: string | undefined) {
+  const s = getSession(activeId);
+  if (!s) return;
+  if (useSettings.getState().tool === 'none') {
+    if (color) s.applyTextColor(color);
+  } else {
+    s.blurEditor?.();
+  }
+}
+
 function ColorSlots({ activeId }: { activeId?: string | null }) {
   const { colorSlots, activeSlot, selectSlot, customColor, isCustomColorActive, selectCustomColor } = useSettings();
   const [editing, setEditing] = useState<{ index: number; el: HTMLElement } | null>(null);
@@ -195,15 +205,12 @@ function ColorSlots({ activeId }: { activeId?: string | null }) {
 
   const handleSelectSlot = (i: number) => {
     selectSlot(i);
-    const color = colorSlots[i];
-    const s = getSession(activeId);
-    if (s && color) s.applyTextColor(color);
+    syncColorWithSession(activeId, colorSlots[i]);
   };
 
   const handleSelectCustomColor = () => {
     selectCustomColor();
-    const s = getSession(activeId);
-    if (s && customColor) s.applyTextColor(customColor);
+    syncColorWithSession(activeId, customColor);
   };
 
   return (
@@ -311,8 +318,7 @@ function ColorPickerPopover({
       const upper = c.toUpperCase();
       setSlotColor(index, upper);
       selectSlot(index);
-      const s = getSession(activeId);
-      if (s) s.applyTextColor(upper);
+      syncColorWithSession(activeId, upper);
     }
   };
   const [r, g, b] = hexToRgb(current);

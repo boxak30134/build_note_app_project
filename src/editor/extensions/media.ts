@@ -533,8 +533,12 @@ export const InkTemplate = Node.create<NoteImageOptions>({
         },
         stopEvent: (event) => {
           // REQPDFTEXTCURSORJUMPROOTCAUSE: 텍스트 모드(activeTool === 'none')일 때 ProseMirror selection jump 원천 차단
+          // 필기 모드에서도 mousedown/click/touchstart로 인한 에디터 포커스·맨 아래 문단 스크롤 점프를 차단(pointerdown은 S-Pen 경로 보존)
           const type = event.type;
-          if (type === 'pointerdown' || type === 'mousedown' || type === 'touchstart' || type === 'click') {
+          if (type === 'mousedown' || type === 'click' || type === 'touchstart') {
+            return true;
+          }
+          if (type === 'pointerdown') {
             const currentTool = useSettings.getState().tool;
             if (currentTool === 'none') {
               return true;
