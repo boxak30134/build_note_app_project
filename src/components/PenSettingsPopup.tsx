@@ -3,6 +3,8 @@ import { motion } from 'framer-motion';
 import { X, Check, Minus, Plus } from 'lucide-react';
 import { useSettings, PEN_TYPES, PALETTE_COLOR_NAMES, type PenType } from '../store/settingsStore';
 import { RgbColorPickerModal, hexToRgb } from './RgbColorPickerModal';
+import { useTabs } from '../store/tabsStore';
+import { getSession } from '../session/NoteSession';
 
 interface Props {
   open: boolean;
@@ -139,6 +141,26 @@ export function PenSettingsPopup({ open, onClose }: Props) {
 
   const [rgbModalOpen, setRgbModalOpen] = useState(false);
 
+  const blurActiveEditorIfDrawing = () => {
+    if (useSettings.getState().tool === 'none') return;
+    getSession(useTabs.getState().activeTabId)?.blurEditor?.();
+  };
+
+  const handleClose = () => {
+    blurActiveEditorIfDrawing();
+    onClose();
+  };
+
+  const handleSelectPenType = (type: PenType) => {
+    setPenType(type);
+    blurActiveEditorIfDrawing();
+  };
+
+  const handleSelectColorSlot = (idx: number) => {
+    selectSlot(idx);
+    blurActiveEditorIfDrawing();
+  };
+
   const activeColorHex = isCustomColorActive && customColor ? customColor : colorSlots[activeSlot] || '#000000';
 
   const renderPenIcon = (type: PenType) => {
@@ -162,7 +184,7 @@ export function PenSettingsPopup({ open, onClose }: Props) {
     <>
       <div
         className="fixed inset-0 z-40 bg-transparent"
-        onClick={onClose}
+        onClick={handleClose}
         data-testid="pen-settings-backdrop"
       />
       <motion.div
@@ -182,7 +204,7 @@ export function PenSettingsPopup({ open, onClose }: Props) {
           <button
             type="button"
             className="rounded-full p-1 text-slate-400 hover:bg-white/10 hover:text-white"
-            onClick={onClose}
+            onClick={handleClose}
             title="닫기"
           >
             <X size={17} />
@@ -210,7 +232,7 @@ export function PenSettingsPopup({ open, onClose }: Props) {
               <button
                 key={p.id}
                 type="button"
-                onClick={() => setPenType(p.id)}
+                onClick={() => handleSelectPenType(p.id)}
                 className={`group relative flex flex-col items-center transition-all duration-200 focus:outline-none ${
                   isActive ? '-translate-y-2' : 'hover:-translate-y-1 opacity-70 hover:opacity-100'
                 }`}
@@ -294,7 +316,7 @@ export function PenSettingsPopup({ open, onClose }: Props) {
               <button
                 key={idx}
                 type="button"
-                onClick={() => selectSlot(idx)}
+                onClick={() => handleSelectColorSlot(idx)}
                 className={`relative flex h-7 w-7 items-center justify-center rounded-full transition-transform duration-150 hover:scale-110 focus:outline-none ${
                   isSelected ? 'ring-2 ring-white/80 ring-offset-2 ring-offset-[#232429]' : ''
                 }`}

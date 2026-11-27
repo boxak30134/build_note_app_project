@@ -96,7 +96,13 @@ export function RgbColorPickerModal({ open, onClose, initialColor, onApply }: Pr
       selectCustomColor();
       const activeId = useTabs.getState().activeTabId;
       const s = getSession(activeId);
-      if (s) s.applyTextColor(finalHex);
+      if (s) {
+        if (useSettings.getState().tool === 'none') {
+          s.applyTextColor(finalHex);
+        } else {
+          s.blurEditor?.();
+        }
+      }
     }
     toast.success(`사용자 지정 RGB 색상(${finalHex})이 적용되었습니다.`);
     onClose();
