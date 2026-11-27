@@ -1,7 +1,7 @@
 import { Editor } from '@tiptap/core';
 import type { Node as PMNode } from '@tiptap/pm/model';
 import { CompositeHistoryManager, newCommandId } from '../core/history/CompositeHistoryManager';
-import { StrokeStore, newStrokeId, type Stroke } from '../core/strokes/StrokeStore';
+import { StrokeStore, newStrokeId, type PageYRange, type Stroke } from '../core/strokes/StrokeStore';
 import { translatePoints } from '../core/geometry/geometry';
 import { newTextObjectId, type NoteTextObject } from '../core/text/textObjects';
 import { decodeText, UnencodableCharError } from '../core/codec/textCodec';
@@ -32,6 +32,7 @@ import { drafts } from '../storage/drafts';
 import { readHandle, writeHandle } from '../storage/localFiles';
 import { extOfMime, saveAttachmentExclusive, saveImageExclusive } from '../storage/opfs';
 import { pdfZoomRenderer } from '../features/import/pdfZoomRenderer';
+import { thumbnailPipeline } from '../core/page/thumbnailPipeline';
 import { indexNote, searchRelated } from '../search/searchClient';
 import { offlineLinker, type LinkRecommendation } from '../services/offlineDocumentLinker';
 import { adaptiveGlossary } from '../services/AdaptiveGlossaryService';
@@ -121,6 +122,24 @@ export function allSessions(): NoteSession[] {
   return [...sessions.values()];
 }
 
+function hasInkTemplateContent(content: unknown): boolean {
+  const root = content as { content?: Array<{ type?: string }> } | null | undefined;
+  return Array.isArray(root?.content) && root.content.some((n) => n?.type === 'inkTemplate');
+}
+
+function buildStrokePageRanges(content: unknown, pages: readonly NotePage[]): PageYRange[] {
+  const dims = extractInkTemplateDimensions(content, pages);
+  if (dims.length === 0) return [];
+  const containerW = dims[0]?.width > 0 ? dims[0].width : 595;
+  const gap = hasInkTemplateContent(content) ? PDF_PAGE_GAP_PX : 0;
+  const layout = computePdfPageLayout(dims, containerW, gap);
+  return layout.yOffsets.map((y, idx) => ({
+    pageNumber: idx + 1,
+    minY: y,
+    maxY: y + (layout.pageHeights[idx] ?? 0),
+  }));
+}
+
 export async function openSession(id: string): Promise<NoteSession | null> {
   const existing = sessions.get(id);
   if (existing) return existing;
@@ -128,6 +147,22 @@ export async function openSession(id: string): Promise<NoteSession | null> {
   if (!record || record.deletedAt) return null;
   if (sessions.has(id)) return sessions.get(id)!;
   const s = new NoteSession(record);
+  if (db.pageStrokes && typeof db.pageStrokes.where === 'function') {
+    try {
+      const pageRows = await db.pageStrokes.where('noteId').equals(id).toArray();
+      if (pageRows.length > 0) {
+        const pageMap: Record<number, Stroke[]> = {};
+        for (const row of pageRows) {
+          if (row.pageNumber >= 1 && Array.isArray(row.strokes) && row.strokes.length > 0) {
+            pageMap[row.pageNumber] = row.strokes;
+          }
+        }
+        s.strokes.resetByPage(pageMap, false);
+      }
+    } catch {
+      // IndexedDB 스키마/모킹 폴백 시 기존 record.strokes 유지
+    }
+  }
   sessions.set(id, s);
   return s;
 }
@@ -178,7 +213,6 @@ export class NoteSession {
   constructor(record: NoteRecord) {
     this.id = record.id;
     this.record = record;
-    this.strokes = new StrokeStore(this.history, record.strokes ?? []);
     const settings = useSettings.getState();
     const initialPages =
       record.pages && record.pages.length > 0
@@ -190,6 +224,11 @@ export class NoteSession {
               orientation: settings.defaultOrientation,
             }),
           ];
+    this.strokes = new StrokeStore(
+      this.history,
+      record.strokes ?? [],
+      buildStrokePageRanges(record.content, initialPages),
+    );
     const savedPos = useTabs.getState().noteViewPositions?.[record.id];
     const restoredPageIndex = savedPos
       ? Math.max(0, Math.min(initialPages.length - 1, Math.floor(savedPos.pageIndex)))
@@ -271,6 +310,12 @@ export class NoteSession {
     );
     this.history.clear();
     this.patch({ canUndo: false, canRedo: false });
+  }
+
+  /** 현재 페이지 레이아웃(높이/Y오프셋)에 맞춰 StrokeStore의 페이지 범위 인덱스를 동기화한다. */
+  syncStrokePageRanges() {
+    const content = this.editor && !this.editor.isDestroyed ? this.editor.getJSON() : this.record.content;
+    this.strokes.setPageRanges(buildStrokePageRanges(content, this.ui.pages));
   }
 
   get canUndo(): boolean {
@@ -509,6 +554,7 @@ export class NoteSession {
     }
 
     this.patch({ pages, currentPageIndex: insertedIndex });
+    this.syncStrokePageRanges();
     this.scheduleDirtyCheck();
     this.assertPageInvariant();
 
@@ -690,6 +736,7 @@ export class NoteSession {
       textObjects: remainingTextObjects,
       currentPageIndex: nextCurrentIndex,
     });
+    this.syncStrokePageRanges();
     this.scheduleDirtyCheck();
     this.assertPageInvariant();
     if (this.scrollEl) {
@@ -1943,6 +1990,28 @@ export class NoteSession {
           return false;
         }
       }
+      const dirtyPages = this.strokes.getDirtyPages();
+      if (dirtyPages.length > 0 && db.pageStrokes && typeof db.pageStrokes.bulkPut === 'function') {
+        const now = Date.now();
+        const toPut: Array<{ noteId: string; pageNumber: number; strokes: Stroke[]; updatedAt: number }> = [];
+        const toDeleteKeys: Array<[string, number]> = [];
+        for (const pageNum of dirtyPages) {
+          const pageStrokes = this.strokes.getStrokesByPage(pageNum);
+          if (pageStrokes.length > 0) {
+            toPut.push({ noteId: this.id, pageNumber: pageNum, strokes: pageStrokes, updatedAt: now });
+          } else {
+            toDeleteKeys.push([this.id, pageNum]);
+          }
+        }
+        if (toPut.length > 0) {
+          await db.pageStrokes.bulkPut(toPut);
+        }
+        if (toDeleteKeys.length > 0 && typeof db.pageStrokes.bulkDelete === 'function') {
+          await db.pageStrokes.bulkDelete(toDeleteKeys as never);
+        }
+        this.strokes.clearDirtyPages(dirtyPages);
+      }
+
       const fresh = (await db.notes.get(this.id)) ?? this.record;
       const updated: NoteRecord = {
         ...fresh,
@@ -2134,6 +2203,7 @@ export class NoteSession {
     if (this.relatedTimer) clearTimeout(this.relatedTimer);
     if (this.titleSyncTimer) clearTimeout(this.titleSyncTimer);
     pdfZoomRenderer.evictNote(this.id);
+    thumbnailPipeline.evictNote(this.id);
     this.editor.destroy();
   }
 }

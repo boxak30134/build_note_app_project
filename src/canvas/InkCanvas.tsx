@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { NoteSession } from '../session/NoteSession';
-import { newStrokeId, type Stroke } from '../core/strokes/StrokeStore';
+import { newStrokeId, type PageYRange, type Stroke } from '../core/strokes/StrokeStore';
+import { thumbnailPipeline } from '../core/page/thumbnailPipeline';
 import {
   clientPointToPageLocal,
   extractClosedLassoPolygon,
@@ -86,6 +87,47 @@ export function computeVisibleChunkRange(
   };
 }
 
+export function computeSlidingWindowChunkRange(
+  pageH: number,
+  scrollTop: number,
+  viewportH: number,
+  zoom = 1,
+  currentPageIndex = 0,
+  pageRanges: ReadonlyArray<PageYRange> = [],
+): { start: number; end: number; total: number } {
+  const base = computeVisibleChunkRange(pageH, scrollTop, viewportH, zoom);
+  if (pageRanges.length < 2 || viewportH <= 0) {
+    return base;
+  }
+  const winStartIdx = Math.max(0, Math.min(pageRanges.length - 1, currentPageIndex - 1));
+  const winEndIdx = Math.max(winStartIdx, Math.min(pageRanges.length - 1, currentPageIndex + 1));
+  const winMinY = pageRanges[winStartIdx].minY;
+  const winMaxY = pageRanges[winEndIdx].maxY;
+  const winStartChunk = Math.max(0, Math.floor(winMinY / CHUNK_HEIGHT));
+  const winEndChunk = Math.min(base.total - 1, Math.max(winStartChunk, Math.floor(winMaxY / CHUNK_HEIGHT)));
+  const start = Math.max(base.start, winStartChunk);
+  const end = Math.min(base.end, winEndChunk);
+  if (start > end) {
+    return { start: winStartChunk, end: winEndChunk, total: base.total };
+  }
+  return { start, end, total: base.total };
+}
+
+function getStrokesInYRange(session: NoteSession, minY: number, maxY: number): Stroke[] {
+  const pageRanges = session.strokes.getPageRanges?.() ?? [];
+  if (pageRanges.length > 0 && typeof session.strokes.getStrokesByPages === 'function') {
+    const pages: number[] = [];
+    for (let i = 0; i < pageRanges.length; i++) {
+      const r = pageRanges[i];
+      if (r.maxY >= minY && r.minY <= maxY) {
+        pages.push(r.pageNumber);
+      }
+    }
+    return session.strokes.getStrokesByPages(pages);
+  }
+  return session.strokes.getAll();
+}
+
 /**
  * [Layer 2] 2계층 더블 버퍼링 투명 벡터 캔버스:
  * - Static Cache Layer (`canvasRef` / `chunkCanvasesRef`): 확정된 누적 필기 전용 (가시 영역 ±1 청크만 마운트).
@@ -120,9 +162,10 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
   /** 방금 pointerup 에서 Committed Canvas 에 직접 베이크 완료한 스트로크 추적 (중복 Full Redraw 방지) */
   const lastBakedStrokeId = useRef<string | null>(null);
   const lastBakedStrokeCount = useRef<number>(-1);
-  const prevViewState = useRef<{ lassoIds: unknown; zoom: number; active: boolean; sessionId: string } | null>(null);
+  const prevViewState = useRef<{ lassoIds: unknown; zoom: number; active: boolean; sessionId: string; currentPageIndex: number } | null>(null);
   const lassoIds = useSessions((s) => s.sessions[session.id]?.lassoIds);
   const zoom = useSessions((s) => s.sessions[session.id]?.zoom ?? 1);
+  const currentPageIndex = useSessions((s) => s.sessions[session.id]?.currentPageIndex ?? 0);
 
   const getPageDimensions = useCallback(() => {
     const viewport = viewportRef.current;
@@ -154,16 +197,20 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
   const updateChunkCount = useCallback(() => {
     const dims = getPageDimensions();
     if (!dims) return;
-    const next = computeVisibleChunkRange(
+    const pageRanges = session.strokes.getPageRanges?.() ?? [];
+    const curPage = useSessions.getState().sessions[session.id]?.currentPageIndex ?? 0;
+    const next = computeSlidingWindowChunkRange(
       dims.pageH,
       dims.viewport.scrollTop,
       dims.viewportHeight,
       dims.z,
+      curPage,
+      pageRanges,
     );
     setChunkRange((prev) =>
       prev.start === next.start && prev.end === next.end && prev.total === next.total ? prev : next,
     );
-  }, [getPageDimensions]);
+  }, [getPageDimensions, session]);
 
   const prepareChunk = useCallback(
     (chunkIndex: number, canvas: HTMLCanvasElement | null, shouldClear = true) => {
@@ -199,8 +246,8 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
       if (shouldClear) {
         ctx.clearRect(0, topY, pageW, chunkH);
       } else if (resized) {
-        // 최초 마운트 또는 페이지 폭 변경으로 캔버스 버퍼가 초기화된 경우 기존 확정 획을 즉시 복원
-        const existingStrokes = session.strokes.getAll();
+        // 최초 마운트 또는 페이지 폭 변경으로 캔버스 버퍼가 초기화된 경우 해당 페이지 범위의 확정 획만 즉시 복원
+        const existingStrokes = getStrokesInYRange(session, view.minY, view.maxY);
         for (const s of existingStrokes) {
           if (intersects(cachedBounds(s), view)) {
             drawStroke(ctx, s);
@@ -427,7 +474,6 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
   const drawChunks = useCallback(
     (chunkIndices: Iterable<number>, excludedIds?: Set<string>) => {
       updateChunkCount();
-      const allStrokes = session.strokes.getAll();
       const sel = useSessions.getState().sessions[session.id]?.lassoIds ?? [];
       const b = sel.length ? session.strokes.boundsOf(sel) : null;
 
@@ -435,12 +481,18 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
         for (const chunkIdx of chunkIndices) {
           const canvas = chunkCanvasesRef.current.get(chunkIdx);
           if (!canvas) continue;
-          renderSingleChunk(chunkIdx, canvas, allStrokes, b, excludedIds);
+          const chunkStrokes = getStrokesInYRange(
+            session,
+            chunkIdx * CHUNK_HEIGHT - 200,
+            (chunkIdx + 1) * CHUNK_HEIGHT + 200,
+          );
+          renderSingleChunk(chunkIdx, canvas, chunkStrokes, b, excludedIds);
         }
       } else if (canvasRef.current) {
         for (const chunkIdx of chunkIndices) {
           if (chunkIdx === 0) {
-            renderSingleChunk(0, canvasRef.current, allStrokes, b, excludedIds);
+            const chunkStrokes = getStrokesInYRange(session, -200, CHUNK_HEIGHT + 200);
+            renderSingleChunk(0, canvasRef.current, chunkStrokes, b, excludedIds);
             break;
           }
         }
@@ -454,16 +506,21 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
   const draw = useCallback(
     (excludedIds?: Set<string>) => {
       updateChunkCount();
-      const allStrokes = session.strokes.getAll();
       const sel = useSessions.getState().sessions[session.id]?.lassoIds ?? [];
       const b = sel.length ? session.strokes.boundsOf(sel) : null;
 
       if (chunkCanvasesRef.current.size > 0) {
         chunkCanvasesRef.current.forEach((canvas, chunkIdx) => {
-          renderSingleChunk(chunkIdx, canvas, allStrokes, b, excludedIds);
+          const chunkStrokes = getStrokesInYRange(
+            session,
+            chunkIdx * CHUNK_HEIGHT - 200,
+            (chunkIdx + 1) * CHUNK_HEIGHT + 200,
+          );
+          renderSingleChunk(chunkIdx, canvas, chunkStrokes, b, excludedIds);
         });
       } else if (canvasRef.current) {
-        renderSingleChunk(0, canvasRef.current, allStrokes, b, excludedIds);
+        const chunkStrokes = getStrokesInYRange(session, -200, CHUNK_HEIGHT + 200);
+        renderSingleChunk(0, canvasRef.current, chunkStrokes, b, excludedIds);
       }
 
       // 같은 프레임에서 wet 레이어도 갱신 → 펜을 뗄 때 dry 전환 깜빡임 없음
@@ -515,7 +572,7 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
     return unsubscribe;
   }, [session, requestDraw]);
 
-  // 2. 뷰 상태 변경(올가미 선택, 줌, 탭 활성화) 시에만 캔버스 재렌더
+  // 2. 뷰 상태 변경(올가미 선택, 줌, 탭 활성화, 현재 페이지) 시에만 캔버스 재렌더
   useEffect(() => {
     const prev = prevViewState.current;
     const viewChanged =
@@ -523,13 +580,14 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
       prev.lassoIds !== lassoIds ||
       prev.zoom !== zoom ||
       prev.active !== active ||
-      prev.sessionId !== session.id;
-    prevViewState.current = { lassoIds, zoom, active, sessionId: session.id };
+      prev.sessionId !== session.id ||
+      prev.currentPageIndex !== currentPageIndex;
+    prevViewState.current = { lassoIds, zoom, active, sessionId: session.id, currentPageIndex };
 
     if (viewChanged) {
       requestDraw();
     }
-  }, [lassoIds, zoom, active, session.id, requestDraw]);
+  }, [lassoIds, zoom, active, session.id, currentPageIndex, requestDraw]);
 
   useEffect(() => {
     const viewport = viewportRef.current;
@@ -750,6 +808,8 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
       if (ui.readOnly || (!isDrawPointer(e) && !hardwareEraser) || effectiveTool === 'none') return;
       e.preventDefault();
       e.stopPropagation();
+      // S-Pen 필기 중에는 사이드바 썸네일 생성 큐를 즉시 일시 정지해 240Hz 프레임 드랍 원천 차단
+      thumbnailPipeline.setPaused(true);
       // 2.3 제스처 판정 대기 차단: 호버 없이 바로 닿은 펜도 첫 샘플부터 스크롤 판정 지연 없이 필기
       viewport.style.touchAction = 'none';
       viewport.classList.add('is-inking');
@@ -922,6 +982,7 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
       gestureLayout = null;
       predicted.current = [];
       viewport.classList.remove('is-inking');
+      thumbnailPipeline.setPaused(false);
       // 필기 종료 즉시 뷰포트 터치 제스처·스크롤 즉각 복원
       viewport.style.touchAction = '';
       if (typeof viewport.hasPointerCapture === 'function' && viewport.hasPointerCapture(e.pointerId)) {
@@ -1138,6 +1199,7 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
       frame.current = 0;
       cancelAnimationFrame(wetFrame.current);
       wetFrame.current = 0;
+      thumbnailPipeline.setPaused(false);
       viewport.classList.remove('is-lasso-dragging');
       viewport.removeEventListener('pointerdown', onPointerDown, { capture: true });
       viewport.removeEventListener('pointermove', onPointerMove, { capture: true });
@@ -1193,12 +1255,15 @@ export function InkCanvas({ session, viewportRef, active }: Props) {
   );
 
   const currentDims = getPageDimensions();
+  const pageRanges = session.strokes.getPageRanges?.() ?? [];
   const effectiveRange = currentDims
-    ? computeVisibleChunkRange(
+    ? computeSlidingWindowChunkRange(
         currentDims.pageH,
         currentDims.viewport.scrollTop,
         currentDims.viewportHeight,
         currentDims.z,
+        currentPageIndex,
+        pageRanges,
       )
     : chunkRange;
 
