@@ -1,21 +1,91 @@
-import { useEffect, useState, useRef, useSyncExternalStore } from 'react';
+import { useEffect, useRef, useState, useCallback, useMemo, useSyncExternalStore } from 'react';
 import { ChevronLeft, ChevronRight, FileText, Layers, Plus, Trash2 } from 'lucide-react';
 import type { NoteSession } from '../session/NoteSession';
 import { useSessionUI } from '../store/sessionStore';
 import { toast } from '../store/uiStore';
-import { attachmentUrl } from '../storage/opfs';
-import { createPage, PAGE_STYLE_LABELS, getPageDimensions, type PageStyleId, type PaperSizeId, type PageOrientation } from '../core/page/pageTypes';
+import {
+  createPage,
+  getPageDimensions,
+  PAGE_STYLE_LABELS,
+  type PageStyleId,
+  type PaperSizeId,
+  type PageOrientation,
+} from '../core/page/pageTypes';
 import { drawStroke } from '../canvas/render';
-import { strokeBounds } from '../core/strokes/StrokeStore';
+import { strokeBounds, type Stroke } from '../core/strokes/StrokeStore';
+import {
+  THUMBNAIL_SCROLL_DEBOUNCE_MS,
+  thumbnailPipeline,
+  type ThumbnailRenderTarget,
+} from '../core/page/thumbnailPipeline';
+
+export const THUMBNAIL_GRID_COLS = 2;
+export const THUMBNAIL_ROW_HEIGHT = 172;
+export const THUMBNAIL_JS_FALLBACK_THRESHOLD = 60;
+export const THUMBNAIL_MAX_FALLBACK_MOUNTED = 10;
 
 export interface PageItem {
   pageNumber: number; // 1-based (1, 2, ... N)
   templateSrc?: string;
+  pdfSrc?: string;
+  pdfPage?: number;
   width?: number;
   height?: number;
   size?: PaperSizeId;
   style?: PageStyleId;
   orientation?: PageOrientation;
+}
+
+/**
+ * 사이드바 가상 스크롤 가시 범위 계산 (2열 그리드 기준 약 8~10개 아이템만 마운트).
+ * - viewportHeight > 0 인 실제 스크롤 컨테이너에서는 현재 가시 행 기준 8~10개만 마운트한다.
+ * - viewportHeight === 0 인 jsdom 비레이아웃 환경에서는 60장 이하 기존 테스트 호환을 유지하고,
+ *   60장을 초과하는 대용량 문서는 activePageIndex 기준 최대 10개 윈도우만 마운트한다.
+ */
+export function computeThumbnailVirtualRange(
+  totalItems: number,
+  scrollTop: number,
+  viewportHeight: number,
+  activePageIndex = 0,
+): { startIdx: number; endIdx: number; topSpacerHeight: number; bottomSpacerHeight: number } {
+  if (totalItems <= 0) {
+    return { startIdx: 0, endIdx: -1, topSpacerHeight: 0, bottomSpacerHeight: 0 };
+  }
+  const totalRows = Math.ceil(totalItems / THUMBNAIL_GRID_COLS);
+
+  if (viewportHeight <= 0) {
+    if (totalItems <= THUMBNAIL_JS_FALLBACK_THRESHOLD) {
+      return { startIdx: 0, endIdx: totalItems - 1, topSpacerHeight: 0, bottomSpacerHeight: 0 };
+    }
+    const activeRow = Math.max(0, Math.min(totalRows - 1, Math.floor(activePageIndex / THUMBNAIL_GRID_COLS)));
+    const maxRows = Math.max(1, Math.floor(THUMBNAIL_MAX_FALLBACK_MOUNTED / THUMBNAIL_GRID_COLS));
+    const half = Math.floor(maxRows / 2);
+    const startRow = Math.max(0, Math.min(totalRows - maxRows, activeRow - half));
+    const endRow = Math.min(totalRows - 1, startRow + maxRows - 1);
+    const startIdx = startRow * THUMBNAIL_GRID_COLS;
+    const endIdx = Math.min(totalItems - 1, (endRow + 1) * THUMBNAIL_GRID_COLS - 1);
+    return {
+      startIdx,
+      endIdx,
+      topSpacerHeight: startRow * THUMBNAIL_ROW_HEIGHT,
+      bottomSpacerHeight: Math.max(0, (totalRows - 1 - endRow) * THUMBNAIL_ROW_HEIGHT),
+    };
+  }
+
+  const startRow = Math.max(0, Math.min(totalRows - 1, Math.floor(scrollTop / THUMBNAIL_ROW_HEIGHT)));
+  const visibleRows = Math.max(1, Math.ceil(viewportHeight / THUMBNAIL_ROW_HEIGHT));
+  // 2열 기준 8~10개(4~5행) 수준만 마운트되도록 상한을 5행(10개)으로 제한
+  const boundedRows = Math.min(5, Math.max(4, visibleRows + 1));
+  const endRow = Math.min(totalRows - 1, startRow + boundedRows - 1);
+  const startIdx = startRow * THUMBNAIL_GRID_COLS;
+  const endIdx = Math.min(totalItems - 1, (endRow + 1) * THUMBNAIL_GRID_COLS - 1);
+
+  return {
+    startIdx,
+    endIdx,
+    topSpacerHeight: startRow * THUMBNAIL_ROW_HEIGHT,
+    bottomSpacerHeight: Math.max(0, (totalRows - 1 - endRow) * THUMBNAIL_ROW_HEIGHT),
+  };
 }
 
 /** 노트 컨텐트 및 UI 상태에서 페이지 항목 목록을 추출한다 */
@@ -28,9 +98,14 @@ export function extractPageItems(session: NoteSession | null): PageItem[] {
   if (content && Array.isArray(content.content)) {
     for (const node of content.content) {
       if (node.type === 'inkTemplate' && node.attrs) {
+        const pageNum = Number(node.attrs.page) || templates.length + 1;
+        const pdfSrc = typeof node.attrs.pdfSrc === 'string' && node.attrs.pdfSrc ? node.attrs.pdfSrc : undefined;
+        const pdfPage = Number(node.attrs.pdfPage) || (pdfSrc ? pageNum : undefined);
         templates.push({
-          pageNumber: Number(node.attrs.page) || templates.length + 1,
+          pageNumber: pageNum,
           templateSrc: typeof node.attrs.src === 'string' ? node.attrs.src : undefined,
+          pdfSrc,
+          pdfPage,
           width: typeof node.attrs.width === 'number' ? node.attrs.width : 595,
           height: typeof node.attrs.height === 'number' ? node.attrs.height : 842,
         });
@@ -55,11 +130,11 @@ export function extractPageItems(session: NoteSession | null): PageItem[] {
   }));
 }
 
-const EMPTY_STROKES: any[] = [];
+const EMPTY_STROKES: Stroke[] = [];
 const DUMMY_SUBSCRIBE = () => () => {};
 const DUMMY_GET_ALL = () => EMPTY_STROKES;
 
-/** 사용자 생성 일반 페이지 실시간 미리보기 (용지 스타일 + 텍스트 + 손글씨 필기) */
+/** 사용자 생성 소규모 일반 페이지 미리보기 (하위 호환용; 대용량/PDF는 초경량 WebP <img> 파이프라인 사용) */
 export function PagePreviewCanvas({
   session,
   pageIndex,
@@ -75,22 +150,17 @@ export function PagePreviewCanvas({
 
   const strokes = useSyncExternalStore(
     session.strokes?.subscribe ?? DUMMY_SUBSCRIBE,
-    session.strokes?.getAll ?? DUMMY_GET_ALL
+    session.strokes?.getAll ?? DUMMY_GET_ALL,
   );
-  const [htmlContent, setHtmlContent] = useState(() => {
-    return session.editor ? session.editor.getHTML() : '';
-  });
+  const [htmlContent, setHtmlContent] = useState(() => (session.editor ? session.editor.getHTML() : ''));
 
-  // 에디터 텍스트 변경 구독 (150ms 디바운스)
   useEffect(() => {
     if (!session.editor) return;
     let timer: ReturnType<typeof setTimeout>;
     const update = () => {
       clearTimeout(timer);
       timer = setTimeout(() => {
-        if (session.editor) {
-          setHtmlContent(session.editor.getHTML());
-        }
+        if (session.editor) setHtmlContent(session.editor.getHTML());
       }, 150);
     };
     session.editor.on('update', update);
@@ -100,28 +170,30 @@ export function PagePreviewCanvas({
     };
   }, [session, session.editor]);
 
-  // 컨테이너 너비 측정
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
-    const ro = typeof ResizeObserver !== 'undefined'
-      ? new ResizeObserver((entries) => {
-          for (const entry of entries) {
-            if (entry.contentRect.width > 0) {
-              const newW = Math.round(entry.contentRect.width);
-              setContainerWidth((prev) => (Math.abs(prev - newW) > 1 ? newW : prev));
+    const ro =
+      typeof ResizeObserver !== 'undefined'
+        ? new ResizeObserver((entries) => {
+            for (const entry of entries) {
+              if (entry.contentRect.width > 0) {
+                const newW = Math.round(entry.contentRect.width);
+                setContainerWidth((prev) => (Math.abs(prev - newW) > 1 ? newW : prev));
+              }
             }
-          }
-        })
-      : null;
+          })
+        : null;
     ro?.observe(el);
     return () => ro?.disconnect();
   }, []);
 
-  // 페이지 치수 및 Y 오프셋 계산
-  const pages = session.ui.pages && session.ui.pages.length > 0
-    ? session.ui.pages
-    : (session.record.pages && session.record.pages.length > 0 ? session.record.pages : [createPage()]);
+  const pages =
+    session.ui.pages && session.ui.pages.length > 0
+      ? session.ui.pages
+      : session.record.pages && session.record.pages.length > 0
+        ? session.record.pages
+        : [createPage()];
 
   let offsetY = 0;
   for (let i = 0; i < pageIndex && i < pages.length; i++) {
@@ -132,7 +204,6 @@ export function PagePreviewCanvas({
   const pageDims = getPageDimensions(item.size || pageMeta.size, item.orientation || pageMeta.orientation);
   const scale = containerWidth > 0 ? containerWidth / pageDims.width : 0.15;
 
-  // 캔버스 손글씨 스트로크 렌더링
   useEffect(() => {
     const canvas = canvasRef.current;
     const container = containerRef.current;
@@ -153,18 +224,26 @@ export function PagePreviewCanvas({
     ctx.scale(currentScale * dpr, currentScale * dpr);
     ctx.translate(0, -offsetY);
 
-    const allStrokes = session.strokes?.getAll ? session.strokes.getAll() : [];
+    const pageStrokes = session.strokes?.getStrokesByPage
+      ? session.strokes.getStrokesByPage(pageIndex + 1)
+      : session.strokes?.getAll
+        ? session.strokes.getAll()
+        : [];
     const pageMinY = offsetY;
     const pageMaxY = offsetY + pageDims.height;
 
-    for (const s of allStrokes) {
+    for (const s of pageStrokes) {
       const box = strokeBounds(s);
       if (box.maxY >= pageMinY && box.minY <= pageMaxY) {
         drawStroke(ctx, s);
       }
     }
     ctx.restore();
-  }, [strokes, pageDims.width, pageDims.height, offsetY, containerWidth]);
+    return () => {
+      canvas.width = 0;
+      canvas.height = 0;
+    };
+  }, [strokes, pageDims.width, pageDims.height, offsetY, containerWidth, pageIndex, session.strokes]);
 
   const isEmpty = (!htmlContent || htmlContent === '<p></p>') && strokes.length === 0;
 
@@ -174,7 +253,6 @@ export function PagePreviewCanvas({
       data-testid={`page-preview-canvas-${pageIndex + 1}`}
       className={`relative h-full w-full overflow-hidden select-none pointer-events-none page-style-${item.style || pageMeta.style || 'plain'}`}
     >
-      {/* 텍스트 축소 프리뷰 레이어 */}
       {htmlContent && htmlContent !== '<p></p>' && (
         <div
           className="absolute origin-top-left pointer-events-none select-none overflow-hidden"
@@ -187,22 +265,13 @@ export function PagePreviewCanvas({
           }}
         >
           <div
-            style={{
-              transform: `translateY(-${offsetY}px)`,
-            }}
+            style={{ transform: `translateY(-${offsetY}px)` }}
             className="prose prose-sm max-w-none p-6 text-slate-800 opacity-80 leading-relaxed font-sans"
             dangerouslySetInnerHTML={{ __html: htmlContent }}
           />
         </div>
       )}
-
-      {/* 손글씨 캔버스 레이어 */}
-      <canvas
-        ref={canvasRef}
-        className="absolute inset-0 h-full w-full pointer-events-none"
-      />
-
-      {/* 내용이 비어있을 때 은은한 스타일 플레이스홀더 */}
+      <canvas ref={canvasRef} className="absolute inset-0 h-full w-full pointer-events-none" />
       {isEmpty && (
         <div className="absolute inset-0 flex flex-col items-center justify-center p-2 text-slate-400 opacity-40">
           <FileText size={20} className="stroke-[1.2] text-slate-300" />
@@ -217,40 +286,127 @@ export function PagePreviewCanvas({
   );
 }
 
-/** 좌측 사이드바: 현재 문서의 페이지 미리보기 썸네일 그리드 및 원클릭 즉시 이동 */
+/** 좌측 사이드바: 가상 스크롤 + 초경량 180px WebP 이미지 캐시 기반 페이지 썸네일 목록 */
 export function PageThumbnailList({ session }: { session: NoteSession | null }) {
   const storeUI = useSessionUI(session?.id ?? null);
   const ui = session?.ui ?? storeUI;
-  const [thumbnailUrls, setThumbnailUrls] = useState<Record<number, string>>({});
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportHeight, setViewportHeight] = useState(0);
+  const [thumbnailUrls, setThumbnailUrls] = useState<Record<number, string>>(() =>
+    session ? thumbnailPipeline.getNoteCacheSnapshot(session.id) : {},
+  );
   const [confirmDeletePageNumber, setConfirmDeletePageNumber] = useState<number | null>(null);
 
-  const items = extractPageItems(session);
+  const items = useMemo(() => extractPageItems(session), [session, ui.pages, session?.record.content]);
   const totalPages = items.length;
   const currentIdx = Math.max(0, Math.min(totalPages - 1, ui.currentPageIndex));
 
-  // PDF 페이지 템플릿 썸네일 이미지 비동기 로드
+  const virtualRange = useMemo(
+    () => computeThumbnailVirtualRange(totalPages, scrollTop, viewportHeight, currentIdx),
+    [totalPages, scrollTop, viewportHeight, currentIdx],
+  );
+
+  const visibleItems = useMemo(() => {
+    if (virtualRange.endIdx < virtualRange.startIdx) return [];
+    return items.slice(virtualRange.startIdx, virtualRange.endIdx + 1);
+  }, [items, virtualRange.startIdx, virtualRange.endIdx]);
+
+  const scheduleVisibleThumbnails = useCallback(
+    (immediate = false) => {
+      if (!session) return;
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+        debounceTimerRef.current = null;
+      }
+
+      const enqueue = () => {
+        if (!session) return;
+        const targets: ThumbnailRenderTarget[] = visibleItems.map((it) => ({
+          noteId: session.id,
+          pageNumber: it.pageNumber,
+          pdfSrc: it.pdfSrc,
+          pdfPage: it.pdfPage,
+          templateSrc: it.templateSrc,
+          size: it.size,
+          style: it.style,
+          orientation: it.orientation,
+          getStrokesForPage: (pageNum: number) =>
+            session.strokes?.getStrokesByPage ? session.strokes.getStrokesByPage(pageNum) : [],
+        }));
+        thumbnailPipeline.enqueueVisiblePages(targets, true);
+      };
+
+      if (immediate) {
+        enqueue();
+      } else {
+        debounceTimerRef.current = setTimeout(() => {
+          debounceTimerRef.current = null;
+          enqueue();
+        }, THUMBNAIL_SCROLL_DEBOUNCE_MS);
+      }
+    },
+    [session, visibleItems],
+  );
+
+  // 사이드바 컨테이너 높이 측정
   useEffect(() => {
-    let alive = true;
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    const syncHeight = () => {
+      const h = el.clientHeight || 0;
+      setViewportHeight((prev) => (prev === h ? prev : h));
+    };
+    syncHeight();
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(syncHeight) : null;
+    ro?.observe(el);
+    return () => ro?.disconnect();
+  }, [session?.id]);
+
+  // WebP 썸네일 캐시 구독
+  useEffect(() => {
     if (!session) {
       setThumbnailUrls({});
       return;
     }
-
-    for (const it of items) {
-      if (it.templateSrc) {
-        const pageNum = it.pageNumber;
-        void attachmentUrl(session.id, it.templateSrc).then((url) => {
-          if (alive && url) {
-            setThumbnailUrls((prev) => (prev[pageNum] === url ? prev : { ...prev, [pageNum]: url }));
-          }
-        });
+    setThumbnailUrls(thumbnailPipeline.getNoteCacheSnapshot(session.id));
+    const unsub = thumbnailPipeline.subscribe((noteId) => {
+      if (noteId === session.id) {
+        setThumbnailUrls(thumbnailPipeline.getNoteCacheSnapshot(session.id));
       }
-    }
+    });
+    return unsub;
+  }, [session?.id]);
 
+  // 가시 페이지 변경 시 100ms 디바운스 후 썸네일 순차 큐 적재
+  useEffect(() => {
+    if (!session) return;
+    scheduleVisibleThumbnails(false);
     return () => {
-      alive = false;
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+        debounceTimerRef.current = null;
+      }
     };
-  }, [session, session?.id, items.length]);
+  }, [session?.id, scheduleVisibleThumbnails]);
+
+  // 특정 페이지 필기 추가/수정/삭제 시 해당 페이지의 thumbnailCache[pageNumber]만 무효화하여 1장만 재굽기
+  useEffect(() => {
+    if (!session?.strokes?.subscribePageChanges) return;
+    const unsub = session.strokes.subscribePageChanges((changedPages) => {
+      for (const pageNum of changedPages) {
+        thumbnailPipeline.invalidatePage(session.id, pageNum);
+      }
+      scheduleVisibleThumbnails(false);
+    });
+    return unsub;
+  }, [session, scheduleVisibleThumbnails]);
+
+  const handleScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
+    setScrollTop(e.currentTarget.scrollTop);
+  }, []);
 
   if (!session) {
     return (
@@ -318,10 +474,18 @@ export function PageThumbnailList({ session }: { session: NoteSession | null }) 
         )}
       </div>
 
-      {/* 2열 썸네일 그리드: 스크롤 없이 클릭 즉시 해당 페이지로 이동 */}
-      <div className="min-h-0 flex-1 overflow-y-auto p-2">
+      {/* 가상 스크롤 2열 썸네일 그리드: 사이드바 가시 범위(8~10개)만 마운트 */}
+      <div
+        ref={scrollContainerRef}
+        data-testid="thumbnail-scroll-container"
+        onScroll={handleScroll}
+        className="min-h-0 flex-1 overflow-y-auto p-2"
+      >
+        {virtualRange.topSpacerHeight > 0 && (
+          <div style={{ height: `${virtualRange.topSpacerHeight}px` }} aria-hidden />
+        )}
         <div className="grid grid-cols-2 gap-2">
-          {items.map((it) => {
+          {visibleItems.map((it) => {
             const isCurrent = it.pageNumber - 1 === currentIdx;
             const thumbUrl = thumbnailUrls[it.pageNumber];
 
@@ -337,27 +501,35 @@ export function PageThumbnailList({ session }: { session: NoteSession | null }) 
                     session.scrollToPage(it.pageNumber - 1);
                   }
                 }}
-                className={`group relative flex cursor-pointer select-none flex-col overflow-hidden rounded-xl border transition-all ${isCurrent
-                  ? 'border-indigo-500 bg-indigo-50/70 shadow-sm ring-2 ring-indigo-400'
-                  : 'border-slate-200 bg-white hover:border-indigo-300 hover:shadow-xs'
-                  }`}
+                className={`group relative flex cursor-pointer select-none flex-col overflow-hidden rounded-xl border transition-all ${
+                  isCurrent
+                    ? 'border-indigo-500 bg-indigo-50/70 shadow-sm ring-2 ring-indigo-400'
+                    : 'border-slate-200 bg-white hover:border-indigo-300 hover:shadow-xs'
+                }`}
                 title={`클릭하여 ${it.pageNumber}페이지로 바로 이동`}
               >
-                {/* 썸네일 프리뷰 영역 */}
-                <div className="relative aspect-[1/1.414] w-full overflow-hidden bg-slate-100">
+                {/* 초경량 WebP <img> 썸네일 프리뷰 영역 (고해상도 캔버스 미사용) */}
+                <div className={`relative aspect-[1/1.414] w-full overflow-hidden page-style-${it.style || 'plain'} bg-slate-100`}>
                   {thumbUrl ? (
                     <img
                       src={thumbUrl}
                       alt={`페이지 ${it.pageNumber}`}
-                      loading="lazy"
+                      data-testid={`page-thumbnail-img-${it.pageNumber}`}
                       className="h-full w-full object-contain transition-transform group-hover:scale-[1.02]"
                     />
-                  ) : (
+                  ) : totalPages <= 10 && !it.templateSrc && !it.pdfSrc ? (
                     <PagePreviewCanvas
                       session={session}
                       pageIndex={it.pageNumber - 1}
                       item={it}
                     />
+                  ) : (
+                    <div
+                      data-testid={`page-thumbnail-placeholder-${it.pageNumber}`}
+                      className="flex h-full w-full items-center justify-center text-[11px] font-medium text-slate-400"
+                    >
+                      {it.pageNumber}
+                    </div>
                   )}
 
                   {/* 활성 페이지 표시 뱃지 */}
@@ -365,7 +537,7 @@ export function PageThumbnailList({ session }: { session: NoteSession | null }) 
                     <span className="absolute left-1.5 top-1.5 flex h-2 w-2 items-center justify-center rounded-full bg-indigo-600 ring-2 ring-white" />
                   )}
 
-                  {/* 페이지 관리 퀵 액션 (추가 / 삭제 - 모바일/터치/데스크톱 상시 노출) */}
+                  {/* 페이지 관리 퀵 액션 */}
                   <div
                     className="absolute right-1 top-1 z-20 flex items-center gap-1 opacity-90 transition-opacity hover:opacity-100"
                     onClick={(e) => e.stopPropagation()}
@@ -447,10 +619,11 @@ export function PageThumbnailList({ session }: { session: NoteSession | null }) 
 
                 {/* 하단 페이지 번호 바 */}
                 <div
-                  className={`flex items-center justify-between border-t px-2 py-1 text-[11px] ${isCurrent
+                  className={`flex items-center justify-between border-t px-2 py-1 text-[11px] ${
+                    isCurrent
                       ? 'border-indigo-200 bg-indigo-100/60 font-bold text-indigo-900'
                       : 'border-slate-100 bg-slate-50 text-slate-600 group-hover:text-indigo-600'
-                    }`}
+                  }`}
                 >
                   <div className="flex items-center gap-1 truncate">
                     <span>{it.pageNumber}쪽</span>
@@ -461,6 +634,9 @@ export function PageThumbnailList({ session }: { session: NoteSession | null }) 
             );
           })}
         </div>
+        {virtualRange.bottomSpacerHeight > 0 && (
+          <div style={{ height: `${virtualRange.bottomSpacerHeight}px` }} aria-hidden />
+        )}
       </div>
     </div>
   );

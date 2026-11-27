@@ -1,7 +1,7 @@
 export const MAX_PDF_RERENDER_DIM = 4096;
 export const MAX_PDF_RERENDER_SCALE = 12.0;
 export const MIN_PDF_RERENDER_SCALE = 1.0;
-export const MAX_PDF_LRU_PAGES = 6;
+export const MAX_PDF_LRU_PAGES = 3;
 export const MAX_CACHED_PDF_DOCS = 3;
 export const PDF_ZOOM_RERENDER_DEBOUNCE_MS = 200;
 
@@ -399,6 +399,43 @@ export class PdfZoomRenderer {
         this.activeTasks.delete(key);
       }
       return { rendered: false, scale: 0, errorReason: (err as Error)?.message || '렌더 실패' };
+    } finally {
+      try {
+        page?.cleanup?.();
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  async renderThumbnailPage(params: {
+    noteId: string;
+    pdfSrc: string;
+    pageNumber: number;
+    canvas: HTMLCanvasElement;
+    targetWidth?: number;
+  }): Promise<boolean> {
+    const { noteId, pdfSrc, pageNumber, canvas, targetWidth = 180 } = params;
+    let doc: PdfDocumentLike;
+    try {
+      doc = await this.getDocument(noteId, pdfSrc);
+    } catch {
+      return false;
+    }
+    if (pageNumber < 1 || pageNumber > doc.numPages) return false;
+    let page: PdfPageLike | null = null;
+    try {
+      page = await doc.getPage(pageNumber);
+      const baseVp = page.getViewport({ scale: 1 });
+      const scale = Math.max(0.1, targetWidth / Math.max(1, baseVp.width));
+      const vp = page.getViewport({ scale });
+      canvas.width = Math.max(1, Math.round(vp.width));
+      canvas.height = Math.max(1, Math.round(vp.height));
+      const task = page.render({ canvas, viewport: vp, background: '#ffffff' });
+      await task.promise;
+      return true;
+    } catch {
+      return false;
     } finally {
       try {
         page?.cleanup?.();

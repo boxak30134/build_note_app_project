@@ -146,6 +146,7 @@ export const InkTemplate = Node.create<NoteImageOptions>({
       let currentWidth = 595;
       let currentHeight = 842;
       let currentZoom = noteId ? useSessions.getState().sessions[noteId]?.zoom ?? 1 : 1;
+      let currentActivePageNum = noteId ? (useSessions.getState().sessions[noteId]?.currentPageIndex ?? 0) + 1 : 1;
       let isVisible = typeof IntersectionObserver === 'undefined';
       let renderedScale = 0;
       let hasHiRes = false;
@@ -201,6 +202,46 @@ export const InkTemplate = Node.create<NoteImageOptions>({
         badge.dataset.resolution = resData;
       };
 
+      const isInSlidingWindow = () => {
+        if (!noteId) return true;
+        const sess = useSessions.getState().sessions[noteId];
+        if (!sess) return true;
+        const activePageNum = (sess.currentPageIndex ?? 0) + 1;
+        return Math.abs(currentPageNum - activePageNum) <= 1;
+      };
+
+      const clearPreviewImg = () => {
+        if (!imgEl) return;
+        imgEl.removeEventListener('load', updateBadge);
+        imgEl.src = '';
+        imgEl.remove();
+        imgEl = null;
+        loadedSrc = '';
+      };
+
+      const ensurePreviewImg = () => {
+        if (!currentSrc || !isInSlidingWindow()) return;
+        if (!imgEl) {
+          imgEl = document.createElement('img');
+          imgEl.draggable = false;
+          imgEl.addEventListener('load', updateBadge);
+          dom.append(imgEl);
+        }
+        imgEl.alt = `페이지 ${currentPageNum}`;
+        if (loadedSrc !== currentSrc) {
+          loadedSrc = currentSrc;
+          if (isRelative(currentSrc)) {
+            void attachmentUrl(noteId, currentSrc)?.then((url) => {
+              if (!destroyed && url && imgEl && loadedSrc === currentSrc && isInSlidingWindow()) {
+                imgEl.src = url;
+              }
+            });
+          } else {
+            imgEl.src = currentSrc;
+          }
+        }
+      };
+
       const clearHiRes = () => {
         if (rerenderTimer) {
           clearTimeout(rerenderTimer);
@@ -220,6 +261,8 @@ export const InkTemplate = Node.create<NoteImageOptions>({
           delete hiResCanvas.dataset.renderScale;
           delete hiResCanvas.dataset.viewportWidth;
           delete hiResCanvas.dataset.viewportHeight;
+          hiResCanvas.remove();
+          hiResCanvas = null;
         }
         hasHiRes = false;
         renderedScale = 0;
@@ -324,8 +367,13 @@ export const InkTemplate = Node.create<NoteImageOptions>({
           return;
         }
 
-        if (!isVisible || currentPdfPage <= 0 || !noteId) {
-          updateBadge();
+        if (!isVisible || !isInSlidingWindow() || currentPdfPage <= 0 || !noteId) {
+          if (!isInSlidingWindow()) {
+            clearHiRes();
+            clearPreviewImg();
+          } else {
+            updateBadge();
+          }
           return;
         }
 
@@ -437,11 +485,26 @@ export const InkTemplate = Node.create<NoteImageOptions>({
 
       const unsubZoom = noteId
         ? useSessions.subscribe((st) => {
-            const nextZoom = st.sessions[noteId]?.zoom ?? 1;
+            const sess = st.sessions[noteId];
+            const nextZoom = sess?.zoom ?? 1;
+            const nextActivePageNum = (sess?.currentPageIndex ?? 0) + 1;
+            const pageWindowChanged = nextActivePageNum !== currentActivePageNum;
+            if (pageWindowChanged) {
+              currentActivePageNum = nextActivePageNum;
+              if (isInSlidingWindow()) {
+                ensurePreviewImg();
+                if (isVisible && currentPdfSrc) {
+                  scheduleZoomRerender();
+                }
+              } else {
+                clearHiRes();
+                clearPreviewImg();
+              }
+            }
             if (nextZoom !== currentZoom) {
               currentZoom = nextZoom;
               updateBadge();
-              if (isVisible) {
+              if (isVisible && isInSlidingWindow()) {
                 scheduleZoomRerender();
               }
             }
@@ -493,31 +556,17 @@ export const InkTemplate = Node.create<NoteImageOptions>({
         }
 
         if (src) {
-          if (!imgEl) {
-            imgEl = document.createElement('img');
-            imgEl.draggable = false;
-            imgEl.addEventListener('load', updateBadge);
-            dom.append(imgEl);
-          }
-          imgEl.alt = `페이지 ${pageNum}`;
-          if (loadedSrc !== src) {
-            loadedSrc = src;
-            if (isRelative(src)) {
-              void attachmentUrl(noteId, src)?.then((url) => {
-                if (url && imgEl && loadedSrc === src) imgEl.src = url;
-              });
-            } else {
-              imgEl.src = src;
-            }
+          if (isInSlidingWindow()) {
+            ensurePreviewImg();
+          } else {
+            clearPreviewImg();
           }
         } else if (imgEl) {
-          imgEl.remove();
-          imgEl = null;
-          loadedSrc = '';
+          clearPreviewImg();
         }
 
         updateBadge();
-        if ((nextPdfSrc || src) && isVisible) {
+        if ((nextPdfSrc || src) && isVisible && isInSlidingWindow()) {
           scheduleZoomRerender();
         }
       };
@@ -552,6 +601,7 @@ export const InkTemplate = Node.create<NoteImageOptions>({
           attachedViewport?.removeEventListener('scroll', onViewportScroll);
           attachedViewport = null;
           clearHiRes();
+          clearPreviewImg();
           io?.disconnect();
           ro?.disconnect();
           unsubZoom?.();

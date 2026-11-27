@@ -57,12 +57,20 @@ export interface SecretRecord {
   value: unknown;
 }
 
+export interface NotePageStrokesRecord {
+  noteId: string;
+  pageNumber: number;
+  strokes: Stroke[];
+  updatedAt: number;
+}
+
 export class EduInkDB extends Dexie {
   notes!: EntityTable<NoteRecord, 'id'>;
   folders!: EntityTable<FolderRecord, 'id'>;
   secrets!: EntityTable<SecretRecord, 'id'>;
   customFonts!: EntityTable<CustomFontRecord, 'id'>;
   glossaryStats!: EntityTable<UserWordStatRecord, 'id'>;
+  pageStrokes!: EntityTable<NotePageStrokesRecord, never>;
 
   constructor() {
     super('eduink-studio');
@@ -90,6 +98,14 @@ export class EduInkDB extends Dexie {
       secrets: 'id',
       customFonts: 'id, name, createdAt',
       glossaryStats: 'id, word, contextTag, selectedMeaning, lastUpdated',
+    });
+    this.version(5).stores({
+      notes: 'id, folderId, title, updatedAt, deletedAt, driveFileId, syncDirty',
+      folders: 'id, parentId, name, deletedAt',
+      secrets: 'id',
+      customFonts: 'id, name, createdAt',
+      glossaryStats: 'id, word, contextTag, selectedMeaning, lastUpdated',
+      pageStrokes: '&[noteId+pageNumber], noteId',
     });
   }
 }
