@@ -116,6 +116,8 @@ function LoadedWorkspace({
   const maxY = useSyncExternalStore(session.strokes.subscribe, session.strokes.getQuantizedMaxY);
   const [hoverLink, setHoverLink] = useState<HTMLElement | null>(null);
   const pendingScroll = useTabs((s) => s.pendingScroll[session.id]);
+  const restoredSessionRef = useRef<string | null>(null);
+  const isRestoringRef = useRef(false);
 
   const activeFont = resolveFontById(selectedFontId, customFonts);
   const liveContent = session.editor && !session.editor.isDestroyed ? session.editor.getJSON() : session.record.content;
@@ -223,6 +225,74 @@ function LoadedWorkspace({
       if (session.host.parentElement === host) host.removeChild(session.host);
     };
   }, [session]);
+
+  // 앱 재오픈/탭 전환 시 마지막으로 보던 페이지 및 스크롤 위치 복원 (pendingScroll 위키링크 점프 우선)
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!active || !viewport) return;
+    if (restoredSessionRef.current === session.id) return;
+
+    if (useTabs.getState().pendingScroll[session.id]) {
+      restoredSessionRef.current = session.id;
+      isRestoringRef.current = false;
+      return;
+    }
+
+    const saved = useTabs.getState().noteViewPositions?.[session.id];
+    if (!saved || (saved.scrollTop <= 0 && saved.scrollLeft <= 0 && saved.pageIndex <= 0)) {
+      restoredSessionRef.current = session.id;
+      isRestoringRef.current = false;
+      return;
+    }
+
+    isRestoringRef.current = true;
+    const z = ui.zoom || DEFAULT_NOTE_ZOOM;
+    const clampedPageIdx = Math.max(0, Math.min(pages.length - 1, saved.pageIndex));
+    const targetTop =
+      saved.scrollTop > 0
+        ? saved.scrollTop
+        : (measuredLayout.offsets[Math.min(clampedPageIdx, Math.max(0, measuredLayout.offsets.length - 1))] ?? 0) * z;
+    const targetLeft = Math.max(0, saved.scrollLeft || 0);
+
+    const applyPosition = () => {
+      const vp = viewportRef.current;
+      if (!vp) return;
+      vp.scrollTop = targetTop;
+      vp.scrollLeft = targetLeft;
+      session.navState = { ...session.navState, visible: clampedPageIdx };
+      if (clampedPageIdx !== session.ui.currentPageIndex) {
+        session.setCurrentPageIndex(clampedPageIdx);
+      }
+    };
+
+    applyPosition();
+
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const rafId = requestAnimationFrame(() => {
+      applyPosition();
+      const vp = viewportRef.current;
+      const canReachNow = !vp || vp.scrollHeight <= 0 || vp.scrollHeight >= targetTop + 1;
+      if (canReachNow) {
+        settled = true;
+        restoredSessionRef.current = session.id;
+        isRestoringRef.current = false;
+      }
+    });
+
+    timer = setTimeout(() => {
+      if (!settled) {
+        applyPosition();
+        restoredSessionRef.current = session.id;
+        isRestoringRef.current = false;
+      }
+    }, 180);
+
+    return () => {
+      cancelAnimationFrame(rafId);
+      if (timer) clearTimeout(timer);
+    };
+  }, [active, session, measuredTotal, minHeight, pages.length, ui.zoom, measuredLayout]);
 
   // 위키링크 더블클릭 이동 → 타깃 단락 스크롤
   useEffect(() => {
@@ -624,8 +694,8 @@ function LoadedWorkspace({
         // 순수 상태 기계로 스크롤 샘플 처리
         session.navState = onScrollSample(session.navState, scrollTop, viewportH, layout);
 
-        // 프로그램 스크롤 중이 아닐 때만 외부 currentPageIndex를 갱신
-        if (!session.navState.programmatic) {
+        // 프로그램 스크롤 중이거나 초기 위치 복원 중이 아닐 때만 외부 currentPageIndex를 갱신
+        if (!isRestoringRef.current && !session.navState.programmatic) {
           const visibleIdx = session.navState.visible;
           if (visibleIdx !== session.ui.currentPageIndex) {
             session.setCurrentPageIndex(visibleIdx);
@@ -633,11 +703,11 @@ function LoadedWorkspace({
         }
       });
 
-      // 150ms 디바운스로 settle 처리 (scrollend 이벤트가 없거나 미발생 환경 보완)
+      // 150ms 디바운스로 settle 처리 및 마지막 열람 위치 영속 저장
       if (settleTimer) clearTimeout(settleTimer);
       settleTimer = setTimeout(() => {
         const page = pageRef.current;
-        if (!viewport || !page) return;
+        if (!viewport || !page || isRestoringRef.current) return;
         const zoom = ui.zoom || 1;
         const layout = measuredLayout.count > 0 ? measuredLayout : getMeasuredPageLayout(page, zoom);
         session.navState = onScrollSettled(
@@ -650,13 +720,19 @@ function LoadedWorkspace({
         if (settledIndex !== session.ui.currentPageIndex) {
           session.setCurrentPageIndex(settledIndex);
         }
+        useTabs.getState().saveNoteViewPosition(session.id, {
+          pageIndex: settledIndex,
+          scrollTop: viewport.scrollTop,
+          scrollLeft: viewport.scrollLeft,
+          zoom,
+        });
       }, 150);
     };
 
     const onScrollEnd = () => {
       if (settleTimer) clearTimeout(settleTimer);
       const page = pageRef.current;
-      if (!viewport || !page) return;
+      if (!viewport || !page || isRestoringRef.current) return;
       const zoom = ui.zoom || 1;
       const layout = measuredLayout.count > 0 ? measuredLayout : getMeasuredPageLayout(page, zoom);
       session.navState = onScrollSettled(
@@ -669,6 +745,23 @@ function LoadedWorkspace({
       if (settledIndex !== session.ui.currentPageIndex) {
         session.setCurrentPageIndex(settledIndex);
       }
+      useTabs.getState().saveNoteViewPosition(session.id, {
+        pageIndex: settledIndex,
+        scrollTop: viewport.scrollTop,
+        scrollLeft: viewport.scrollLeft,
+        zoom,
+      });
+    };
+
+    const flushPositionNow = () => {
+      if (!viewport || isRestoringRef.current) return;
+      if (restoredSessionRef.current !== session.id) return;
+      useTabs.getState().saveNoteViewPosition(session.id, {
+        pageIndex: session.ui.currentPageIndex,
+        scrollTop: viewport.scrollTop,
+        scrollLeft: viewport.scrollLeft,
+        zoom: session.ui.zoom || DEFAULT_NOTE_ZOOM,
+      });
     };
 
     // 프로그램 스크롤 중 사용자의 직접적인 조작(휠, 터치) 감지 시 즉시 settle
@@ -681,8 +774,11 @@ function LoadedWorkspace({
     viewport.addEventListener('wheel', onUserIntent, { passive: true });
     viewport.addEventListener('touchmove', onUserIntent, { passive: true });
     viewport.addEventListener('pointerdown', onUserIntent, { passive: true });
+    window.addEventListener('pagehide', flushPositionNow);
+    window.addEventListener('beforeunload', flushPositionNow);
 
     return () => {
+      flushPositionNow();
       cancelAnimationFrame(scrollRaf);
       if (settleTimer) clearTimeout(settleTimer);
       viewport.removeEventListener('scroll', sampleScroll);
@@ -690,6 +786,8 @@ function LoadedWorkspace({
       viewport.removeEventListener('wheel', onUserIntent);
       viewport.removeEventListener('touchmove', onUserIntent);
       viewport.removeEventListener('pointerdown', onUserIntent);
+      window.removeEventListener('pagehide', flushPositionNow);
+      window.removeEventListener('beforeunload', flushPositionNow);
     };
   }, [session, measuredLayout, ui.zoom]);
 
