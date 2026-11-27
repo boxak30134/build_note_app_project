@@ -3,6 +3,16 @@ import { persist } from 'zustand/middleware';
 
 export type SplitPaneId = 'primary' | 'secondary';
 
+export interface NoteViewPosition {
+  pageIndex: number;
+  scrollTop: number;
+  scrollLeft: number;
+  zoom?: number;
+  updatedAt: number;
+}
+
+const MAX_SAVED_VIEW_POSITIONS = 100;
+
 interface TabsState {
   /** 열린 문서 탭 목록 (재시작 시 복원) */
   openDocTabs: string[];
@@ -15,6 +25,8 @@ interface TabsState {
   focusedPane: SplitPaneId;
   /** 좌측 패널 너비 비율 (0.25 ~ 0.75) */
   splitRatio: number;
+  /** 문서별 마지막 열람 위치 (페이지 인덱스, 스크롤 오프셋, 줌 배율) */
+  noteViewPositions: Record<string, NoteViewPosition>;
   /** 탭 열기 후 스크롤할 블록 (휘발성) */
   pendingScroll: Record<string, string | undefined>;
   openTab: (id: string, blockId?: string) => void;
@@ -22,6 +34,7 @@ interface TabsState {
   activate: (id: string) => void;
   moveTab: (fromIndex: number, toIndex: number) => void;
   reorderTabById: (draggedId: string, targetId: string) => void;
+  saveNoteViewPosition: (id: string, pos: Partial<Omit<NoteViewPosition, 'updatedAt'>>) => void;
   toggleSplit: (targetId?: string) => void;
   openInSecondary: (id: string, blockId?: string) => void;
   closeSplit: () => void;
@@ -39,6 +52,7 @@ export const useTabs = create<TabsState>()(
       secondaryTabId: null,
       focusedPane: 'primary',
       splitRatio: 0.5,
+      noteViewPositions: {},
       pendingScroll: {},
       openTab: (id, blockId) =>
         set((s) => {
@@ -138,6 +152,35 @@ export const useTabs = create<TabsState>()(
         if (b) set((s) => ({ pendingScroll: { ...s.pendingScroll, [id]: undefined } }));
         return b;
       },
+      saveNoteViewPosition: (id, pos) =>
+        set((s) => {
+          if (!id) return s;
+          const prev = s.noteViewPositions[id];
+          const nextEntry: NoteViewPosition = {
+            pageIndex: Math.max(0, Math.floor(pos.pageIndex ?? prev?.pageIndex ?? 0)),
+            scrollTop: Math.max(0, Number.isFinite(pos.scrollTop) ? (pos.scrollTop as number) : (prev?.scrollTop ?? 0)),
+            scrollLeft: Math.max(0, Number.isFinite(pos.scrollLeft) ? (pos.scrollLeft as number) : (prev?.scrollLeft ?? 0)),
+            zoom:
+              typeof pos.zoom === 'number' && Number.isFinite(pos.zoom)
+                ? pos.zoom
+                : prev?.zoom,
+            updatedAt: Date.now(),
+          };
+          const nextMap: Record<string, NoteViewPosition> = {
+            ...s.noteViewPositions,
+            [id]: nextEntry,
+          };
+          const keys = Object.keys(nextMap);
+          if (keys.length > MAX_SAVED_VIEW_POSITIONS) {
+            keys
+              .sort((a, b) => (nextMap[a]?.updatedAt ?? 0) - (nextMap[b]?.updatedAt ?? 0))
+              .slice(0, keys.length - MAX_SAVED_VIEW_POSITIONS)
+              .forEach((k) => {
+                delete nextMap[k];
+              });
+          }
+          return { noteViewPositions: nextMap };
+        }),
     }),
     {
       name: 'eduink-tabs',
@@ -147,6 +190,7 @@ export const useTabs = create<TabsState>()(
         splitOpen: s.splitOpen,
         secondaryTabId: s.secondaryTabId,
         splitRatio: s.splitRatio,
+        noteViewPositions: s.noteViewPositions,
       }),
     },
   ),

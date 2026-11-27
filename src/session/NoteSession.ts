@@ -38,6 +38,7 @@ import { adaptiveGlossary } from '../services/AdaptiveGlossaryService';
 import type { TranslationResolution } from '../types/adaptiveGlossary';
 import { getSessionUI, useSessions, type PendingCitation } from '../store/sessionStore';
 import { useSettings, type AiProviderId, type TranslationInsertMode } from '../store/settingsStore';
+import { useTabs } from '../store/tabsStore';
 import { toast, confirmDialog } from '../store/uiStore';
 import type { Annotation, AnnotationAnchor } from '../features/annotations/types';
 import {
@@ -189,11 +190,21 @@ export class NoteSession {
               orientation: settings.defaultOrientation,
             }),
           ];
+    const savedPos = useTabs.getState().noteViewPositions?.[record.id];
+    const restoredPageIndex = savedPos
+      ? Math.max(0, Math.min(initialPages.length - 1, Math.floor(savedPos.pageIndex)))
+      : 0;
+    const restoredZoom =
+      typeof savedPos?.zoom === 'number' && Number.isFinite(savedPos.zoom)
+        ? clampNoteZoom(savedPos.zoom)
+        : undefined;
+    this.navState = { ...this.navState, visible: restoredPageIndex };
     this.patch({
       annotations: record.annotations ?? [],
       textObjects: record.textObjects ?? [],
       pages: initialPages,
-      currentPageIndex: 0,
+      currentPageIndex: restoredPageIndex,
+      ...(restoredZoom !== undefined ? { zoom: restoredZoom } : {}),
       loaded: true,
       readOnly: false,
       external: null,
@@ -1017,6 +1028,7 @@ export class NoteSession {
     this.navState = { ...this.navState, visible: clamped };
     if (clamped !== this.ui.currentPageIndex) {
       this.patch({ currentPageIndex: clamped });
+      useTabs.getState().saveNoteViewPosition(this.id, { pageIndex: clamped });
     }
   }
 
@@ -1080,6 +1092,7 @@ export class NoteSession {
     const clamped = clampNoteZoom(zoom);
     if (clamped !== this.ui.zoom) {
       this.patch({ zoom: clamped });
+      useTabs.getState().saveNoteViewPosition(this.id, { zoom: clamped });
     }
     return clamped;
   }
